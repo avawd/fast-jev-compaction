@@ -1,10 +1,11 @@
 import type {
-  On, PluginOptions, Register, SessionMessage, ToolResultSummary, ToolUseSummary, TurnCompleteInput,
+  On, PluginOptions, Register, SessionCompactInput, SessionMessage, ToolResultSummary, ToolUseSummary,
+  TurnCompleteInput,
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
 import { makeScorer } from '../src/score.js';
-import type { ForkFn } from '../src/claude-scorer.js';
+import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
 
 export type HookConfig = {
@@ -14,6 +15,8 @@ export type HookConfig = {
   truncateHeadChars: number;
   maxCandidates: number;
   useClaudeScorer: boolean;
+  /** Past this the fork is abandoned and rules alone decide; below the engine's hook budget. */
+  claudeTimeoutMs: number;
 };
 
 const DEFAULTS: HookConfig = {
@@ -23,11 +26,16 @@ const DEFAULTS: HookConfig = {
   truncateHeadChars: 300,
   maxCandidates: 400,
   useClaudeScorer: true,
+  claudeTimeoutMs: 6000,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
   const value = options[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function positive(value: number, fallback: number): number {
+  return value > 0 ? value : fallback;
 }
 
 export function resolveHookConfig(options: PluginOptions): HookConfig {
@@ -39,6 +47,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
     maxCandidates: num(options, 'maxCandidates', DEFAULTS.maxCandidates),
     useClaudeScorer: typeof flag === 'boolean' ? flag : DEFAULTS.useClaudeScorer,
+    claudeTimeoutMs: positive(num(options, 'claudeTimeoutMs', DEFAULTS.claudeTimeoutMs), DEFAULTS.claudeTimeoutMs),
   };
 }
 
@@ -85,8 +94,15 @@ export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fork?: ForkFn,
+  sleep?: SleepFn,
 ): Promise<{ result: CompactResult; messages: SessionMessage[] }> {
-  const scorer = makeScorer({ fork, useClaudeScorer: config.useClaudeScorer, maxCandidates: config.maxCandidates });
+  const scorer = makeScorer({
+    fork,
+    sleep,
+    useClaudeScorer: config.useClaudeScorer,
+    maxCandidates: config.maxCandidates,
+    claudeTimeoutMs: config.claudeTimeoutMs,
+  });
   const result = await compact(messages, scorer, config);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
@@ -97,9 +113,39 @@ export function summarize(result: CompactResult): string {
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
 }
 
-function notify($: { ui: { log: (t: string) => void; toast: (t: string, o?: { timeoutMs?: number }) => void } }, text: string): void {
-  $.ui.log(`verbatim-compaction: ${text}`);
-  $.ui.toast(`verbatim-compaction: ${text}`, { timeoutMs: 15_000 });
+type Ui = { ui: { log: (t: string) => void; toast: (t: string, o?: { timeoutMs?: number }) => void } };
+
+/** Reports without ever throwing: a broken UI must not turn a good compaction into a failed hook. */
+function notify($: Ui, text: string, toast = true): void {
+  const line = `verbatim-compaction: ${text}`;
+  try {
+    $.ui.log(line);
+  } catch {
+    // Nothing else to report to.
+  }
+  if (!toast) return;
+  try {
+    $.ui.toast(line, { timeoutMs: 15_000 });
+  } catch {
+    // The log line above already carries it.
+  }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** `/compact <instructions>` asks for a focused summary, which pruning cannot give. */
+function wantsSummary(event: SessionCompactInput): boolean {
+  return event.trigger === 'manual' && typeof event.instructions === 'string' && event.instructions.trim().length > 0;
+}
+
+/**
+ * `$.model.fork` forks the main session, so it has nothing to say about a
+ * subagent's transcript; `precompute` installs nothing, so it is not worth a call.
+ */
+function mayFork(event: SessionCompactInput): boolean {
+  return event.agentId === undefined && event.trigger !== 'precompute';
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -107,30 +153,32 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    if (wantsSummary(event)) return next(event);
+    const toast = event.trigger !== 'precompute';
     try {
-      const fork: ForkFn = (request) => $.model.fork(request);
-      const { result, messages } = await compactSession(event.messages, config, fork);
+      const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
+      const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal: next.signal });
+      const { result, messages } = await compactSession(event.messages, config, fork, sleep);
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`);
+        notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, toast);
         return next(event);
       }
-      notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, toast);
       return { messages };
     } catch (error) {
-      notify($, `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`);
+      notify($, `fallback to built-in summary (${message(error)})`, toast);
       return next(event);
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting) return next(event);
+    if (compacting || event.agentId !== undefined || event.reason !== 'answer') return next(event);
+    compacting = true;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < config.compactAtPercent) return next(event);
-      compacting = true;
-      await $.session.compact();
+      if ((context.percent ?? 0) >= config.compactAtPercent) await $.session.compact();
     } catch (error) {
-      $.ui.log(`verbatim-compaction: auto-compact skipped (${error instanceof Error ? error.message : String(error)})`);
+      notify($, `auto-compact skipped (${message(error)})`, false);
     } finally {
       compacting = false;
     }
