@@ -87,11 +87,13 @@ describe('register', () => {
       expect(h.forkCalls).toHaveLength(1);
     });
 
-    it('falls back to next(event) when the fork throws and rules leave too little', async () => {
+    it('reports a thrown fork as claude 0 (error) but still prunes when rules alone clear the threshold', async () => {
       const h = harness({ fork: async () => { throw new Error('api down'); } });
-      const event = { trigger: 'auto', messages: claudeOnly() };
-      expect(await h.compact(event)).toBe(NEXT_RESULT);
-      expect(h.toasts.join('\n')).toMatch(/claude 0 \(error\)/);
+      const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
+      expect(out.messages).toBeDefined();
+      expect(h.nextCalls).toHaveLength(0);
+      expect(h.forkCalls).toHaveLength(1);
+      expect(h.toasts.join('\n')).toMatch(/rules 1, claude 0 \(error\)/);
     });
 
     it('falls back to next(event) on an unexpected error', async () => {
