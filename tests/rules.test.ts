@@ -64,6 +64,42 @@ describe('applyRules', () => {
     expect(v.get('t2')?.rule).toBe('stale_read');
   });
 
+  it('does not count a failed write as evidence', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'src/a.ts' }),
+      c('Edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }, { isError: true }),
+    ];
+    expect(applyRules(calls).size).toBe(0);
+  });
+
+  it('does not count a later ranged read as evidence', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'src/a.ts', offset: 1, limit: 50 }),
+      c('Read', { file_path: 'src/a.ts', offset: 900, limit: 50 }),
+    ];
+    expect(applyRules(calls).size).toBe(0);
+  });
+
+  it('makes a ranged read stale after a later full read', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'src/a.ts', offset: 1, limit: 50 }),
+      c('Read', { file_path: 'src/a.ts' }),
+    ];
+    expect(applyRules(calls).get('t1')?.rule).toBe('stale_read');
+  });
+
+  it('makes a read stale after a later successful edit', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'src/a.ts', offset: 1, limit: 50 }),
+      c('Edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }),
+    ];
+    expect(applyRules(calls).get('t1')?.rule).toBe('stale_read');
+  });
+
   it('leaves different paths and different inputs alone', () => {
     fresh();
     const calls = [

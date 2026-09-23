@@ -53,6 +53,21 @@ function pathOf(input: Record<string, unknown>): string | undefined {
   return typeof p === 'string' && p.length > 0 ? normalizePath(p) : undefined;
 }
 
+function isRanged(input: Record<string, unknown>): boolean {
+  return (input['offset'] ?? null) !== null || (input['limit'] ?? null) !== null;
+}
+
+/**
+ * Whether a call proves that earlier reads of its path are out of date: a
+ * successful write, or a successful full (unranged) read. A failed write
+ * changed nothing, and a ranged read may cover none of what an earlier one did.
+ */
+function supersedesReads(call: ToolCall): boolean {
+  if (call.isError) return false;
+  if (WRITE_TOOLS.has(call.tool)) return true;
+  return READ_TOOLS.has(call.tool) && !isRanged(call.input);
+}
+
 /**
  * Deterministic staleness verdicts. Scans newest to oldest, remembering what
  * later calls did, so each call is judged against everything after it. Pinned
@@ -81,7 +96,7 @@ export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
 
     if (!call.isError) successesLater.add(key);
     if (SEARCH_TOOLS.has(call.tool)) searchesLater.add(key);
-    if (path && (READ_TOOLS.has(call.tool) || WRITE_TOOLS.has(call.tool))) pathsTouchedLater.add(path);
+    if (path && supersedesReads(call)) pathsTouchedLater.add(path);
   }
   return verdicts;
 }
