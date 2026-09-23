@@ -18,7 +18,8 @@ export type HookConfig = {
   /**
    * Past this the fork is abandoned and rules alone decide. Clamped to
    * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS]; the only declared budget
-   * figure is the engine's own ten-second hook timeout.
+   * figure is the ten seconds the engine's test kit allows (not declared for
+   * live hooks).
    */
   claudeTimeoutMs: number;
 };

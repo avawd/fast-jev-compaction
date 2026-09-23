@@ -41,6 +41,9 @@ describe('resolveHookConfig', () => {
     expect(resolveHookConfig({ claudeTimeoutMs: 9000 }).claudeTimeoutMs).toBe(9000);
     expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(9000);
     expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(6000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(6000);
+    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(6000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 1234.5 }).claudeTimeoutMs).toBe(1234.5);
   });
 });
 
