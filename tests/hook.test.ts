@@ -163,6 +163,13 @@ describe('register', () => {
       expect(h.logs).toHaveLength(1);
     });
 
+    it('prefixes only the toast; the engine already names the plugin on log lines', async () => {
+      const h = harness({ fork: async () => ({ text: '{"drop":["t3"],"truncate":[]}' }) });
+      await h.compact(prunable());
+      expect(h.toasts[0]).toMatch(/^verbatim-compaction: /);
+      expect(h.logs.every((line) => !line.startsWith('verbatim-compaction'))).toBe(true);
+    });
+
     it('skips an empty transcript itself instead of passing empty messages to next', async () => {
       for (const extra of [{}, { instructions: 'keep the plan' }]) {
         const h = harness();

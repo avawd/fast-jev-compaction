@@ -129,9 +129,11 @@ type Ui = { ui: { log: (t: string) => void; toast: (t: string, o?: { timeoutMs?:
 
 /** Reports without ever throwing: a broken UI must not turn a good compaction into a failed hook. */
 function notify($: Ui, text: string, toast = true): void {
+  // The engine already prefixes a log line with the plugin's name (seen live on 2.1.281);
+  // the toast bar carries no attribution, so only the toast gets the prefix.
   const line = `verbatim-compaction: ${text}`;
   try {
-    $.ui.log(line);
+    $.ui.log(text);
   } catch {
     // Nothing else to report to.
   }
