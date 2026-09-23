@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compact, reductionRatio, type Message, type Scorer, type ToolCall } from '../src/index.js';
+import { compact, reductionRatio, resolveOptions, type Message, type Scorer, type ToolCall } from '../src/index.js';
 
 const big = 'x'.repeat(4000);
 
@@ -78,5 +78,19 @@ describe('compact', () => {
     const out = await compact(input, scorer);
     expect(out.messages).toHaveLength(input.length);
     expect(out.stats.callsDropped).toBe(0);
+  });
+});
+
+describe('resolveOptions', () => {
+  it('uses defaults for missing, NaN and infinite values', () => {
+    expect(resolveOptions()).toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300 });
+    expect(resolveOptions({ preserveRecentMessages: Number.NaN, truncateHeadChars: Number.POSITIVE_INFINITY }))
+      .toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300 });
+  });
+  it('clamps negatives to zero and floors fractions', () => {
+    expect(resolveOptions({ preserveRecentMessages: -3, truncateHeadChars: -1 }))
+      .toEqual({ preserveRecentMessages: 0, truncateHeadChars: 0 });
+    expect(resolveOptions({ preserveRecentMessages: 2.9, truncateHeadChars: 10.5 }))
+      .toEqual({ preserveRecentMessages: 2, truncateHeadChars: 10 });
   });
 });

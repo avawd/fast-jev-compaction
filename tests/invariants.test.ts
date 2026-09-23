@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compact, type Message, type Scorer } from '../src/index.js';
+import { compact, type Message, type Scorer, type ToolUse } from '../src/index.js';
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -14,14 +14,24 @@ function rng(seed: number): () => number {
 
 const TOOLS = ['Read', 'Edit', 'Grep', 'Bash'];
 
+function randomUse(r: () => number, id: string): ToolUse {
+  const tool = TOOLS[Math.floor(r() * TOOLS.length)]!;
+  const use: ToolUse = { tool_use_id: id, tool, input: { file_path: `src/f${Math.floor(r() * 4)}.ts` } };
+  if (r() < 0.3) use.text = 'o'.repeat(Math.floor(r() * 1500));
+  return use;
+}
+
 function randomTranscript(r: () => number): Message[] {
   const out: Message[] = [{ role: 'user', text: 'start', toolUses: [] }];
   const count = 5 + Math.floor(r() * 40);
   for (let i = 0; i < count; i += 1) {
-    const id = `u${i}`;
-    const tool = TOOLS[Math.floor(r() * TOOLS.length)]!;
-    out.push({ role: 'assistant', text: r() < 0.3 ? `thinking ${i}` : '', toolUses: [{ tool_use_id: id, tool, input: { file_path: `src/f${Math.floor(r() * 4)}.ts` } }] });
-    out.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: id, text: 'z'.repeat(Math.floor(r() * 2000)), isError: r() < 0.1 }] });
+    const ids = r() < 0.3 ? [`u${i}a`, `u${i}b`] : [`u${i}`];
+    const toolUses = ids.map((id) => randomUse(r, id));
+    const toolResults = ids.map((id) => ({
+      tool_use_id: id, text: 'z'.repeat(Math.floor(r() * 2000)), isError: r() < 0.1,
+    }));
+    out.push({ role: 'assistant', text: r() < 0.3 ? `thinking ${i}` : '', toolUses });
+    out.push({ role: 'user', text: '', toolUses: [], toolResults });
   }
   out.push({ role: 'user', text: 'end', toolUses: [] });
   return out;
@@ -50,7 +60,8 @@ describe('invariants over random transcripts', () => {
 
       expect(out.messages[0]).toBe(input[0]);
       const tail = input.slice(-4);
-      expect(out.messages.slice(-4)).toEqual(tail);
+      const outTail = out.messages.slice(-4);
+      tail.forEach((message, i) => expect(outTail[i]).toBe(message));
     }
   });
 });
