@@ -80,6 +80,13 @@ export function harness(options: FakeOptions = {}): Harness {
     if (!handler) throw new Error(`no ${name} hook registered`);
     const next = Object.assign(async (e: unknown) => {
       h.nextCalls.push(e);
+      // Mirrors the live engine (observed on 2.1.281): next() rejects a compaction
+      // argument whose `messages` is empty, even when passed through unchanged.
+      let msgs: unknown;
+      try { msgs = (e as { messages?: unknown } | undefined)?.messages; } catch { msgs = undefined; }
+      if (name === 'session.compact' && Array.isArray(msgs) && msgs.length === 0) {
+        throw new Error('next() passed an argument with an empty messages (a compaction leaves at least one)');
+      }
       return NEXT_RESULT;
     }, { signal: controller.signal });
     return handler($, event, next);

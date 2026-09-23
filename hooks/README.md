@@ -3,10 +3,13 @@
 `hooks/verbatim.ts` is the Claude Code function-hook module. It registers two hooks:
 
 - **`session.compact`** — fires on manual `/compact` and on the `turn.complete`-requested
-  auto-compaction below. Depending on the event it takes one of four paths:
+  auto-compaction below. Depending on the event it takes one of five paths:
   - **`trigger === 'precompute'`**: skipped outright, before rules or the fork ever run. Returns
     `{ skip: reason }` at once (one `$.ui.log` line, no toast, no `$.model.fork`); the real
     compaction that follows runs the full pipeline over its own transcript.
+  - **An empty transcript** (`event.messages` is empty): returns `{ skip: reason }` itself. The
+    engine's `next()` rejects a compaction argument with empty `messages`, even one passed through
+    unchanged, so handing it on would fail the hook.
   - **`/compact <instructions>`** (`wantsSummary`): handed to `next(event)` — instructions ask for
     a focused summary, which pruning cannot give.
   - **A subagent's own compaction** (`event.agentId` set): rules only, no `$.model.fork` — a fork

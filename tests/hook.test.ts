@@ -163,6 +163,17 @@ describe('register', () => {
       expect(h.logs).toHaveLength(1);
     });
 
+    it('skips an empty transcript itself instead of passing empty messages to next', async () => {
+      for (const extra of [{}, { instructions: 'keep the plan' }]) {
+        const h = harness();
+        const out = await h.compact({ trigger: 'manual', messages: [], ...extra });
+        expect(out).toMatchObject({ skip: expect.any(String) });
+        expect(h.nextCalls).toHaveLength(0);
+        expect(h.forkCalls).toHaveLength(0);
+        expect(h.toasts).toHaveLength(0);
+      }
+    });
+
     it('hands /compact <instructions> to the built-in summary', async () => {
       const h = harness();
       const event = { ...prunable(), trigger: 'manual', instructions: 'keep the plan' };

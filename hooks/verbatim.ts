@@ -160,6 +160,9 @@ function mayFork(event: SessionCompactInput): boolean {
 /** `precompute` computes and keeps nothing; the real compaction that follows runs the full pipeline. */
 const PRECOMPUTE_SKIP_REASON = 'precompute skipped; the real compaction runs the full pipeline';
 
+/** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
+const EMPTY_SKIP_REASON = 'nothing to compact yet';
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
@@ -169,12 +172,16 @@ export const register: Register = (on: On, options: PluginOptions) => {
       notify($, PRECOMPUTE_SKIP_REASON, false);
       return { skip: PRECOMPUTE_SKIP_REASON };
     }
-    if (wantsSummary(event)) return next(event);
     // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
     // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
     const cancelSleep = new AbortController();
     const signal = AbortSignal.any([next.signal, cancelSleep.signal]);
     try {
+      if (event.messages.length === 0) {
+        notify($, EMPTY_SKIP_REASON, false);
+        return { skip: EMPTY_SKIP_REASON };
+      }
+      if (wantsSummary(event)) return next(event);
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep);
