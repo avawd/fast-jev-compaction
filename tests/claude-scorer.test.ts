@@ -78,6 +78,20 @@ describe('scoreWithClaude', () => {
     expect(called).toBe(false);
     expect(out.status).toBe('skipped');
   });
+  it('gives up with status timeout when the fork outlasts the timeout', async () => {
+    const never: ForkFn = () => new Promise(() => {});
+    let waited = -1;
+    const sleep = async (ms: number) => { waited = ms; };
+    const out = await scoreWithClaude(never, calls, 400, { timeoutMs: 6000, sleep });
+    expect(out.status).toBe('timeout');
+    expect(out.verdicts.size).toBe(0);
+    expect(waited).toBe(6000);
+  });
+  it('uses the reply when the fork answers before the timeout', async () => {
+    const fork: ForkFn = async () => ({ text: '{"drop":["t2"],"truncate":[]}' });
+    const out = await scoreWithClaude(fork, calls, 400, { timeoutMs: 6000, sleep: () => new Promise(() => {}) });
+    expect(out.status).toBe('ran');
+  });
   it('treats a reply without string text as unparseable', async () => {
     const bad = (async () => ({})) as unknown as ForkFn;
     const out = await scoreWithClaude(bad, calls, 400);

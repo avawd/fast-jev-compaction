@@ -50,7 +50,7 @@ export interface Verdict {
 }
 
 /** What happened to the Claude stage in one compaction. */
-export type ClaudeStatus = 'ran' | 'skipped' | 'null' | 'unparseable' | 'error';
+export type ClaudeStatus = 'ran' | 'skipped' | 'null' | 'unparseable' | 'error' | 'timeout';
 
 export interface ScoreOutcome {
   /** Keyed by `ToolCall.id`. Calls absent from the map are kept. */

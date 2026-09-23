@@ -44,4 +44,17 @@ describe('makeScorer', () => {
     expect(out.claude).toBe('null');
     expect(out.verdicts.get('t1')?.rule).toBe('stale_read');
   });
+
+  it('keeps rule verdicts when the Claude stage times out', async () => {
+    const out = await makeScorer({
+      fork: () => new Promise(() => {}),
+      useClaudeScorer: true,
+      maxCandidates: 400,
+      claudeTimeoutMs: 6000,
+      sleep: async () => {},
+    })(calls);
+    expect(out.claude).toBe('timeout');
+    expect(out.verdicts.size).toBe(1);
+    expect(out.verdicts.get('t1')?.rule).toBe('stale_read');
+  });
 });

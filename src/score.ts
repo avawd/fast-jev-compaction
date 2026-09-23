@@ -1,4 +1,4 @@
-import { scoreWithClaude, type ForkFn } from './claude-scorer.js';
+import { scoreWithClaude, type ForkFn, type ForkTimeout, type SleepFn } from './claude-scorer.js';
 import { applyRules } from './rules.js';
 import type { Scorer } from './types.js';
 
@@ -6,6 +6,16 @@ export interface ScorerOptions {
   fork?: ForkFn;
   useClaudeScorer: boolean;
   maxCandidates: number;
+  /** How long the fork may take before the Claude stage gives up. Needs `sleep`. */
+  claudeTimeoutMs?: number;
+  /** The clock the timeout waits on. Without it the fork is not bounded. */
+  sleep?: SleepFn;
+}
+
+function forkTimeout(options: ScorerOptions): ForkTimeout | undefined {
+  const ms = options.claudeTimeoutMs;
+  if (!options.sleep || typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return { timeoutMs: ms, sleep: options.sleep };
 }
 
 /** Rules first; the calls they leave undecided go to one Claude fork. Rule verdicts always win. */
@@ -16,7 +26,7 @@ export function makeScorer(options: ScorerOptions): Scorer {
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };
     }
-    const claude = await scoreWithClaude(options.fork, undecided, options.maxCandidates);
+    const claude = await scoreWithClaude(options.fork, undecided, options.maxCandidates, forkTimeout(options));
     for (const [id, verdict] of claude.verdicts) if (!verdicts.has(id)) verdicts.set(id, verdict);
     return { verdicts, claude: claude.status };
   };
