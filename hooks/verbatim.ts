@@ -15,9 +15,16 @@ export type HookConfig = {
   truncateHeadChars: number;
   maxCandidates: number;
   useClaudeScorer: boolean;
-  /** Past this the fork is abandoned and rules alone decide; below the engine's hook budget. */
+  /**
+   * Past this the fork is abandoned and rules alone decide. Clamped to
+   * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS]; the only declared budget
+   * figure is the engine's own ten-second hook timeout.
+   */
   claudeTimeoutMs: number;
 };
+
+const MIN_CLAUDE_TIMEOUT_MS = 500;
+const MAX_CLAUDE_TIMEOUT_MS = 9000;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
@@ -34,8 +41,8 @@ function num(options: PluginOptions, key: keyof HookConfig, fallback: number): n
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function positive(value: number, fallback: number): number {
-  return value > 0 ? value : fallback;
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export function resolveHookConfig(options: PluginOptions): HookConfig {
@@ -47,7 +54,11 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
     maxCandidates: num(options, 'maxCandidates', DEFAULTS.maxCandidates),
     useClaudeScorer: typeof flag === 'boolean' ? flag : DEFAULTS.useClaudeScorer,
-    claudeTimeoutMs: positive(num(options, 'claudeTimeoutMs', DEFAULTS.claudeTimeoutMs), DEFAULTS.claudeTimeoutMs),
+    claudeTimeoutMs: clamp(
+      num(options, 'claudeTimeoutMs', DEFAULTS.claudeTimeoutMs),
+      MIN_CLAUDE_TIMEOUT_MS,
+      MAX_CLAUDE_TIMEOUT_MS,
+    ),
   };
 }
 

@@ -27,11 +27,20 @@ describe('resolveHookConfig', () => {
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 6000,
     });
-    expect(resolveHookConfig({ claudeTimeoutMs: -5 }).claudeTimeoutMs).toBe(6000);
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({
       useClaudeScorer: false, maxCandidates: 50,
     });
+  });
+
+  it('clamps claudeTimeoutMs to [500, 9000]', () => {
+    expect(resolveHookConfig({ claudeTimeoutMs: -5 }).claudeTimeoutMs).toBe(500);
+    expect(resolveHookConfig({ claudeTimeoutMs: 0 }).claudeTimeoutMs).toBe(500);
+    expect(resolveHookConfig({ claudeTimeoutMs: 499 }).claudeTimeoutMs).toBe(500);
+    expect(resolveHookConfig({ claudeTimeoutMs: 500 }).claudeTimeoutMs).toBe(500);
+    expect(resolveHookConfig({ claudeTimeoutMs: 9000 }).claudeTimeoutMs).toBe(9000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(9000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(6000);
   });
 });
 
