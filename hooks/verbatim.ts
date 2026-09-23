@@ -169,9 +169,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
       return { skip: PRECOMPUTE_SKIP_REASON };
     }
     if (wantsSummary(event)) return next(event);
+    // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
+    // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
+    const cancelSleep = new AbortController();
+    const signal = AbortSignal.any([next.signal, cancelSleep.signal]);
     try {
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
-      const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal: next.signal });
+      const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`);
@@ -182,6 +186,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch (error) {
       notify($, `fallback to built-in summary (${message(error)})`);
       return next(event);
+    } finally {
+      cancelSleep.abort();
     }
   });
 

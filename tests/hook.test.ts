@@ -115,7 +115,21 @@ describe('register', () => {
       const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
       expect(out.messages).toBeDefined();
       expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout\)/);
-      expect(h.sleeps).toEqual([{ ms: 6000, signal: h.signal }]);
+      expect(h.sleeps).toHaveLength(1);
+      expect(h.sleeps[0]?.ms).toBe(6000);
+    });
+
+    it('cancels the pending timeout sleep once a fast fork wins the race', async () => {
+      let sleepSignal: AbortSignal | undefined;
+      const h = harness({
+        fork: async () => ({ text: '{"drop":["t3"],"truncate":[]}' }),
+        sleep: (_ms, opts) => { sleepSignal = opts?.signal; return new Promise(() => {}); },
+      });
+      await h.compact(prunable());
+      expect(sleepSignal).toBeDefined();
+      expect(sleepSignal?.aborted).toBe(true);
+      // The dispatch's own signal (next.signal) must stay untouched: cancellation is local.
+      expect(h.signal.aborted).toBe(false);
     });
 
     it('honours a configured claudeTimeoutMs', async () => {
