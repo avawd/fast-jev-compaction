@@ -1,7 +1,6 @@
 node_modules
 dist
 .env
-demo/JevDemo/build
 .env*
 *.pem
 *.key
