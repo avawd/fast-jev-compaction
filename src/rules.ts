@@ -1,4 +1,3 @@
-import { posix } from 'node:path';
 import type { ToolCall, Verdict } from './types.js';
 
 const READ_TOOLS = new Set(['Read']);
@@ -17,8 +16,35 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
+/**
+ * A pure-JS equivalent of Node's `path.posix.normalize`: resolves `.` and
+ * `..` segments and collapses repeated slashes. Kept dependency-free (no
+ * `node:path`) because this runs inside the hooks module's sandbox, which
+ * has no Node built-ins.
+ */
+function posixNormalize(p: string): string {
+  if (p.length === 0) return '.';
+  const isAbsolute = p.charCodeAt(0) === 47; // '/'
+  const trailingSlash = p.charCodeAt(p.length - 1) === 47 && p.length > 1;
+  const resolved: string[] = [];
+  for (const segment of p.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (resolved.length > 0 && resolved[resolved.length - 1] !== '..') resolved.pop();
+      else if (!isAbsolute) resolved.push('..');
+    } else {
+      resolved.push(segment);
+    }
+  }
+  let result = resolved.join('/');
+  if (isAbsolute) result = `/${result}`;
+  if (result.length === 0) result = isAbsolute ? '/' : '.';
+  if (trailingSlash && !result.endsWith('/')) result += '/';
+  return result;
+}
+
 export function normalizePath(p: string): string {
-  const normalized = posix.normalize(p);
+  const normalized = posixNormalize(p);
   return normalized.startsWith('./') ? normalized.slice(2) : normalized;
 }
 

@@ -1,62 +1,14 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "name": "verbatim-compaction",
+  "version": "0.4.0",
+  "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
   "license": "MIT",
   "userConfig": {
-    "apiKey": {
-      "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
-      "sensitive": true
-    },
-    "keepThreshold": {
-      "type": "number",
-      "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
-      "default": 0.5
-    },
-    "preserveRecentMessages": {
-      "type": "number",
-      "title": "Recent messages to preserve",
-      "description": "Number of newest messages pinned from compaction.",
-      "default": 6
-    },
-    "compactAtPercent": {
-      "type": "number",
-      "title": "Compaction percentage",
-      "description": "Context percentage at which turn.complete requests compaction.",
-      "default": 60
-    },
-    "minReductionRatio": {
-      "type": "number",
-      "title": "Minimum reduction ratio",
-      "description": "Minimum estimated character reduction required to replace history.",
-      "default": 0.25
-    },
-    "maxStateTokens": {
-      "type": "number",
-      "title": "Maximum Jev state tokens",
-      "description": "Estimated token budget for the conversation state sent with every Jev request.",
-      "default": 25000
-    },
-    "maxRequestTokens": {
-      "type": "number",
-      "title": "Maximum Jev request tokens",
-      "description": "Estimated token budget for state plus questions in one Jev request.",
-      "default": 30000
-    },
-    "truncateHeadChars": {
-      "type": "number",
-      "title": "Truncated tool result head",
-      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
-      "default": 300
-    },
-    "model": {
-      "type": "string",
-      "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
-      "default": "jev-latest"
-    }
+    "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction.", "default": 60 },
+    "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum estimated character reduction required to replace history; below it the built-in summary runs.", "default": 0.25 },
+    "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched.", "default": 6 },
+    "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },
+    "maxCandidates": { "type": "number", "title": "Maximum Claude candidates", "description": "Most tool calls listed for the Claude fork, largest outputs first.", "default": 400 },
+    "useClaudeScorer": { "type": "boolean", "title": "Use Claude scorer", "description": "Ask one tool-less fork of the session about calls the rules leave undecided. Off: rules only, no model call.", "default": true }
   }
 }
