@@ -1,30 +1,22 @@
-import { noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { collectToolCalls } from './calls.js';
 import type {
-  CallAnswer,
   CallDecision,
   CompactOptions,
   CompactResult,
-  CompactionState,
-  JevAsker,
-  JevQuestions,
   Message,
   ResolvedCompactOptions,
+  Scorer,
+  ScoreOutcome,
   ToolCall,
   ToolUse,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
-  goal: '',
-  keepThreshold: 0.5,
   preserveRecentMessages: 6,
-  maxStateTokens: 25_000,
-  maxRequestTokens: 30_000,
   truncateHeadChars: 300,
 };
 
-/** Tokens the request envelope (`model`, key names) adds around state and questions. */
-const REQUEST_OVERHEAD_TOKENS = 20;
+export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -32,18 +24,9 @@ function finite(value: number | undefined, fallback: number): number {
 
 export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOptions {
   return {
-    goal: options.goal ?? DEFAULT_OPTIONS.goal,
-    keepThreshold: finite(options.keepThreshold, DEFAULT_OPTIONS.keepThreshold),
     preserveRecentMessages: Math.max(
       0,
-      Math.floor(
-        finite(options.preserveRecentMessages, DEFAULT_OPTIONS.preserveRecentMessages),
-      ),
-    ),
-    maxStateTokens: Math.max(1, finite(options.maxStateTokens, DEFAULT_OPTIONS.maxStateTokens)),
-    maxRequestTokens: Math.max(
-      1,
-      finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
+      Math.floor(finite(options.preserveRecentMessages, DEFAULT_OPTIONS.preserveRecentMessages)),
     ),
     truncateHeadChars: Math.max(
       0,
@@ -52,90 +35,10 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
   };
 }
 
-/** The two `noul` questions asked about one call: keep the call, keep its result. */
-export function questionsFor(call: ToolCall): JevQuestions {
-  return {
-    [`call_${call.id}`]: {
-      type: 'noul',
-      instructions: `Tool call ${call.id} (${call.tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next`,
-    },
-    [`result_${call.id}`]: {
-      type: 'noul',
-      instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
-    },
-  };
-}
-
-/**
- * Splits the candidate calls into batches whose questions, together with the
- * (always complete) state, fit one request.
- */
-export function batchCalls(
-  calls: readonly ToolCall[],
-  stateTokens: number,
-  options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
-): ToolCall[][] {
-  const budget = options.maxRequestTokens - stateTokens - REQUEST_OVERHEAD_TOKENS;
-  const batches: ToolCall[][] = [];
-  let current: ToolCall[] = [];
-  let currentTokens = 0;
-  for (const call of calls) {
-    const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
-    if (current.length > 0 && currentTokens + tokens > budget) {
-      batches.push(current);
-      current = [];
-      currentTokens = 0;
-    }
-    if (current.length === 0 && tokens > budget) {
-      throw new Error(
-        `state leaves no room for questions (~${stateTokens} of ${options.maxRequestTokens} tokens)`,
-      );
-    }
-    current.push(call);
-    currentTokens += tokens;
-  }
-  if (current.length > 0) batches.push(current);
-  return batches;
-}
-
-export function decideCall(
-  call: Pick<ToolCall, 'id' | 'tool' | 'pinned'>,
-  answer: CallAnswer,
-  options: Pick<ResolvedCompactOptions, 'keepThreshold'>,
-): CallDecision {
-  const base = { id: call.id, tool: call.tool, ...answer };
-  if (call.pinned) return { ...base, action: 'keep', reason: 'pinned' };
-  if (answer.keepResult >= options.keepThreshold) {
-    return { ...base, action: 'keep', reason: 'kept' };
-  }
-  if (answer.keepCall >= options.keepThreshold) {
-    return { ...base, action: 'drop_result', reason: 'result_dropped' };
-  }
-  return { ...base, action: 'drop_call', reason: 'call_dropped' };
-}
-
-async function askBatch(
-  asker: JevAsker,
-  state: CompactionState,
-  batch: readonly ToolCall[],
-): Promise<Map<string, CallAnswer>> {
-  const questions: JevQuestions = Object.assign({}, ...batch.map(questionsFor));
-  const { answers } = await asker.ask(state, questions);
-  return new Map(
-    batch.map((call) => [
-      call.id,
-      {
-        keepCall: noulAnswer(answers, `call_${call.id}`),
-        keepResult: noulAnswer(answers, `result_${call.id}`),
-      },
-    ]),
-  );
-}
-
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - headChars} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }
@@ -243,50 +146,39 @@ export function reductionRatio(result: Pick<CompactResult, 'stats'>): number {
   return charsBefore === 0 ? 0 : (charsBefore - charsAfter) / charsBefore;
 }
 
-function count(decisions: readonly CallDecision[], reason: CallDecision['reason']): number {
-  return decisions.filter((decision) => decision.reason === reason).length;
-}
-
 /**
- * Compacts a transcript by asking Jev, for every tool call outside the pinned
- * first and newest messages, whether the call and whether its result must
- * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
- * sent as state with every batch of questions. Throws when Jev fails or the
- * history cannot be fitted; the caller decides whether to fall back.
+ * Compacts a transcript: every paired call goes to `scorer`, and its verdicts
+ * drop or truncate unpinned calls. Verdicts naming pinned or unknown calls are
+ * ignored. Throws only if the scorer throws; the caller decides the fallback.
  */
 export async function compact(
   messages: readonly Message[],
-  asker: JevAsker,
+  scorer: Scorer,
   options: CompactOptions = {},
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
-  const candidates = calls.filter((call) => !call.pinned);
-  const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  const charsBefore = messages.reduce((sum, m) => sum + messageChars(m), 0);
+  const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
+    ? await scorer(calls)
+    : { verdicts: new Map(), claude: 'skipped' };
 
-  let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
-  let batches: ToolCall[][] = [];
-  const answers = new Map<string, CallAnswer>();
-  if (candidates.length > 0) {
-    const state = fitState(messages, calls, resolved);
-    fitted = state;
-    batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
-    );
-    for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
-  }
-
-  const decisions = calls.map((call) =>
-    decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
-  );
-  const kept = applyDecisions(
-    messages,
-    decisions,
-    calls,
-    resolved.truncateHeadChars,
-  );
+  const decisions: CallDecision[] = calls.map((call) => {
+    if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
+    const verdict = outcome.verdicts.get(call.id);
+    if (!verdict) return { id: call.id, tool: call.tool, action: 'keep', source: 'default' };
+    const decision: CallDecision = {
+      id: call.id,
+      tool: call.tool,
+      action: verdict.action,
+      source: verdict.source,
+    };
+    if (verdict.rule) decision.rule = verdict.rule;
+    return decision;
+  });
+  const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
+  const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
   return {
     messages: kept,
     decisions,
@@ -294,15 +186,15 @@ export async function compact(
       messagesBefore: messages.length,
       messagesAfter: kept.length,
       charsBefore,
-      charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
+      charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
       calls: calls.length,
-      kept: count(decisions, 'kept'),
-      resultsDropped: count(decisions, 'result_dropped'),
-      callsDropped: count(decisions, 'call_dropped'),
-      pinned: count(decisions, 'pinned'),
-      stateTokens: fitted.tokens,
-      stateStage: fitted.stage,
-      requests: batches.length,
+      kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
+      resultsDropped: by((d) => d.action === 'drop_result'),
+      callsDropped: by((d) => d.action === 'drop_call'),
+      pinned: by((d) => d.source === 'pinned'),
+      byRule: by((d) => d.source === 'rule'),
+      byClaude: by((d) => d.source === 'claude'),
+      claude: outcome.claude,
       ms: Date.now() - started,
     },
   };
