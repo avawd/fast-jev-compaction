@@ -134,9 +134,11 @@ describe('register', () => {
       expect(h.toasts[0]).toMatch(/claude 0 \(skipped\)/);
     });
 
-    it('does not fork or toast on precompute', async () => {
+    it('skips precompute outright: engine skip shape, no fork, no toast', async () => {
       const h = harness();
-      await h.compact({ ...prunable(), trigger: 'precompute' });
+      const out = await h.compact({ ...prunable(), trigger: 'precompute' });
+      expect(out).toMatchObject({ skip: expect.any(String) });
+      expect((out as { messages?: unknown }).messages).toBeUndefined();
       expect(h.forkCalls).toHaveLength(0);
       expect(h.toasts).toHaveLength(0);
       expect(h.logs).toHaveLength(1);

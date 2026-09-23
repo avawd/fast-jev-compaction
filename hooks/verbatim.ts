@@ -151,33 +151,36 @@ function wantsSummary(event: SessionCompactInput): boolean {
   return event.trigger === 'manual' && typeof event.instructions === 'string' && event.instructions.trim().length > 0;
 }
 
-/**
- * `$.model.fork` forks the main session, so it has nothing to say about a
- * subagent's transcript; `precompute` installs nothing, so it is not worth a call.
- */
+/** `$.model.fork` forks the main session, so it has nothing to say about a subagent's transcript. */
 function mayFork(event: SessionCompactInput): boolean {
-  return event.agentId === undefined && event.trigger !== 'precompute';
+  return event.agentId === undefined;
 }
+
+/** `precompute` computes and keeps nothing; the real compaction that follows runs the full pipeline. */
+const PRECOMPUTE_SKIP_REASON = 'precompute skipped; the real compaction runs the full pipeline';
 
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    if (event.trigger === 'precompute') {
+      notify($, PRECOMPUTE_SKIP_REASON, false);
+      return { skip: PRECOMPUTE_SKIP_REASON };
+    }
     if (wantsSummary(event)) return next(event);
-    const toast = event.trigger !== 'precompute';
     try {
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal: next.signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep);
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, toast);
+        notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`);
         return next(event);
       }
-      notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, toast);
+      notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
       return { messages };
     } catch (error) {
-      notify($, `fallback to built-in summary (${message(error)})`, toast);
+      notify($, `fallback to built-in summary (${message(error)})`);
       return next(event);
     }
   });

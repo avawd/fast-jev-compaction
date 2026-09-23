@@ -75,8 +75,10 @@ canonical JSON with sorted keys. A rule never targets a pinned call; pinned call
   something unparseable, or has not answered within `claudeTimeoutMs` (status `timeout`), stage 2 counts
   as having decided nothing. Stage 1's decisions still apply. The timeout waits on `$.clock.sleep`,
   injected into the library, and is aborted with the hook's dispatch.
-- **When stage 2 is not asked:** a subagent's own compaction (`agentId` set) and a `precompute` run use
-  stage 1 only; the fork forks the main session, and a precompute installs nothing (it logs, no toast).
+- **When stage 2 is not asked:** a subagent's own compaction (`agentId` set) uses stage 1 only; the fork
+  can only fork the main session. A `precompute` run is skipped outright, before either stage runs: the
+  hook returns `{ skip: reason }` at once (one log line, no toast, no fork). The real compaction that
+  follows runs the full pipeline over its own transcript.
 
 ## Deciding and applying
 

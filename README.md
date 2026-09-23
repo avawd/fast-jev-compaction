@@ -12,8 +12,8 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
 2. **Claude** (optional): one tool-less `$.model.fork` of your own session is shown the remaining
    candidates and returns `{"drop":[…],"truncate":[…]}`. It reuses the session's prompt cache and model.
    A cold cache, an error, or a fork slower than `claudeTimeoutMs` falls back to the rules alone. A
-   subagent's own compaction and a `precompute` run use the rules only (the fork can only fork the main
-   session, and a precompute installs nothing).
+   subagent's own compaction uses the rules only (the fork can only fork the main session). A
+   `precompute` run is skipped outright; the real compaction that follows runs the full pipeline.
 
 If the result saves less than `minReductionRatio`, Claude Code's built-in summary runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
