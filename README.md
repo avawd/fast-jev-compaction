@@ -52,6 +52,8 @@ claude plugin install verbatim-compaction@verbatim-compaction
 
 The fork reads your session's cached prefix at the model's cache-read rate plus a short JSON reply:
 roughly $0.05–0.15 per compaction on a large session (estimate; depends on context size and model).
+A fork that outlasts `claudeTimeoutMs` cannot be cancelled: the hook stops waiting on it and rules
+alone decide, but the fork itself keeps running server-side and is still billed.
 `useClaudeScorer: false` is free.
 
 ## Development
