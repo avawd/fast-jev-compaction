@@ -85,6 +85,7 @@ export async function scoreWithClaude(
     return { verdicts: new Map(), status: 'error' };
   }
   if (reply === null) return { verdicts: new Map(), status: 'null' };
+  if (typeof reply.text !== 'string') return { verdicts: new Map(), status: 'unparseable' };
   const verdicts = parseReply(reply.text, new Set(candidates.map((x) => x.id)));
   return verdicts ? { verdicts, status: 'ran' } : { verdicts: new Map(), status: 'unparseable' };
 }

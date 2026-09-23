@@ -78,4 +78,10 @@ describe('scoreWithClaude', () => {
     expect(called).toBe(false);
     expect(out.status).toBe('skipped');
   });
+  it('treats a reply without string text as unparseable', async () => {
+    const bad = (async () => ({})) as unknown as ForkFn;
+    const out = await scoreWithClaude(bad, calls, 400);
+    expect(out.status).toBe('unparseable');
+    expect(out.verdicts.size).toBe(0);
+  });
 });
