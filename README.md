@@ -6,13 +6,25 @@ are dropped or truncated; everything else, including every user and assistant me
 Forked from [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (MIT).
 Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third party:
 
-1. **Rules** (local, free): a read of a file that is later edited or re-read is truncated; an identical
-   search repeated later is dropped; a failed call later retried successfully is dropped.
+1. **Rules** (local, free): a read of a file that is later successfully edited or read again in full is
+   truncated (a later ranged read or a failed edit does not count); an identical search repeated later is
+   dropped; a failed call later retried successfully is dropped.
 2. **Claude** (optional): one tool-less `$.model.fork` of your own session is shown the remaining
    candidates and returns `{"drop":[…],"truncate":[…]}`. It reuses the session's prompt cache and model.
-   A cold cache or error falls back to the rules alone.
+   A cold cache, an error, or a fork slower than `claudeTimeoutMs` falls back to the rules alone. A
+   subagent's own compaction and a `precompute` run use the rules only (the fork can only fork the main
+   session, and a precompute installs nothing).
 
-If the result saves less than `minReductionRatio`, Claude Code's built-in summary runs instead.
+If the result saves less than `minReductionRatio`, Claude Code's built-in summary runs instead. So does
+`/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
+`/compact` prunes.
+
+### What changes in a pruned message
+
+Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back
+exactly as Claude Code had them. A message that loses or truncates a tool call is rebuilt from its role,
+its text and its tool blocks only: images and documents, thinking blocks and the original order of its
+blocks are not preserved in that message.
 
 ## Install
 
@@ -34,11 +46,13 @@ claude plugin install verbatim-compaction@verbatim-compaction
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
+| `claudeTimeoutMs` | 6000 | Longest wait for the fork; past it the rules alone decide. Keep it well under the hook's time budget (ten seconds in the engine's test kit; not declared for live hooks) |
 
 ## Cost
 
-The fork reads your session's cached prefix at the model's cache-read rate plus a short JSON reply. On a
-large session that is roughly tens of cents per compaction; `useClaudeScorer: false` makes it free.
+The fork reads your session's cached prefix at the model's cache-read rate plus a short JSON reply:
+roughly $0.05–0.15 per compaction on a large session (estimate; depends on context size and model).
+`useClaudeScorer: false` is free.
 
 ## Development
 

@@ -1,6 +1,6 @@
 # Claude-scored verbatim compaction: design
 
-**Status:** approved design, not yet implemented.
+**Status:** implemented on branch claude-scorer.
 **Branch:** `claude-scorer`.
 
 ## Goal
@@ -48,13 +48,12 @@ Only `undecided` calls go on to stage 2.
 
 | Rule | Condition | Decision |
 |---|---|---|
-| Stale read | A `Read` of path P is followed later by `Edit`, `Write` or `MultiEdit` on P, or by another `Read` of P | `truncate` (the call stays; the old contents go) |
+| Stale read | A `Read` of path P is followed later by a successful `Edit`, `Write`, `MultiEdit` or `NotebookEdit` on P, or by a successful full `Read` of P (no `offset`/`limit`). A later ranged read or a failed write is not evidence; an earlier ranged read can still go stale | `truncate` (the call stays; the old contents go) |
 | Repeated search | A `Grep`, `Glob` or `LS` call is later repeated with identical input | `drop` the older one |
 | Failed then fixed | A call with `isError` is later repeated with identical input without error | `drop` the failed one |
 
 Paths are compared after normalizing (`./` stripped, same absolute form). Inputs are compared as
-canonical JSON with sorted keys. A rule never fires on a pinned call, and never uses a pinned call as
-its only evidence. The evidence may be pinned; the target may not.
+canonical JSON with sorted keys. A rule never targets a pinned call; pinned calls do count as evidence.
 
 ## Stage 2: Claude via `$.model.fork`
 
@@ -72,8 +71,12 @@ its only evidence. The evidence may be pinned; the target may not.
   - Both keys must be arrays of strings.
   - Unknown or duplicate ids are ignored.
   - An id listed under both keys resolves to `truncate`, the less destructive action.
-- **When stage 2 fails:** if the fork returns `null` (cold cache or API error), throws, or replies with
-  something unparseable, stage 2 counts as having decided nothing. Stage 1's decisions still apply.
+- **When stage 2 fails:** if the fork returns `null` (cold cache or API error), throws, replies with
+  something unparseable, or has not answered within `claudeTimeoutMs` (status `timeout`), stage 2 counts
+  as having decided nothing. Stage 1's decisions still apply. The timeout waits on `$.clock.sleep`,
+  injected into the library, and is aborted with the hook's dispatch.
+- **When stage 2 is not asked:** a subagent's own compaction (`agentId` set) and a `precompute` run use
+  stage 1 only; the fork forks the main session, and a precompute installs nothing (it logs, no toast).
 
 ## Deciding and applying
 
@@ -84,13 +87,14 @@ its only evidence. The evidence may be pinned; the target may not.
 - If the estimated character reduction is below `minReductionRatio` (default 0.25), the hook hands over
   to Claude Code's built-in compaction via `next(event)`. The same happens on any unexpected error.
 - The toast and log report per-stage counts (rules/Claude/kept/pinned), the reduction, and whether the
-  fork ran, returned `null` or failed to parse.
+  fork ran, returned `null`, failed to parse, errored or timed out.
 
 ## Trigger
 
 This is unchanged from upstream. `turn.complete` requests compaction when `context.percent` reaches
-`compactAtPercent` (default 60), with the same guard against overlapping runs. `session.compact`
-handles both that request and manual `/compact`.
+`compactAtPercent` (default 60), with the same guard against overlapping runs (set before usage is
+read). Subagent turns and turns that did not end in an answer are ignored. `session.compact` handles both
+that request and manual `/compact`; `/compact <instructions>` goes to the built-in summary.
 
 ## Configuration (`userConfig`)
 
@@ -102,6 +106,7 @@ handles both that request and manual `/compact`.
 | `truncateHeadChars` | 300 | unchanged |
 | `maxCandidates` | 400 | new |
 | `useClaudeScorer` | true | new; `false` means rules only, with no model call |
+| `claudeTimeoutMs` | 6000 | new; past it the fork is abandoned (status `timeout`) and rules alone decide |
 
 These are removed: `apiKey`, `keepThreshold`, `maxStateTokens`, `maxRequestTokens`, `model`.
 
@@ -129,6 +134,9 @@ Setting `useClaudeScorer: false` makes every compaction free.
 - **`score.test.ts`:** how the two stages merge, and that a stage 2 failure leaves the stage 1 result.
 - **`hook.test.ts`** (adapted): fallback on low reduction and on errors, toast text, and that
   `toSessionMessages` returns objects unchanged when nothing changed.
+  `register()` is exercised through a fake `on`/`$` harness (`tests/harness.ts`): fallback, success,
+  timeout, subagent, precompute, `/compact <instructions>`, a throwing UI, and the `turn.complete`
+  threshold, in-flight guard and ignored turns.
 - **Apply step:** property checks that no result is left without its call and all text survives, over
   randomized transcripts.
 - **Live check:** start Claude Code with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .` from
