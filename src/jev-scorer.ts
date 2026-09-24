@@ -1,11 +1,20 @@
+import { sliceWhole } from './text.js';
 import type { ToolCall } from './types.js';
 
 /**
  * The Jev-style question set, asked of a session fork instead of TypeSafe's
- * System One: for every candidate call two keep scores, one for the call and
- * one for its result, decided against `keepThreshold` exactly as Jev's
- * `decideCall` does. Pure functions only; running the forks lives in
- * claude-scorer.ts.
+ * System One: for every candidate call Jev's two questions, whether the call
+ * still matters and whether its result must stay verbatim, decided as Jev's
+ * `decideCall` does (result → keep, else call → truncate, else drop).
+ *
+ * The answers come back as three JSON id lists, not as per-call scores. Live
+ * on 2.1.281 the API rejected every fork asked for one line per call (`t12 93`
+ * digit scores and `t12 K|T|D` letters alike: `api-error`, `invalid_request`,
+ * no status, 0 output tokens) once there were 10 or more candidates, while the
+ * same candidates under a JSON-lists reply passed at 10, 30 and 60. So Jev's
+ * probabilities cannot be asked for; `keepThreshold` survives only as the
+ * mapping of the `unsure` list (see `decide`). Pure functions only; running
+ * the forks lives in claude-scorer.ts.
  */
 
 /** Most characters of a call's input shown on its candidate line. */
@@ -14,8 +23,6 @@ export const INPUT_CHARS = 400;
 export const PREVIEW_CHARS = 80;
 /** Most candidates asked about in one fork; more are split over concurrent forks. */
 export const DEFAULT_CHUNK_SIZE = 60;
-/** The line that must close a reply, so a cut-off reply can be told from a complete one. */
-export const SENTINEL = 'END';
 
 export interface JevContext {
   /** Messages in the transcript, for the `msg i/N` position. */
@@ -28,25 +35,18 @@ export interface JevContext {
   refLater?: ReadonlyMap<string, number>;
 }
 
-/** Keep scores for one call, each a digit 0..9 (9 = certainly keep). */
-export interface JevScore {
-  call: number;
-  result: number;
+/** The fork's answer: which calls fall in each list. A call in none of them is dropped. */
+export interface JevAnswer {
+  resultNeeded: Set<string>;
+  callMatters: Set<string>;
+  unsure: Set<string>;
 }
-
-export type JevParse =
-  | { ok: true; scores: Map<string, JevScore> }
-  | { ok: false; reason: 'no-sentinel' };
 
 export type JevAction = 'keep' | 'drop_result' | 'drop_call';
 
 /** Cuts to at most `limit` chars with a trailing `…`, never splitting a surrogate pair. */
 function clip(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  let end = Math.max(0, limit - 1);
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return `${text.slice(0, end)}…`;
+  return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
 }
 
 const CD_PREFIX = /^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*/;
@@ -109,54 +109,62 @@ export function jevCandidateLine(call: ToolCall, ctx: JevContext): string {
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
   return [
     'Context maintenance request. Do not continue the task and do not call tools.',
-    'This conversation is about to be compacted. Below are earlier tool calls from it, one per line:',
-    'id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
-    'For every call give two digits from 0 (certainly no longer needed) to 9 (certainly still needed):',
-    '- first, the CALL: knowing this call was made, with its input, still matters for what comes next;',
-    '- second, the RESULT: its full output must stay verbatim because its exact text is still needed and re-running would not do.',
+    'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
-    'A high first digit with a low second one truncates the output; two low digits remove the call and its output.',
-    `Reply with one line per call, exactly "<id> <call digit><result digit>", for example "t12 93", then a last line "${SENTINEL}". No other text. A call you leave out is kept.`,
+    'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
+    'Reply with JSON only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[]}',
+    'A call in result_needed is kept whole; one only in call_matters or in unsure keeps the call but its output is truncated; one in none of them is removed with its output.',
     '',
     ...calls.map((call) => jevCandidateLine(call, ctx)),
   ].join('\n');
 }
 
-const SCORE_LINE = /^\s*(t\d+)\s+([0-9])\s?([0-9])\s*$/;
-
-/**
- * Reads `<id> <call><result>` lines up to the `END` sentinel. Unknown ids and
- * malformed lines are ignored; a repeated id keeps the higher of each digit
- * (the safer reading). Without the sentinel the reply may have been cut off,
- * so it is rejected unless it scored every id asked about; a partial reply is
- * never applied partially.
- */
-export function parseJevReply(text: string, ids: ReadonlySet<string>): JevParse {
-  const scores = new Map<string, JevScore>();
-  let sentinel = false;
-  for (const raw of text.split(/\r?\n/)) {
-    if (raw.trim() === SENTINEL) {
-      sentinel = true;
-      break;
-    }
-    const match = SCORE_LINE.exec(raw);
-    if (!match || !ids.has(match[1]!)) continue;
-    const score = { call: Number(match[2]), result: Number(match[3]) };
-    const prior = scores.get(match[1]!);
-    scores.set(
-      match[1]!,
-      prior ? { call: Math.max(prior.call, score.call), result: Math.max(prior.result, score.result) } : score,
-    );
-  }
-  if (!sentinel && (ids.size === 0 || scores.size < ids.size)) return { ok: false, reason: 'no-sentinel' };
-  return { ok: true, scores };
+function idList(value: unknown, ids: ReadonlySet<string>): Set<string> | undefined {
+  if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return undefined;
+  return new Set((value as string[]).filter((id) => ids.has(id)));
 }
 
-/** Jev's decision: result ≥ threshold keeps; else call ≥ threshold truncates; else drops. A digit d reads as d/9. */
-export function decide(score: JevScore, keepThreshold: number): JevAction {
-  if (score.result / 9 >= keepThreshold) return 'keep';
-  if (score.call / 9 >= keepThreshold) return 'drop_result';
-  return 'drop_call';
+/**
+ * Parses the reply's JSON object (first `{` to last `}`). `result_needed` and
+ * `call_matters` must both be string arrays and `unsure` one when present;
+ * anything else, a cut-off reply included, is undefined and decides nothing,
+ * since an absent id means "drop". Unknown ids are ignored.
+ */
+export function parseJevReply(text: string, ids: ReadonlySet<string>): JevAnswer | undefined {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined;
+  const record = parsed as Record<string, unknown>;
+  const resultNeeded = idList(record['result_needed'], ids);
+  const callMatters = idList(record['call_matters'], ids);
+  const unsure = record['unsure'] === undefined ? new Set<string>() : idList(record['unsure'], ids);
+  if (!resultNeeded || !callMatters || !unsure) return undefined;
+  return { resultNeeded, callMatters, unsure };
+}
+
+/**
+ * What `unsure` becomes: `keepThreshold` is how sure a call must be to stay,
+ * so a low one keeps the doubtful whole (< 0.5), the default truncates them
+ * (0.5–0.75), a high one removes them (> 0.75).
+ */
+export function unsureAction(keepThreshold: number): JevAction {
+  if (keepThreshold < 0.5) return 'keep';
+  return keepThreshold <= 0.75 ? 'drop_result' : 'drop_call';
+}
+
+/** Jev's decision per call; when lists overlap the one that keeps more wins. */
+export function decide(id: string, answer: JevAnswer, keepThreshold: number): JevAction {
+  if (answer.resultNeeded.has(id)) return 'keep';
+  const unsure = answer.unsure.has(id) ? unsureAction(keepThreshold) : 'drop_call';
+  if (unsure === 'keep') return 'keep';
+  return answer.callMatters.has(id) ? 'drop_result' : unsure;
 }
 
 export function chunk<T>(items: readonly T[], size: number): T[][] {

@@ -1,5 +1,5 @@
-import { sliceWhole } from './text.js';
-import type { ClaudeStatus, ToolCall, Verdict } from './types.js';
+import { buildJevPrompt, chunk, decide, parseJevReply, type JevContext } from './jev-scorer.js';
+import type { ClaudeStatus, ForkRun, ToolCall, Verdict } from './types.js';
 
 /**
  * What `$.model.fork` resolves to. Claude Code 2.1.281 always answers with a result:
@@ -26,22 +26,6 @@ export interface ForkTimeout {
 
 const TIMED_OUT = Symbol('timeout');
 
-const INPUT_CHARS = 120;
-
-function clip(text: string, limit: number): string {
-  return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
-}
-
-export function candidateLine(call: ToolCall): string {
-  let input: string;
-  try {
-    input = JSON.stringify(call.input);
-  } catch {
-    input = '[unserializable input]';
-  }
-  return `${call.id} ${call.tool} ${clip(input, INPUT_CHARS)} → ${call.isError ? 'error' : 'ok'} ${call.resultChars}ch`;
-}
-
 /** At most `max` calls, preferring the largest results, returned in transcript order. */
 export function selectCandidates(calls: readonly ToolCall[], max: number): ToolCall[] {
   if (calls.length <= max) return [...calls];
@@ -49,49 +33,6 @@ export function selectCandidates(calls: readonly ToolCall[], max: number): ToolC
     [...calls].sort((a, b) => b.resultChars - a.resultChars).slice(0, Math.max(0, max)).map((x) => x.id),
   );
   return calls.filter((x) => chosen.has(x.id));
-}
-
-export function buildPrompt(calls: readonly ToolCall[]): string {
-  return [
-    'Context maintenance request. Do not continue the task and do not call tools.',
-    'Below are earlier tool calls from this conversation, one per line: id, tool, input, outcome, output size.',
-    'Decide which are no longer needed to continue the current work.',
-    '- "drop": neither the call nor its output matters any more (superseded, irrelevant, or a dead end).',
-    '- "truncate": it matters that the call happened, but its full output is no longer needed.',
-    'Anything you do not list is kept verbatim. When unsure, leave it out.',
-    'Reply with JSON only, exactly this shape: {"drop":[],"truncate":[]}',
-    '',
-    ...calls.map(candidateLine),
-  ].join('\n');
-}
-
-function stringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((v) => typeof v === 'string') ? (value as string[]) : undefined;
-}
-
-/**
- * Parses the reply's JSON object (from the first `{` to the last `}`).
- * Unknown ids are ignored; an id in both lists becomes `truncate`.
- * Returns undefined when there is no valid object of the expected shape.
- */
-export function parseReply(text: string, ids: ReadonlySet<string>): Map<string, Verdict> | undefined {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== 'object') return undefined;
-  const drop = stringArray((parsed as Record<string, unknown>)['drop']);
-  const truncate = stringArray((parsed as Record<string, unknown>)['truncate']);
-  if (!drop || !truncate) return undefined;
-  const verdicts = new Map<string, Verdict>();
-  for (const id of drop) if (ids.has(id)) verdicts.set(id, { action: 'drop_call', source: 'claude' });
-  for (const id of truncate) if (ids.has(id)) verdicts.set(id, { action: 'drop_result', source: 'claude' });
-  return verdicts;
 }
 
 /**
@@ -151,16 +92,72 @@ export async function runFork(
   return reply === TIMED_OUT ? { status: 'timeout' } : replyText(reply);
 }
 
+export interface ClaudeScoreOptions {
+  /** Most calls asked about in total, largest results first. */
+  maxCandidates: number;
+  /** Maps the fork's `unsure` list (jev-scorer.ts `unsureAction`). */
+  keepThreshold: number;
+  /** Most calls per fork; more run as concurrent forks. */
+  chunkSize: number;
+  context: JevContext;
+  timeout?: ForkTimeout;
+  /** Milliseconds clock for the per-fork timings. */
+  now?: () => number;
+}
+
+async function scoreChunk(
+  fork: ForkFn,
+  calls: readonly ToolCall[],
+  options: ClaudeScoreOptions,
+  timeout: ForkTimeout | undefined,
+  now: () => number,
+): Promise<{ verdicts: Map<string, Verdict>; run: ForkRun }> {
+  const started = now();
+  const answer = await runFork(fork, buildJevPrompt(calls, options.context), timeout);
+  const run = (status: ClaudeStatus): ForkRun => ({ candidates: calls.length, ms: now() - started, status });
+  const verdicts = new Map<string, Verdict>();
+  if ('status' in answer) return { verdicts, run: run(answer.status) };
+  const parsed = parseJevReply(answer.text, new Set(calls.map((x) => x.id)));
+  if (!parsed) return { verdicts, run: run('unparseable') };
+  for (const call of calls) {
+    const action = decide(call.id, parsed, options.keepThreshold);
+    if (action !== 'keep') verdicts.set(call.id, { action, source: 'claude' });
+  }
+  return { verdicts, run: run('ran') };
+}
+
+/** `ran` when every fork answered, the failure when none did, `partial` in between. */
+function overallStatus(runs: readonly ForkRun[]): ClaudeStatus {
+  const ran = runs.filter((r) => r.status === 'ran').length;
+  if (ran === runs.length) return 'ran';
+  return ran > 0 ? 'partial' : runs[0]!.status;
+}
+
+/**
+ * Asks Jev's two questions about each call through session forks: candidates
+ * are split into chunks of `chunkSize`, one `runFork` per chunk, all
+ * concurrent and all racing ONE shared deadline (a single sleep). Answers are
+ * merged; a chunk whose fork failed or whose reply did not parse decides
+ * nothing (its calls are kept).
+ */
 export async function scoreWithClaude(
   fork: ForkFn,
   calls: readonly ToolCall[],
-  maxCandidates: number,
-  timeout?: ForkTimeout,
-): Promise<{ verdicts: Map<string, Verdict>; status: ClaudeStatus }> {
-  const candidates = selectCandidates(calls, maxCandidates);
-  if (candidates.length === 0) return { verdicts: new Map(), status: 'skipped' };
-  const answer = await runFork(fork, buildPrompt(candidates), timeout);
-  if ('status' in answer) return { verdicts: new Map(), status: answer.status };
-  const verdicts = parseReply(answer.text, new Set(candidates.map((x) => x.id)));
-  return verdicts ? { verdicts, status: 'ran' } : { verdicts: new Map(), status: 'unparseable' };
+  options: ClaudeScoreOptions,
+): Promise<{ verdicts: Map<string, Verdict>; status: ClaudeStatus; forks: ForkRun[] }> {
+  const candidates = selectCandidates(calls, options.maxCandidates);
+  if (candidates.length === 0) return { verdicts: new Map(), status: 'skipped', forks: [] };
+  const now = options.now ?? Date.now;
+  let shared: ForkTimeout | undefined;
+  if (options.timeout) {
+    const expiry = options.timeout.sleep(options.timeout.timeoutMs);
+    shared = { timeoutMs: options.timeout.timeoutMs, sleep: () => expiry };
+  }
+  const results = await Promise.all(
+    chunk(candidates, options.chunkSize).map((part) => scoreChunk(fork, part, options, shared, now)),
+  );
+  const verdicts = new Map<string, Verdict>();
+  for (const result of results) for (const [id, verdict] of result.verdicts) verdicts.set(id, verdict);
+  const forks = results.map((r) => r.run);
+  return { verdicts, status: overallStatus(forks), forks };
 }

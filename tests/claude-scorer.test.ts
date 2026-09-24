@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildPrompt, candidateLine, parseReply, runFork, scoreWithClaude, selectCandidates,
-  type ForkFn, type ToolCall,
+  runFork, scoreWithClaude, selectCandidates,
+  type ClaudeScoreOptions, type ForkFn, type ToolCall,
 } from '../src/index.js';
 
 function c(id: string, tool: string, input: Record<string, unknown>, resultChars = 100, isError = false): ToolCall {
@@ -11,120 +11,143 @@ function c(id: string, tool: string, input: Record<string, unknown>, resultChars
 const calls = [
   c('t1', 'Read', { file_path: 'src/a.ts' }, 4213),
   c('t2', 'Bash', { command: 'x'.repeat(500) }, 20, true),
+  c('t3', 'Grep', { pattern: 'foo' }, 900),
 ];
 
-describe('candidate list', () => {
-  it('formats one line per call with a truncated input', () => {
-    expect(candidateLine(calls[0]!)).toBe('t1 Read {"file_path":"src/a.ts"} → ok 4213ch');
-    const line = candidateLine(calls[1]!);
-    expect(line.startsWith('t2 Bash {"command":"xxx')).toBe(true);
-    expect(line.endsWith('… → error 20ch')).toBe(true);
-    expect(line.length).toBeLessThan(160);
-  });
+const opts = (extra: Partial<ClaudeScoreOptions> = {}): ClaudeScoreOptions => ({
+  maxCandidates: 400, keepThreshold: 0.5, chunkSize: 60, context: { messageCount: 10 }, ...extra,
+});
 
-  it('never clips an input between the two halves of a surrogate pair', () => {
-    // {"command":" is 12 characters, so the clip at 119 lands on the emoji's high half.
-    const line = candidateLine(c('t3', 'Bash', { command: `${'x'.repeat(106)}\u{1F600}${'y'.repeat(50)}` }));
-    const input = line.slice(line.indexOf('{'), line.indexOf('…'));
-    const last = input.charCodeAt(input.length - 1);
-    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
-    expect(input.endsWith('x')).toBe(true);
-  });
+const reply = (lists: { result_needed?: string[]; call_matters?: string[]; unsure?: string[] }) =>
+  JSON.stringify({ result_needed: [], call_matters: [], unsure: [], ...lists });
 
+/** Ids listed in a prompt's candidate lines. */
+function idsIn(prompt: string): string[] {
+  return [...prompt.matchAll(/^(t\d+) /gm)].map((m) => m[1]!);
+}
+
+describe('selectCandidates', () => {
   it('caps by largest results and keeps transcript order', () => {
     const many = [c('t1', 'A', {}, 5), c('t2', 'B', {}, 50), c('t3', 'C', {}, 500)];
     expect(selectCandidates(many, 2).map((x) => x.id)).toEqual(['t2', 't3']);
     expect(selectCandidates(many, 5)).toHaveLength(3);
   });
-
-  it('builds a prompt that lists candidates and asks for JSON only', () => {
-    const prompt = buildPrompt(calls);
-    expect(prompt).toContain('t1 Read');
-    expect(prompt).toContain('{"drop":[],"truncate":[]}');
-  });
-});
-
-describe('parseReply', () => {
-  const ids = new Set(['t1', 't2', 't3']);
-  it('reads drop and truncate arrays', () => {
-    const v = parseReply('{"drop":["t1"],"truncate":["t2"]}', ids);
-    expect(v?.get('t1')).toEqual({ action: 'drop_call', source: 'claude' });
-    expect(v?.get('t2')).toEqual({ action: 'drop_result', source: 'claude' });
-  });
-  it('tolerates prose around the JSON', () => {
-    expect(parseReply('Here you go:\n{"drop":["t1"],"truncate":[]}\nThanks', ids)?.size).toBe(1);
-  });
-  it('ignores unknown ids and resolves conflicts to truncate', () => {
-    const v = parseReply('{"drop":["t1","t9"],"truncate":["t1"]}', ids);
-    expect(v?.size).toBe(1);
-    expect(v?.get('t1')?.action).toBe('drop_result');
-  });
-  it('rejects malformed replies', () => {
-    expect(parseReply('no json here', ids)).toBeUndefined();
-    expect(parseReply('{"drop":"t1","truncate":[]}', ids)).toBeUndefined();
-    expect(parseReply('{"drop":[1],"truncate":[]}', ids)).toBeUndefined();
-  });
 });
 
 describe('scoreWithClaude', () => {
-  it('returns verdicts when the fork answers', async () => {
-    const fork: ForkFn = async () => ({ text: '{"drop":["t2"],"truncate":["t1"]}' });
-    const out = await scoreWithClaude(fork, calls, 400);
+  it('turns the lists into Jev decisions: needed keeps, matters truncates, neither drops', async () => {
+    const fork: ForkFn = async () => ({ text: reply({ result_needed: ['t3'], call_matters: ['t1'] }) });
+    const out = await scoreWithClaude(fork, calls, opts());
     expect(out.status).toBe('ran');
-    expect(out.verdicts.size).toBe(2);
+    expect(out.verdicts.get('t1')).toEqual({ action: 'drop_result', source: 'claude' });
+    expect(out.verdicts.get('t2')).toEqual({ action: 'drop_call', source: 'claude' });
+    expect(out.verdicts.has('t3')).toBe(false);
+    expect(out.forks).toHaveLength(1);
   });
-  it('reports null, unparseable and error without throwing', async () => {
-    expect((await scoreWithClaude(async () => null, calls, 400)).status).toBe('null');
-    expect((await scoreWithClaude(async () => ({ text: 'nope' }), calls, 400)).status).toBe('unparseable');
-    const boom: ForkFn = async () => { throw new Error('api down'); };
-    const out = await scoreWithClaude(boom, calls, 400);
-    expect(out.status).toBe('error');
-    expect(out.verdicts.size).toBe(0);
+
+  it('maps unsure through keepThreshold', async () => {
+    const fork: ForkFn = async () => ({ text: reply({ result_needed: ['t2', 't3'], unsure: ['t1'] }) });
+    expect((await scoreWithClaude(fork, calls, opts({ keepThreshold: 0.3 }))).verdicts.has('t1')).toBe(false);
+    expect((await scoreWithClaude(fork, calls, opts())).verdicts.get('t1')?.action).toBe('drop_result');
+    expect((await scoreWithClaude(fork, calls, opts({ keepThreshold: 0.9 }))).verdicts.get('t1')?.action).toBe('drop_call');
   });
+
   it('reads the 2.1.281 answered shape', async () => {
-    const fork: ForkFn = async () => ({ isAnswered: true, text: '{"drop":["t2"],"truncate":[]}', usage: {} });
-    const out = await scoreWithClaude(fork, calls, 400);
+    const fork: ForkFn = async () => ({ isAnswered: true, text: reply({ result_needed: ['t1', 't3'] }), usage: {} } as never);
+    const out = await scoreWithClaude(fork, calls, opts());
     expect(out.status).toBe('ran');
     expect(out.verdicts.get('t2')?.action).toBe('drop_call');
   });
+
+  it('splits candidates into chunks, runs the forks concurrently and merges their answers', async () => {
+    const many = Array.from({ length: 130 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
+    const prompts: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fork: ForkFn = async ({ prompt }) => {
+      prompts.push(prompt);
+      if (prompts.length === 3) release();
+      await gate; // resolves only once all three forks have started: proves they are concurrent
+      return { text: reply({ call_matters: idsIn(prompt) }) };
+    };
+    const out = await scoreWithClaude(fork, many, opts({ chunkSize: 60 }));
+    expect(prompts.map((p) => idsIn(p).length)).toEqual([60, 60, 10]);
+    expect(out.verdicts.size).toBe(130);
+    expect([...out.verdicts.values()].every((v) => v.action === 'drop_result')).toBe(true);
+    expect(out.status).toBe('ran');
+    expect(out.forks.map((f) => f.candidates)).toEqual([60, 60, 10]);
+  });
+
+  it('applies the chunks that answered and reports partial when others fail; a failed chunk keeps its calls', async () => {
+    const many = Array.from({ length: 4 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
+    const fork: ForkFn = async ({ prompt }) =>
+      idsIn(prompt).includes('t1') ? { text: reply({}) } : { text: '{"result_needed":["t3"],"call_ma' };
+    const out = await scoreWithClaude(fork, many, opts({ chunkSize: 2 }));
+    expect(out.status).toBe('partial');
+    expect([...out.verdicts.keys()]).toEqual(['t1', 't2']);
+    expect(out.forks.map((f) => f.status)).toEqual(['ran', 'unparseable']);
+  });
+
+  it('reports the failure itself when every fork fails', async () => {
+    expect((await scoreWithClaude(async () => null, calls, opts())).status).toBe('null');
+    expect((await scoreWithClaude(async () => ({ text: 'nope' }), calls, opts())).status).toBe('unparseable');
+    const boom: ForkFn = async () => { throw new Error('api down'); };
+    const out = await scoreWithClaude(boom, calls, opts());
+    expect(out.status).toBe('error');
+    expect(out.verdicts.size).toBe(0);
+  });
+
   it.each([
     [{ isAnswered: false, reason: 'nothing-to-fork' }, 'no-fork'],
     [{ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded' }, 'api-error 529'],
-    [{ isAnswered: false, reason: 'api-error', status: null, error: 'unknown' }, 'api-error'],
+    [{ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' }, 'api-error'],
     [{ isAnswered: false, reason: 'aborted' }, 'aborted'],
     [{ isAnswered: false, reason: 'empty-reply' }, 'empty'],
     [{ isAnswered: false, reason: 'some-future-reason' }, 'error'],
-  ])('labels the unanswered 2.1.281 shape %j as %s, never unparseable', async (reply, status) => {
-    const fork = (async () => reply) as unknown as ForkFn;
-    const out = await scoreWithClaude(fork, calls, 400);
+  ])('labels the unanswered 2.1.281 shape %j as %s, never unparseable', async (answer, status) => {
+    const fork = (async () => answer) as unknown as ForkFn;
+    const out = await scoreWithClaude(fork, calls, opts());
     expect(out.status).toBe(status);
     expect(out.verdicts.size).toBe(0);
   });
+
   it('skips the fork when there is nothing to score', async () => {
     let called = false;
-    const out = await scoreWithClaude(async () => { called = true; return null; }, [], 400);
+    const out = await scoreWithClaude(async () => { called = true; return null; }, [], opts());
     expect(called).toBe(false);
     expect(out.status).toBe('skipped');
+    expect(out.forks).toEqual([]);
   });
-  it('gives up with status timeout when the fork outlasts the timeout', async () => {
-    const never: ForkFn = () => new Promise(() => {});
-    let waited = -1;
-    const sleep = async (ms: number) => { waited = ms; };
-    const out = await scoreWithClaude(never, calls, 400, { timeoutMs: 6000, sleep });
+
+  it('gives every fork one shared deadline: a single sleep, status timeout', async () => {
+    const many = Array.from({ length: 5 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
+    const waited: number[] = [];
+    const sleep = async (ms: number) => { waited.push(ms); };
+    const out = await scoreWithClaude(() => new Promise(() => {}), many, opts({
+      chunkSize: 2, timeout: { timeoutMs: 6000, sleep },
+    }));
     expect(out.status).toBe('timeout');
     expect(out.verdicts.size).toBe(0);
-    expect(waited).toBe(6000);
+    expect(waited).toEqual([6000]);
+    expect(out.forks).toHaveLength(3);
   });
+
   it('uses the reply when the fork answers before the timeout', async () => {
-    const fork: ForkFn = async () => ({ text: '{"drop":["t2"],"truncate":[]}' });
-    const out = await scoreWithClaude(fork, calls, 400, { timeoutMs: 6000, sleep: () => new Promise(() => {}) });
+    const fork: ForkFn = async () => ({ text: reply({}) });
+    const out = await scoreWithClaude(fork, calls, opts({ timeout: { timeoutMs: 6000, sleep: () => new Promise(() => {}) } }));
     expect(out.status).toBe('ran');
   });
+
   it('treats a reply without string text as empty, not unparseable', async () => {
     const bad = (async () => ({})) as unknown as ForkFn;
-    const out = await scoreWithClaude(bad, calls, 400);
-    expect(out.status).toBe('empty');
-    expect(out.verdicts.size).toBe(0);
+    expect((await scoreWithClaude(bad, calls, opts())).status).toBe('empty');
+  });
+
+  it('times each fork with the injected clock', async () => {
+    let t = 1000;
+    const fork: ForkFn = async () => { t += 250; return { text: reply({}) }; };
+    const out = await scoreWithClaude(fork, calls, opts({ now: () => t }));
+    expect(out.forks).toEqual([{ candidates: 3, ms: 250, status: 'ran' }]);
   });
 });
 

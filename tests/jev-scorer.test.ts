@@ -71,74 +71,61 @@ describe('jevCandidateLine', () => {
 });
 
 describe('buildJevPrompt', () => {
-  it('states the two questions, the policy, the reply format and the sentinel', () => {
+  it('asks Jev\'s two questions with the policy text and the JSON reply shape', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).toContain('Keep the call when its input still matters.');
     expect(prompt).toContain('Keep the result verbatim only when its exact text is still needed and re-running would not do.');
     expect(prompt).toContain('Prefer truncate over drop unless a later call superseded it.');
-    expect(prompt).toMatch(/t12 93/);
-    expect(prompt).toContain('last line "END"');
+    expect(prompt).toContain('{"result_needed":[],"call_matters":[],"unsure":[]}');
     expect(prompt).toMatch(/^t1 Read msg 16\/5/m);
+  });
+
+  it('asks for lists, never a per-call line or number: the API rejects that shape (probed live, 2.1.281)', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).not.toMatch(/one line per call|digit|0-9|END/);
   });
 });
 
 describe('parseJevReply', () => {
-  const ids = new Set(['t1', 't2', 't3']);
+  const ids = new Set(['t1', 't2', 't3', 't4']);
 
-  it('reads compact score lines terminated by END', () => {
-    const out = parseJevReply('t1 93\nt2 00\nEND', ids);
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    expect(out.scores.get('t1')).toEqual({ call: 9, result: 3 });
-    expect(out.scores.get('t2')).toEqual({ call: 0, result: 0 });
-    expect(out.scores.has('t3')).toBe(false);
+  it('reads the three lists, ignoring unknown ids and prose around the object', () => {
+    const out = parseJevReply('Here:\n{"result_needed":["t1"],"call_matters":["t2","t9"],"unsure":["t3"]}\nok', ids);
+    expect(out && [...out.resultNeeded]).toEqual(['t1']);
+    expect(out && [...out.callMatters]).toEqual(['t2']);
+    expect(out && [...out.unsure]).toEqual(['t3']);
   });
 
-  it('tolerates spacing, a space between the digits, fences and prose around the lines', () => {
-    const out = parseJevReply('Here:\n```\n  t1   9 3  \nt3 55\n```\nEND\n', ids);
-    expect(out.ok && out.scores.size).toBe(2);
+  it('treats a missing unsure list as empty', () => {
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1"]}', ids)?.unsure.size).toBe(0);
   });
 
-  it('ignores unknown ids and malformed lines; a repeated id keeps the higher digits', () => {
-    const out = parseJevReply('t9 00\nt1 9\nt1 x3\nt2 13\nt2 40\nEND', ids);
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    expect([...out.scores.keys()]).toEqual(['t2']);
-    expect(out.scores.get('t2')).toEqual({ call: 4, result: 3 });
-  });
-
-  it('accepts END with no lines: every call is kept', () => {
-    const out = parseJevReply('END', ids);
-    expect(out.ok && out.scores.size).toBe(0);
-  });
-
-  it('rejects a reply without END when it does not cover every id (a cut-off reply is never applied partially)', () => {
-    expect(parseJevReply('t1 00\nt2 00', ids)).toEqual({ ok: false, reason: 'no-sentinel' });
-    expect(parseJevReply('', ids)).toEqual({ ok: false, reason: 'no-sentinel' });
-  });
-
-  it('accepts a reply without END when every id was scored (nothing can have been cut off)', () => {
-    const out = parseJevReply('t1 00\nt2 11\nt3 99', ids);
-    expect(out.ok && out.scores.size).toBe(3);
-  });
-
-  it('ignores lines after END', () => {
-    const out = parseJevReply('t1 99\nEND\nt2 00', ids);
-    expect(out.ok && [...out.scores.keys()]).toEqual(['t1']);
+  it('rejects anything that is not the full object: no JSON, a cut-off reply, a missing or mistyped list', () => {
+    expect(parseJevReply('nope', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":["t1"],"call_matters":["t2"', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":["t1"]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":"t1","call_matters":[]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":[],"unsure":[1]}', ids)).toBeUndefined();
   });
 });
 
 describe('decide', () => {
-  it('keeps on result ≥ threshold, truncates on call ≥ threshold, else drops', () => {
-    expect(decide({ call: 0, result: 5 }, 0.5)).toBe('keep');
-    expect(decide({ call: 9, result: 4 }, 0.5)).toBe('drop_result');
-    expect(decide({ call: 5, result: 0 }, 0.5)).toBe('drop_result');
-    expect(decide({ call: 4, result: 4 }, 0.5)).toBe('drop_call');
+  const answer = {
+    resultNeeded: new Set(['t1', 't4']), callMatters: new Set(['t2', 't4']), unsure: new Set(['t3', 't4']),
+  };
+
+  it('result_needed keeps, call_matters truncates, neither drops; the safer list wins an overlap', () => {
+    expect(decide('t1', answer, 0.5)).toBe('keep');
+    expect(decide('t2', answer, 0.5)).toBe('drop_result');
+    expect(decide('t4', answer, 0.5)).toBe('keep');
+    expect(decide('t9', answer, 0.5)).toBe('drop_call');
   });
-  it('maps digits onto the 0..1 threshold as d/9', () => {
-    expect(decide({ call: 0, result: 9 }, 1)).toBe('keep');
-    expect(decide({ call: 8, result: 8 }, 0.9)).toBe('drop_call');
-    expect(decide({ call: 0, result: 0 }, 0)).toBe('keep');
+
+  it('maps unsure through keepThreshold: below 0.5 keep, up to 0.75 truncate, above drop', () => {
+    expect(decide('t3', answer, 0.3)).toBe('keep');
+    expect(decide('t3', answer, 0.5)).toBe('drop_result');
+    expect(decide('t3', answer, 0.75)).toBe('drop_result');
+    expect(decide('t3', answer, 0.9)).toBe('drop_call');
   });
 });
 

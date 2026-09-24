@@ -208,5 +208,7 @@ export async function compact(
     ms: Date.now() - started,
   };
   if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
+  if (outcome.forks && outcome.forks.length > 0) stats.forks = outcome.forks;
+  if (outcome.wait) stats.wait = outcome.wait;
   return { messages: kept, decisions, stats };
 }
