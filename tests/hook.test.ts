@@ -234,6 +234,19 @@ describe('register', () => {
       expect(h.compactCalls).toBe(2);
     });
 
+    it('stops asking after $.session.compact rejects (headless), and says so once', async () => {
+      const headless = new Error('$.session.compact: not available in a headless (-p / SDK) session yet');
+      const h = harness({ percent: 90, sessionCompact: async () => { throw headless; } });
+      for (let i = 0; i < 3; i += 1) expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      expect(h.compactCalls).toBe(1);
+      expect(h.usageCalls).toBe(1);
+      expect(h.toasts).toHaveLength(1);
+      expect(h.toasts[0]).toMatch(/auto-compact off for this session/);
+      expect(h.toasts[0]).toMatch(/headless/);
+      expect(h.logs.filter((line) => /auto-compact off/.test(line))).toHaveLength(1);
+      expect(h.nextCalls).toHaveLength(3);
+    });
+
     it('ignores subagent turns and turns that did not end in an answer', async () => {
       const h = harness({ percent: 99 });
       await h.turnComplete({ ...answered, agentId: 'a1' });

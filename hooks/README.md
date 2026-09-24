@@ -20,7 +20,8 @@
     replacing the transcript.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and
   calls `$.session.compact()` once `context.percent` reaches `compactAtPercent`, guarded against
-  overlapping runs.
+  overlapping runs. A rejected `$.session.compact()` (every headless `-p` / SDK session on
+  2.1.281) turns the trigger off for the rest of the session, reported once by toast and log.
 
 ### Engine calls used
 

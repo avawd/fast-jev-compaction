@@ -1,5 +1,5 @@
 import type {
-  On, PluginOptions, Register, SessionCompactInput, SessionMessage, ToolResultSummary, ToolUseSummary,
+  EngineInterface, On, PluginOptions, Register, SessionCompactInput, SessionMessage, ToolResultSummary, ToolUseSummary,
   TurnCompleteInput,
 } from 'claude-code';
 
@@ -172,9 +172,27 @@ const PRECOMPUTE_SKIP_REASON = 'precompute skipped; the real compaction runs the
 /** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
 const EMPTY_SKIP_REASON = 'nothing to compact yet';
 
+/**
+ * `$.session.compact()` rejects in a headless (-p / SDK) session on 2.1.281, where compaction
+ * only runs inside a turn (a `/compact` prompt). Resolves false on a rejection, which the caller
+ * takes as final for the session: asking again every turn would only repeat the same failure.
+ * Top-level because the engine follows `$` only into functions declared at the top of the file.
+ */
+async function requestCompaction($: EngineInterface): Promise<boolean> {
+  try {
+    await $.session.compact();
+    return true;
+  } catch (error) {
+    notify($, `auto-compact off for this session: $.session.compact() was refused (${message(error)}). ` +
+      'In a headless (-p / SDK) session send /compact yourself.');
+    return false;
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
+  let autoCompactOff = false;
 
   on('session.compact', async ($, event, next) => {
     if (event.trigger === 'precompute') {
@@ -209,11 +227,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting || event.agentId !== undefined || event.reason !== 'answer') return next(event);
+    if (compacting || autoCompactOff || event.agentId !== undefined || event.reason !== 'answer') return next(event);
     compacting = true;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) >= config.compactAtPercent) await $.session.compact();
+      if ((context.percent ?? 0) >= config.compactAtPercent) autoCompactOff = !(await requestCompaction($));
     } catch (error) {
       notify($, `auto-compact skipped (${message(error)})`, false);
     } finally {

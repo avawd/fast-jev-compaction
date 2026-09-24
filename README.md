@@ -19,6 +19,12 @@ If the result saves less than `minReductionRatio`, Claude Code's built-in summar
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
 `/compact` prunes.
 
+**Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
+refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
+as a `/compact` prompt). After the first refusal the plugin stops asking for the rest of the session and
+says so once (a toast and a log line). Send `/compact` yourself, or rely on Claude Code's own
+auto-compaction, which this plugin's `session.compact` hook still handles.
+
 ### What changes in a pruned message
 
 Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back

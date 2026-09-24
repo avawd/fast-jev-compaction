@@ -12,6 +12,8 @@ type Handler = ($: unknown, event: unknown, next: unknown) => Promise<unknown>;
 export interface FakeOptions {
   fork?: (request: { prompt: string }) => Promise<ForkReply>;
   percent?: number | (() => Promise<number>);
+  /** Replaces `$.session.compact`, e.g. with the rejection a headless session gives. */
+  sessionCompact?: () => Promise<unknown>;
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
   toast?: (text: string) => void;
   log?: (text: string) => void;
@@ -63,7 +65,7 @@ export function harness(options: FakeOptions = {}): Harness {
       },
       compact: async () => {
         h.compactCalls += 1;
-        return { messages: [] };
+        return options.sessionCompact ? options.sessionCompact() : { messages: [] };
       },
     },
     ui: {
