@@ -102,3 +102,17 @@ describe('carriedPrefix', () => {
     expect(carriedPrefix(prev, next)).toHaveLength(2);
   });
 });
+
+describe('segment cwd', () => {
+  it('is the cwd of the segment\'s last row that records one, like $.session.cwd() at compaction', async () => {
+    const file = fixture([
+      user('a', { cwd: '/repo' }),
+      { type: 'system', subtype: 'compact_boundary', compactMetadata: {}, cwd: '/repo' },
+      user('b', { cwd: '/repo' }),
+      assistant('m1', { type: 'text', text: 'moved' }, { cwd: '/repo/sub' }),
+      { type: 'attachment', rendered: [], cwd: '/elsewhere' },
+    ]);
+    const segs = await loadSegments(file);
+    expect(segs.map((s) => s.cwd)).toEqual(['/repo', '/repo/sub']);
+  });
+});
