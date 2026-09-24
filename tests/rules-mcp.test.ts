@@ -147,3 +147,41 @@ describe('stripFurnitureInMessages', () => {
     expect(stripFurnitureInMessages(messages, calls)[2]).toBe(messages[2]);
   });
 });
+
+describe('isMcpWriteTool: the verb must lead the tool name (F9)', () => {
+  it('rejects reads that merely contain a write word', () => {
+    for (const t of ['mcp__jira__getComment', 'mcp__jira__getCommentsForIssue', 'mcp__x__read_comment',
+      'mcp__x__comment_search', 'mcp__gh__get_pull_request_comments', 'mcp__x__list_recent_updates',
+      'mcp__x__search_updated', 'mcp__x__getIssueComment', 'mcp__x__addTeamworkGraphContext']) {
+      expect(isMcpWriteTool(t), t).toBe(false);
+    }
+  });
+
+  it('still accepts writes, including a server-named prefix like slack_', () => {
+    for (const t of ['mcp__x__transitionJiraIssue', 'mcp__x__addWorklogToJiraIssue', 'mcp__x__editJiraIssue',
+      'mcp__claude_ai_Slack__slack_add_reaction', 'mcp__x__commentOnIssue', 'mcp__x__update_page']) {
+      expect(isMcpWriteTool(t), t).toBe(true);
+    }
+  });
+});
+
+describe('stripMcpFurniture: numbers and self (F10)', () => {
+  const pad = `"pad":"${'p'.repeat(40)}"`;
+  it('refuses when re-serialising would change any number literal', () => {
+    for (const lit of ['1e400', '1.0', '-0', '0.1000000000000000055511151231257827', '1E5', '12345678901234567890']) {
+      const text = `{"v":${lit},"self":"https://x/1",${pad}}`;
+      expect(stripMcpFurniture(text), lit).toBe(text);
+    }
+  });
+
+  it('does not mistake digits inside strings for number literals', () => {
+    const text = `{"v":"1.0 and -0","n":12,"self":"https://x/1",${pad}}`;
+    expect(stripMcpFurniture(text)).toBe(`{"v":"1.0 and -0","n":12,${pad}}`);
+  });
+
+  it('strips self only when it is a URL', () => {
+    const flag = `{"reaction":{"self":true,"name":"+1"},${pad}}`;
+    expect(stripMcpFurniture(flag)).toBe(flag);
+    expect(stripMcpFurniture(`{"self":"http://x/1","a":1,${pad}}`)).toBe(`{"a":1,${pad}}`);
+  });
+});
