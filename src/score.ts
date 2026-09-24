@@ -18,11 +18,16 @@ function forkTimeout(options: ScorerOptions): ForkTimeout | undefined {
   return { timeoutMs: ms, sleep: options.sleep };
 }
 
-/** Rules first; the calls they leave undecided go to one Claude fork. Rule verdicts always win. */
+/**
+ * Rules first; the calls they leave undecided go to one Claude fork. Rule verdicts always win.
+ * A call cited as a rule verdict's evidence is not offered to the fork either: dropping the
+ * later Read or Grep that made an earlier one redundant would lose both copies.
+ */
 export function makeScorer(options: ScorerOptions): Scorer {
   return async (calls) => {
     const verdicts = applyRules(calls);
-    const undecided = calls.filter((call) => !call.pinned && !verdicts.has(call.id));
+    const evidence = new Set([...verdicts.values()].flatMap((v) => (v.evidence ? [v.evidence] : [])));
+    const undecided = calls.filter((call) => !call.pinned && !verdicts.has(call.id) && !evidence.has(call.id));
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };
     }

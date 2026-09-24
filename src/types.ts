@@ -47,6 +47,12 @@ export interface Verdict {
   action: 'drop_result' | 'drop_call';
   source: 'rule' | 'claude';
   rule?: RuleName;
+  /**
+   * For a rule verdict, the id of the later call that justified it (the re-read, the repeated
+   * search, the successful retry). That call is the only remaining copy of what this one is
+   * losing, so it must never itself be offered for dropping.
+   */
+  evidence?: string;
 }
 
 /**

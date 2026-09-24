@@ -75,9 +75,10 @@ function supersedesReads(call: ToolCall): boolean {
  */
 export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
   const verdicts = new Map<string, Verdict>();
-  const pathsTouchedLater = new Set<string>();
-  const searchesLater = new Set<string>();
-  const successesLater = new Set<string>();
+  // Each maps to the id of the nearest later call that did it: the verdict's evidence.
+  const pathsTouchedLater = new Map<string, string>();
+  const searchesLater = new Map<string, string>();
+  const successesLater = new Map<string, string>();
 
   for (let i = calls.length - 1; i >= 0; i -= 1) {
     const call = calls[i]!;
@@ -85,18 +86,21 @@ export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
     const path = pathOf(call.input);
 
     if (!call.pinned) {
-      if (call.isError && successesLater.has(key)) {
-        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'failed_then_fixed' });
-      } else if (SEARCH_TOOLS.has(call.tool) && searchesLater.has(key)) {
-        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'repeated_search' });
-      } else if (READ_TOOLS.has(call.tool) && path && pathsTouchedLater.has(path)) {
-        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'stale_read' });
+      const retried = call.isError ? successesLater.get(key) : undefined;
+      const searched = SEARCH_TOOLS.has(call.tool) ? searchesLater.get(key) : undefined;
+      const touched = READ_TOOLS.has(call.tool) && path ? pathsTouchedLater.get(path) : undefined;
+      if (retried) {
+        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'failed_then_fixed', evidence: retried });
+      } else if (searched) {
+        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'repeated_search', evidence: searched });
+      } else if (touched) {
+        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'stale_read', evidence: touched });
       }
     }
 
-    if (!call.isError) successesLater.add(key);
-    if (SEARCH_TOOLS.has(call.tool)) searchesLater.add(key);
-    if (path && supersedesReads(call)) pathsTouchedLater.add(path);
+    if (!call.isError) successesLater.set(key, call.id);
+    if (SEARCH_TOOLS.has(call.tool)) searchesLater.set(key, call.id);
+    if (path && supersedesReads(call)) pathsTouchedLater.set(path, call.id);
   }
   return verdicts;
 }
