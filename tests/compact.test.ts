@@ -118,6 +118,20 @@ describe('compact', () => {
   });
 });
 
+describe('no-op truncations (L2)', () => {
+  it('keeps and does not count a drop_result whose result is too short to shrink', async () => {
+    const input = [
+      msg('user', 'go'), msg('assistant', 'Checking.', { toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: { command: 'pwd' } }] }),
+      res('u1', 'project/src'), ...transcript().slice(5),
+    ];
+    const scorer: Scorer = async () => ({ claude: 'ran', verdicts: new Map([['t1', { action: 'drop_result', source: 'claude' }]]) });
+    const out = await compact(input, scorer, { preserveRecentMessages: 6 });
+    expect(out.decisions[0]).toMatchObject({ action: 'keep' });
+    expect(out.stats).toMatchObject({ resultsDropped: 0, byClaude: 0, kept: 1 });
+    expect(out.messages[2]).toBe(input[2]);
+  });
+});
+
 describe('surrogate pairs', () => {
   const isLoneHigh = (text: string, at: number) => {
     const code = text.charCodeAt(at);

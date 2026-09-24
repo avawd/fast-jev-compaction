@@ -59,6 +59,19 @@ function isRanged(input: Record<string, unknown>): boolean {
 }
 
 /**
+ * The tool and its canonical input, or undefined for an input that cannot be encoded (a cycle,
+ * a BigInt). Such a call is simply never matched by input: one odd input must not throw away
+ * every verdict of the compaction.
+ */
+function inputKey(call: ToolCall): string | undefined {
+  try {
+    return `${call.tool}:${canonicalJson(call.input)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Whether a call proves that earlier reads of its path are out of date: a
  * successful write, or a successful full (unranged) read. A failed write
  * changed nothing, and a ranged read may cover none of what an earlier one did.
@@ -83,12 +96,12 @@ export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
 
   for (let i = calls.length - 1; i >= 0; i -= 1) {
     const call = calls[i]!;
-    const key = `${call.tool}:${canonicalJson(call.input)}`;
+    const key = inputKey(call);
     const path = pathOf(call.input);
 
     if (!call.pinned) {
-      const retried = call.isError ? successesLater.get(key) : undefined;
-      const searched = SEARCH_TOOLS.has(call.tool) ? searchesLater.get(key) : undefined;
+      const retried = call.isError && key ? successesLater.get(key) : undefined;
+      const searched = SEARCH_TOOLS.has(call.tool) && key ? searchesLater.get(key) : undefined;
       const touched = READ_TOOLS.has(call.tool) && path ? pathsTouchedLater.get(path) : undefined;
       if (retried) {
         verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'failed_then_fixed', evidence: retried });
@@ -99,8 +112,8 @@ export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
       }
     }
 
-    if (!call.isError) successesLater.set(key, call.id);
-    if (SEARCH_TOOLS.has(call.tool)) searchesLater.set(key, call.id);
+    if (key && !call.isError) successesLater.set(key, call.id);
+    if (key && SEARCH_TOOLS.has(call.tool)) searchesLater.set(key, call.id);
     if (path && supersedesReads(call)) pathsTouchedLater.set(path, call.id);
   }
   return verdicts;

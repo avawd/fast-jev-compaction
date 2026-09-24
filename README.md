@@ -49,11 +49,24 @@ claude plugin install verbatim-compaction@verbatim-compaction
 
 ## Options
 
+Set options in your user settings (`~/.claude/settings.json`), a `--settings` file or managed
+settings, under the plugin's full id. Project settings are not read for plugin options.
+
+```json
+{
+  "pluginConfigs": {
+    "verbatim-compaction@verbatim-compaction": {
+      "options": { "compactAtPercent": 70, "claudeTimeoutMs": 30000 }
+    }
+  }
+}
+```
+
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested |
 | `minReductionRatio` | 0.25 | Below this, fall back to the built-in summary |
-| `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept) |
+| `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |

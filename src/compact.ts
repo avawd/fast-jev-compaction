@@ -35,8 +35,13 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
   };
 }
 
+/** A result this short is left whole: the note would cost about as much as it saves. */
+function shrinks(resultChars: number, headChars: number): boolean {
+  return resultChars > headChars + 120;
+}
+
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
+  if (!shrinks(text.length, headChars)) return text;
   const kept = sliceWhole(text, headChars);
   const head = kept.length > 0 ? `${kept}\n` : '';
   return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length} chars of this tool result${
@@ -129,6 +134,12 @@ function preferTruncation(decision: CallDecision, call: ToolCall, messages: read
   return { ...decision, action: 'drop_result', headChars: 0 };
 }
 
+/** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
+function unlessNoop(decision: CallDecision, call: ToolCall, headChars: number): CallDecision {
+  if (decision.action !== 'drop_result') return decision;
+  return shrinks(call.resultChars, decision.headChars ?? headChars) ? decision : { ...decision, action: 'keep' };
+}
+
 /** Characters of text, tool input and tool output a message holds. */
 export function messageChars(message: Message): number {
   let total = message.text.length;
@@ -177,7 +188,7 @@ export async function compact(
       source: verdict.source,
     };
     if (verdict.rule) decision.rule = verdict.rule;
-    return preferTruncation(decision, call, messages);
+    return unlessNoop(preferTruncation(decision, call, messages), call, resolved.truncateHeadChars);
   });
   const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
@@ -194,8 +205,8 @@ export async function compact(
       resultsDropped: by((d) => d.action === 'drop_result'),
       callsDropped: by((d) => d.action === 'drop_call'),
       pinned: by((d) => d.source === 'pinned'),
-      byRule: by((d) => d.source === 'rule'),
-      byClaude: by((d) => d.source === 'claude'),
+      byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
+      byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
       claude: outcome.claude,
       ms: Date.now() - started,
     },

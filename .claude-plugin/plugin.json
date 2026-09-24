@@ -6,7 +6,7 @@
   "userConfig": {
     "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction.", "default": 60 },
     "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum estimated character reduction required to replace history; below it the built-in summary runs.", "default": 0.25 },
-    "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched.", "default": 6 },
+    "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched, counted one per content block (text, thinking, tool call, tool result) as Claude Code hands them over.", "default": 6 },
     "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },
     "maxCandidates": { "type": "number", "title": "Maximum Claude candidates", "description": "Most tool calls listed for the Claude fork, largest outputs first.", "default": 400 },
     "useClaudeScorer": { "type": "boolean", "title": "Use Claude scorer", "description": "Ask one tool-less fork of the session about calls the rules leave undecided. Off: rules only, no model call.", "default": true },

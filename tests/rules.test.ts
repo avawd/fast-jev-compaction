@@ -126,6 +126,22 @@ describe('applyRules', () => {
     expect(v.get('t5')?.evidence).toBe('t6');
   });
 
+  it('survives an input canonicalJson cannot encode (L3), and still judges the rest', () => {
+    fresh();
+    const cyclic: Record<string, unknown> = { pattern: 'x' };
+    cyclic['self'] = cyclic;
+    const calls = [
+      c('Grep', cyclic),
+      c('Grep', cyclic),
+      c('Bash', { command: 'n', big: 10n as unknown }),
+      c('Read', { file_path: 'src/a.ts' }),
+      c('Read', { file_path: 'src/a.ts' }),
+    ];
+    const v = applyRules(calls);
+    expect(v.has('t1')).toBe(false);
+    expect(v.get('t4')?.rule).toBe('stale_read');
+  });
+
   it('leaves different paths and different inputs alone', () => {
     fresh();
     const calls = [
