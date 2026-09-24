@@ -23,9 +23,13 @@ If the result saves less than `minReductionRatio`, Claude Code's built-in summar
 
 Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back
 exactly as Claude Code had them. A message that loses a tool call, and the user message whose tool
-result is truncated, is rebuilt from its role, its text and its tool blocks only (truncation never
-rebuilds the assistant message that made the call): images and documents, thinking blocks and the original order of its
-blocks are not preserved in that message.
+result is truncated, is rebuilt from its role, its text and its tool blocks only: images and documents,
+thinking blocks and the original order of its blocks are not preserved in that message. Truncation
+never rebuilds the assistant message that made the call.
+
+A call whose assistant message has no text of its own is truncated to its note instead of dropped.
+Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
+dropping the call would leave a message holding only thinking.
 
 ## Install
 

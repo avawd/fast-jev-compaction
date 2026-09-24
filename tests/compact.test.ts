@@ -18,7 +18,7 @@ function transcript(): Message[] {
     msg('user', 'Fix the failing test.'),
     use('u1', 'Read', { file_path: 'src/a.ts' }),
     res('u1', big),
-    use('u2', 'Bash', { command: 'npm test' }),
+    msg('assistant', 'Running the tests.', { toolUses: [{ tool_use_id: 'u2', tool: 'Bash', input: { command: 'npm test' } }] }),
     res('u2', big),
     msg('assistant', 'Done reading.'),
     msg('user', 'next'),
@@ -46,7 +46,7 @@ describe('compact', () => {
     const out = await compact(input, scorer, { preserveRecentMessages: 6 });
     expect(seen.map((c) => c.id)).toEqual(['t1', 't2']);
     expect(out.messages.map((m) => m.text)).toEqual(
-      input.map((m) => m.text).filter((_, i) => i !== 3 && i !== 4),
+      input.map((m) => m.text).filter((_, i) => i !== 4),
     );
     expect(out.messages[2]?.toolResults?.[0]?.text.length).toBeLessThan(600);
     expect(out.stats).toMatchObject({ calls: 2, resultsDropped: 1, callsDropped: 1, byRule: 1, byClaude: 1, claude: 'ran' });
@@ -68,6 +68,27 @@ describe('compact', () => {
     expect(out.messages[1]?.toolUses[0]).toBe(withOutcome.toolUses[0]);
     expect(out.messages[2]).not.toBe(input[2]);
     expect(out.messages[2]?.toolResults?.[0]?.text.length).toBeLessThan(600);
+  });
+
+  it('truncates to nothing instead of dropping a call whose assistant row has no text (M4)', async () => {
+    // Claude Code hands over one row per content block: a thinking block is an assistant row
+    // with no text and no tool use, sharing its message with the tool_use row after it.
+    const thinking = msg('assistant', '');
+    const input = [
+      msg('user', 'go'), thinking, use('u1', 'Bash', { command: 'npm test' }), res('u1', big),
+      ...transcript().slice(5),
+    ];
+    const scorer: Scorer = async () => ({
+      claude: 'ran',
+      verdicts: new Map([['t1', { action: 'drop_call', source: 'claude' }]]),
+    });
+    const out = await compact(input, scorer, { preserveRecentMessages: 6 });
+    expect(out.decisions[0]).toMatchObject({ action: 'drop_result', source: 'claude' });
+    expect(out.stats).toMatchObject({ callsDropped: 0, resultsDropped: 1 });
+    expect(out.messages[1]).toBe(thinking);
+    expect(out.messages[2]).toBe(input[2]);
+    const note = out.messages[3]?.toolResults?.[0]?.text ?? '';
+    expect(note.startsWith('[verbatim-compaction truncated 4000 chars')).toBe(true);
   });
 
   it('keeps everything and skips the scorer when there are no unpinned calls', async () => {

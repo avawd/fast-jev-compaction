@@ -56,9 +56,12 @@ export function applyDecisions(
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
+  const heads = new Map<string, number>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
-    if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
+    if (!call || decision.action === 'keep') continue;
+    actions.set(call.tool_use_id, decision.action);
+    if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -77,7 +80,8 @@ export function applyDecisions(
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const head = heads.get(result.tool_use_id) ?? headChars;
+        const text = truncatedResultText(result.text, result.isError ?? false, head);
         return text === result.text
           ? result
           : {
@@ -109,6 +113,18 @@ export function applyDecisions(
     kept.push(rebuilt);
   }
   return kept;
+}
+
+/**
+ * A drop_call on a call whose assistant row has no text becomes a drop_result that keeps
+ * nothing but the note. Claude Code hands over one row per content block, so that row's
+ * thinking block is a sibling row with no text of its own: removing the tool_use row would
+ * leave an assistant message holding only thinking. Keeping the call costs its input alone.
+ */
+function preferTruncation(decision: CallDecision, call: ToolCall, messages: readonly Message[]): CallDecision {
+  if (decision.action !== 'drop_call') return decision;
+  if ((messages[call.callIndex]?.text ?? '').trim().length > 0) return decision;
+  return { ...decision, action: 'drop_result', headChars: 0 };
 }
 
 /** Characters of text, tool input and tool output a message holds. */
@@ -159,7 +175,7 @@ export async function compact(
       source: verdict.source,
     };
     if (verdict.rule) decision.rule = verdict.rule;
-    return decision;
+    return preferTruncation(decision, call, messages);
   });
   const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;

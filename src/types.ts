@@ -89,6 +89,8 @@ export interface CallDecision {
   action: CallAction;
   source: 'pinned' | 'rule' | 'claude' | 'default';
   rule?: RuleName;
+  /** Characters of the result to keep when it differs from `truncateHeadChars`. */
+  headChars?: number;
 }
 
 export interface CompactOptions {

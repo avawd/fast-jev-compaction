@@ -15,7 +15,7 @@ function transcript(): SessionMessage[] {
     m('user', '', { toolResults: [{ tool_use_id: 'u1', text: big }], handle: 'h2' }),
     m('assistant', '', { toolUses: [{ tool_use_id: 'u2', tool: 'Edit', input: { file_path: 'src/p.ts' } }], handle: 'h3' }),
     m('user', '', { toolResults: [{ tool_use_id: 'u2', text: 'ok' }], handle: 'h4' }),
-    m('assistant', '', { toolUses: [{ tool_use_id: 'u3', tool: 'Bash', input: { command: 'npm test' } }], handle: 'h5' }),
+    m('assistant', 'Running the tests.', { toolUses: [{ tool_use_id: 'u3', tool: 'Bash', input: { command: 'npm test' } }], handle: 'h5' }),
     m('user', '', { toolResults: [{ tool_use_id: 'u3', text: big }], handle: 'h6' }),
     ...Array.from({ length: 6 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`, { handle: `r${i}` })),
   ];
