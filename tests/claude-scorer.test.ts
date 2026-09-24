@@ -72,6 +72,25 @@ describe('scoreWithClaude', () => {
     expect(out.status).toBe('error');
     expect(out.verdicts.size).toBe(0);
   });
+  it('reads the 2.1.281 answered shape', async () => {
+    const fork: ForkFn = async () => ({ isAnswered: true, text: '{"drop":["t2"],"truncate":[]}', usage: {} });
+    const out = await scoreWithClaude(fork, calls, 400);
+    expect(out.status).toBe('ran');
+    expect(out.verdicts.get('t2')?.action).toBe('drop_call');
+  });
+  it.each([
+    [{ isAnswered: false, reason: 'nothing-to-fork' }, 'no-fork'],
+    [{ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded' }, 'api-error 529'],
+    [{ isAnswered: false, reason: 'api-error', status: null, error: 'unknown' }, 'api-error'],
+    [{ isAnswered: false, reason: 'aborted' }, 'aborted'],
+    [{ isAnswered: false, reason: 'empty-reply' }, 'empty'],
+    [{ isAnswered: false, reason: 'some-future-reason' }, 'error'],
+  ])('labels the unanswered 2.1.281 shape %j as %s, never unparseable', async (reply, status) => {
+    const fork = (async () => reply) as unknown as ForkFn;
+    const out = await scoreWithClaude(fork, calls, 400);
+    expect(out.status).toBe(status);
+    expect(out.verdicts.size).toBe(0);
+  });
   it('skips the fork when there is nothing to score', async () => {
     let called = false;
     const out = await scoreWithClaude(async () => { called = true; return null; }, [], 400);
@@ -92,10 +111,10 @@ describe('scoreWithClaude', () => {
     const out = await scoreWithClaude(fork, calls, 400, { timeoutMs: 6000, sleep: () => new Promise(() => {}) });
     expect(out.status).toBe('ran');
   });
-  it('treats a reply without string text as unparseable', async () => {
+  it('treats a reply without string text as empty, not unparseable', async () => {
     const bad = (async () => ({})) as unknown as ForkFn;
     const out = await scoreWithClaude(bad, calls, 400);
-    expect(out.status).toBe('unparseable');
+    expect(out.status).toBe('empty');
     expect(out.verdicts.size).toBe(0);
   });
 });

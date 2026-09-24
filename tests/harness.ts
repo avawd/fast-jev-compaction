@@ -5,11 +5,12 @@
  * cannot load it.
  */
 import { register } from '../hooks/verbatim.ts';
+import type { ForkReply } from '../src/index.js';
 
 type Handler = ($: unknown, event: unknown, next: unknown) => Promise<unknown>;
 
 export interface FakeOptions {
-  fork?: (request: { prompt: string }) => Promise<{ text: string } | null>;
+  fork?: (request: { prompt: string }) => Promise<ForkReply>;
   percent?: number | (() => Promise<number>);
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
   toast?: (text: string) => void;
@@ -50,7 +51,8 @@ export function harness(options: FakeOptions = {}): Harness {
     model: {
       fork: async (request: { prompt: string }) => {
         h.forkCalls.push(request.prompt);
-        return options.fork ? options.fork(request) : { text: '{"drop":[],"truncate":[]}' };
+        // The live 2.1.281 shape; tests pass the older `{ text }` / null shapes explicitly.
+        return options.fork ? options.fork(request) : { isAnswered: true, text: '{"drop":[],"truncate":[]}' };
       },
     },
     session: {

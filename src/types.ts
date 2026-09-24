@@ -49,8 +49,24 @@ export interface Verdict {
   rule?: RuleName;
 }
 
-/** What happened to the Claude stage in one compaction. */
-export type ClaudeStatus = 'ran' | 'skipped' | 'null' | 'unparseable' | 'error' | 'timeout';
+/**
+ * What happened to the Claude stage in one compaction. `unparseable` is only a reply
+ * whose text was read and was not the asked-for JSON; `no-fork`, `api-error [status]`,
+ * `aborted` and `empty` are the engine's own reasons for having no text; `null` is a
+ * pre-2.1.281 engine's empty answer; `error` a fork that threw or an unknown reason.
+ */
+export type ClaudeStatus =
+  | 'ran'
+  | 'skipped'
+  | 'null'
+  | 'unparseable'
+  | 'error'
+  | 'timeout'
+  | 'no-fork'
+  | 'api-error'
+  | `api-error ${number}`
+  | 'aborted'
+  | 'empty';
 
 export interface ScoreOutcome {
   /** Keyed by `ToolCall.id`. Calls absent from the map are kept. */

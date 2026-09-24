@@ -36,5 +36,5 @@
 The engine API it uses (`session.compact`, `turn.complete`, `$.model.fork`, `$.clock.sleep`,
 `$.session.usage`, `$.session.compact`, `$.ui.log`, `$.ui.toast`, and the hook-global
 `AbortController`/`AbortSignal`) is declared in `types/claude-code.d.ts`, generated from Claude Code
-2.1.274. Function hooks are early access: regenerate and re-check that file after a Claude Code
+2.1.281. Function hooks are early access: regenerate and re-check that file after a Claude Code
 upgrade.
