@@ -92,7 +92,7 @@ describe('scoreWithClaude', () => {
 
   it('re-asks a refused chunk whole once, and splits it only when that fails too', async () => {
     const many = Array.from({ length: 4 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
-    const refused = { isAnswered: false, reason: 'api-error', status: null } as never;
+    const refused = { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' } as never;
     let wholeAsks = 0;
     const fork: ForkFn = async ({ prompt }) => {
       const ids = idsIn(prompt);
@@ -102,7 +102,7 @@ describe('scoreWithClaude', () => {
     const out = await scoreWithClaude(fork, many, opts());
     expect(out.status).toBe('ran');
     expect(out.verdicts.size).toBe(4);
-    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ` ${f.retry}` : ''}`)).toEqual(['4 api-error', '4 ran whole']);
+    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ` ${f.retry}` : ''}`)).toEqual(['4 refused', '4 ran whole']);
   });
 
   it('splits into two concurrent halves when the whole re-ask fails too, one level only', async () => {
@@ -158,7 +158,9 @@ describe('scoreWithClaude', () => {
   it.each([
     [{ isAnswered: false, reason: 'nothing-to-fork' }, 'no-fork'],
     [{ isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded' }, 'api-error 529'],
-    [{ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' }, 'api-error'],
+    [{ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' }, 'refused'],
+    [{ isAnswered: false, reason: 'api-error', status: null, error: 'unknown' }, 'api-error'],
+    [{ isAnswered: false, reason: 'api-error', status: 400, error: 'invalid_request' }, 'api-error 400'],
     [{ isAnswered: false, reason: 'aborted' }, 'aborted'],
     [{ isAnswered: false, reason: 'empty-reply' }, 'empty'],
     [{ isAnswered: false, reason: 'some-future-reason' }, 'error'],

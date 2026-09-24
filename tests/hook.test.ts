@@ -34,7 +34,7 @@ describe('resolveHookConfig', () => {
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
-      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 20000,
+      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
       keepThreshold: 0.5, forkChunkSize: 60,
     });
@@ -51,9 +51,9 @@ describe('resolveHookConfig', () => {
     expect(resolveHookConfig({ claudeTimeoutMs: 500 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 45_000 }).claudeTimeoutMs).toBe(45_000);
     expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(45_000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(20_000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(20_000);
-    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(20_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(30_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(30_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(30_000);
     expect(resolveHookConfig({ claudeTimeoutMs: 1234.5 }).claudeTimeoutMs).toBe(1234.5);
   });
 });
@@ -132,7 +132,7 @@ describe('register', () => {
       expect(out.messages).toBeDefined();
       expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout \d+\.\ds\)/);
       expect(h.sleeps).toHaveLength(1);
-      expect(h.sleeps[0]?.ms).toBe(20000);
+      expect(h.sleeps[0]?.ms).toBe(30000);
     });
 
     it('cancels the pending timeout sleep once a fast fork wins the race', async () => {
@@ -192,7 +192,7 @@ describe('register', () => {
     it('races claudeTimeoutMs when rules alone clear the gate, awaits the ceiling when they do not', async () => {
       const racing = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
       await racing.compact(prunable());
-      expect(racing.sleeps.map((x) => x.ms)).toEqual([20_000]);
+      expect(racing.sleeps.map((x) => x.ms)).toEqual([30_000]);
       const awaiting = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
       await awaiting.compact({ trigger: 'auto', messages: claudeOnly() });
       expect(awaiting.sleeps.map((x) => x.ms)).toEqual([45_000]);

@@ -8,7 +8,7 @@ import type { ClaudeStatus, ForkRun, ToolCall, Verdict } from './types.js';
  */
 export type ForkReply =
   | { isAnswered: true; text: string }
-  | { isAnswered: false; reason: string; status?: number | null }
+  | { isAnswered: false; reason: string; status?: number | null; error?: string }
   | { text: string }
   | null;
 
@@ -39,12 +39,16 @@ export function selectCandidates(calls: readonly ToolCall[], max: number): ToolC
  * Names why an unanswered fork has no text, so a toast says `api-error 529` rather
  * than `unparseable` (a reply that never arrived was never parsed).
  */
-function unansweredStatus(reply: { reason: string; status?: number | null }): ClaudeStatus {
+function unansweredStatus(reply: { reason: string; status?: number | null; error?: string }): ClaudeStatus {
   switch (reply.reason) {
     case 'nothing-to-fork':
       return 'no-fork';
     case 'api-error':
-      return typeof reply.status === 'number' ? `api-error ${reply.status}` : 'api-error';
+      if (typeof reply.status === 'number') return `api-error ${reply.status}`;
+      // 2.1.281 builds a status-less invalid_request frame for a safeguard refusal (lQe on
+      // stop_reason "refusal"); the only other status-less invalid_request is a client-side
+      // oversized-image error, which a text-only fork prompt cannot trigger.
+      return reply.error === 'invalid_request' ? 'refused' : 'api-error';
     case 'aborted':
       return 'aborted';
     case 'empty-reply':
@@ -115,7 +119,7 @@ type ChunkResult = { verdicts: Map<string, Verdict>; runs: ForkRun[] };
  * way again.
  */
 function retryable(status: ClaudeStatus): boolean {
-  return status === 'api-error' || status === 'unparseable' || status === 'empty';
+  return status === 'refused' || status === 'api-error' || status === 'unparseable' || status === 'empty';
 }
 
 /** Most forks one compaction runs at once; past it, chunks grow instead. */

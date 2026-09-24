@@ -96,6 +96,8 @@ export type ClaudeStatus =
   | 'timeout'
   | 'no-fork'
   | 'api-error'
+  /** A safeguard refusal: a status-less `invalid_request` error frame (2.1.281 lQe). */
+  | 'refused'
   | `api-error ${number}`
   | 'aborted'
   | 'empty';

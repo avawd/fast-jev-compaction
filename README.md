@@ -62,8 +62,12 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    2.1.281 turns into an error frame (`invalid_request`, no status) and a fork reports as `api-error`.
    How often they fire depends on the whole request, and long tool inputs set them off most: in a
    security-heavy session, candidate lines carrying Bash commands of up to 400 characters were refused
-   on 3 of 4 first tries, while the same lines cut to 200 characters passed 8 of 8. So a call's input is
-   shown up to 200 characters. A chunk that is still refused is re-asked whole once, then as two halves.
+   on 3 of 4 first tries, while the same lines cut to 120 or 200 characters passed 16 of 16. So a call's input is
+   shown up to 120 characters, after its secret-bearing parts are reduced to names: env assignment
+   values (`TOKEN=…`), HTTP header values (`-H 'Authorization: …'`) and heredoc bodies (`<<EOF …>`).
+   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) is re-asked
+   whole once, then as two halves. A refusal that lands mid-reply leaves cut-off text, which shows
+   as `unparseable` because the fork result does not say why the text stopped.
 
 If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
 thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
@@ -130,7 +134,7 @@ debug log names the keys it looked for).
 | `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
-| `claudeTimeoutMs` | 20000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
+| `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets a slow but healthy fork (31 s was measured) count, and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 

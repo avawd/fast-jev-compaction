@@ -61,7 +61,7 @@ const DEFAULTS: HookConfig = {
   truncateHeadChars: 300,
   maxCandidates: 400,
   useClaudeScorer: true,
-  claudeTimeoutMs: 20_000,
+  claudeTimeoutMs: 30_000,
   truncateTailChars: 1000,
   // Rows as the engine hands them over (one per content block). Calibrated as 60 merged
   // messages; merged-to-row ratios on the review corpus are 1.49-1.76 (median 1.64): ~100 rows.

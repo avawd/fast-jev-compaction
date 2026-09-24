@@ -19,14 +19,14 @@ import type { ToolCall } from './types.js';
  */
 
 /**
- * Most characters of a call's input shown on its candidate line. 400 drew safeguard refusals:
- * on 2.1.281 a refused fork surfaces as `api-error` / `invalid_request` with no status (the
- * engine's lQe() turns `stop_reason: "refusal"` into an error frame), and the session's long Bash
- * commands (env loading, heredocs, credentialed curl) past ~200 chars were what set it off. Live,
- * the pipeline's own chunk prompts: inputs as they were 0/4 answered, 120 and 200 chars 16/16,
- * previews included.
+ * Most characters of a call's input shown on its candidate line. Long inputs drew safeguard
+ * refusals: on 2.1.281 a refused fork surfaces as a status-less `invalid_request` (the engine's
+ * lQe() turns `stop_reason: "refusal"` into an error frame), and the session's long Bash commands
+ * (env loading, heredocs, credentialed curl) were what set it off. Live, on the pipeline's own
+ * chunk prompts: inputs up to 400 chars 0/4 answered; 120 and 200 chars 16/16. 120 is the smaller
+ * of the two that passed; `elideSecrets` removes the riskiest parts before the cut.
  */
-export const INPUT_CHARS = 200;
+export const INPUT_CHARS = 120;
 /** Most characters of a result's head shown on its candidate line. */
 export const PREVIEW_CHARS = 80;
 /** Most candidates asked about in one fork; more are split over concurrent forks. */
@@ -59,6 +59,22 @@ function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
 }
 
+const ENV_ASSIGNMENT = /(^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|)]+)/g;
+const HEADER = /(-H|--header)(\s+)(["'])([A-Za-z0-9-]+):[^"']*\3/g;
+const HEREDOC = /<<-?\s*(["']?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g;
+
+/**
+ * A Bash command with the parts most likely to carry secrets reduced to their names: env
+ * assignment values (`X=…`), HTTP header values (`-H 'Authorization: …'`) and heredoc bodies
+ * (`<<EOF …>`). Data minimisation for the fork, which needs what a command did, not its payload.
+ */
+export function elideSecrets(command: string): string {
+  return command
+    .replace(HEREDOC, (_m, _q: string, tag: string) => `<<${tag} …>`)
+    .replace(HEADER, (_m, flag: string, space: string, quote: string, name: string) => `${flag}${space}${quote}${name}: …${quote}`)
+    .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`);
+}
+
 function valueText(value: unknown): string {
   if (typeof value === 'string') return value;
   try {
@@ -81,7 +97,7 @@ function inputText(call: ToolCall): string {
     const others = entries.filter(([k]) => k !== 'command' && k !== 'description');
     const rest = others.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
     // Leading `cd DIR &&`, `VAR=value` and `echo "..."` banners carry nothing for the scorer.
-    const command = stripCommandPrefix(call.input['command']) || call.input['command'];
+    const command = elideSecrets(stripCommandPrefix(call.input['command']) || call.input['command']);
     return rest ? `${command} ${rest}` : command;
   }
   return entries.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');

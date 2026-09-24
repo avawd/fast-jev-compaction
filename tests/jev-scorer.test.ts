@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
+  elideSecrets, buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
 } from '../src/index.js';
 
 function c(id: string, tool: string, input: Record<string, unknown>, extra: Partial<ToolCall> = {}): ToolCall {
@@ -36,14 +36,14 @@ describe('jevCandidateLine', () => {
     );
   });
 
-  it('shows a Bash command, cd prefix stripped, up to 200 chars (longer ones drew safeguard refusals live)', () => {
+  it('shows a Bash command, cd prefix stripped, up to 120 chars (longer ones drew safeguard refusals live)', () => {
     const short = jevCandidateLine(c('t1', 'Bash', { command: 'cd /repo && npm test', description: 'run' }), ctx);
     expect(short).toContain(' npm test');
     expect(short).not.toContain('cd /repo');
     expect(short).not.toContain('description');
     const long = jevCandidateLine(c('t2', 'Bash', { command: `echo ${'x'.repeat(1000)}` }), ctx);
     const input = long.slice(long.indexOf('echo'), long.indexOf(' → '));
-    expect(input.length).toBe(200);
+    expect(input.length).toBe(120);
     expect(input.endsWith('…')).toBe(true);
   });
 
@@ -212,5 +212,26 @@ describe('well-formed prompts', () => {
     const prompt = buildJevPrompt([broken], { messageCount: 3 });
     expect(wellFormed(prompt)).toBe(true);
     expect(prompt).toContain('a�');
+  });
+});
+
+describe('elideSecrets (data minimisation for the fork)', () => {
+  it('keeps env assignment names, not their values', () => {
+    expect(elideSecrets('set -a; GH_TOKEN=$GITHUB_TOKEN gh api repos/x')).toBe('set -a; GH_TOKEN=… gh api repos/x');
+    expect(elideSecrets('FOO="a b" BAR=\'c\' make')).toBe('FOO=… BAR=… make');
+    expect(elideSecrets('npm test --reporter=dot')).toBe('npm test --reporter=dot');
+  });
+  it('keeps header names, not their values', () => {
+    expect(elideSecrets(`curl -H 'Authorization: Bearer abc.def' -H "X-Api-Key: k1" https://h/x`))
+      .toBe(`curl -H 'Authorization: …' -H "X-Api-Key: …" https://h/x`);
+    expect(elideSecrets('curl --header "Cookie: s=1" u')).toBe('curl --header "Cookie: …" u');
+  });
+  it('replaces a heredoc body with a marker', () => {
+    expect(elideSecrets("cat > f <<'EOF'\nsecret line\nmore\nEOF\necho done")).toBe("cat > f <<EOF …>\necho done");
+    expect(elideSecrets('git commit -F - <<-END\nmsg\n\tEND')).toBe('git commit -F - <<END …>');
+  });
+  it('is applied to Bash candidate lines', () => {
+    const line = jevCandidateLine(c('t1', 'Bash', { command: 'X_TOKEN=s3cr3t curl -H "Authorization: Bearer s3cr3t" u' }), { messageCount: 5 });
+    expect(line).not.toContain('s3cr3t');
   });
 });
