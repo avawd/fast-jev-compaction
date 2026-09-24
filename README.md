@@ -100,8 +100,10 @@ from its source): you are signed in with claude.ai (OAuth) against the first-par
 server-side flag `tengu_sepia_moth` is on for the account; the setting `precomputeCompactionEnabled` is
 `true` (its default is `false`); auto-compact is on; and the context is within the precompute buffer
 (20% by default) below the auto-compact threshold. In `-p`/SDK sessions it is also held back while the
-session has had only one user prompt. This path is covered by harness tests only: no live run has
-armed it yet (see the commit that added this section for the probe).
+session has had only one user prompt. This path is covered by harness tests only. One headless probe
+(`precomputeCompactionEnabled: true` in `--settings`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, context about
+464k tokens against a 476k threshold, two user prompts) logged no `precomputed compact:` line of any
+kind, so a gate that no log line names was closed: most likely the server flag, which a user cannot set.
 
 ## Cost
 
