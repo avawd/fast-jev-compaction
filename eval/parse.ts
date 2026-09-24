@@ -52,6 +52,11 @@ export interface Segment {
   messages: EvalMessage[];
   /** The compact_boundary that ENDED this segment; absent for the last one. */
   boundary?: Boundary;
+  /**
+   * `cwd` of the segment's last main-thread user/assistant row: what `$.session.cwd()` would have
+   * returned when this stretch was compacted. Absent when no row records one.
+   */
+  cwd?: string;
   /** Whether message 0 is the built-in compaction summary (`isCompactSummary`). */
   startsWithSummary: boolean;
   thinkingRows: number;
@@ -130,6 +135,7 @@ export async function loadSegments(file: string): Promise<Segment[]> {
     }
     if (row['type'] !== 'user' && row['type'] !== 'assistant') continue;
     if (row['isSidechain'] === true) continue;
+    if (typeof row['cwd'] === 'string' && row['cwd'].length > 0) seg.cwd = row['cwd'];
     if (row['isMeta'] === true) {
       seg.metaRowsSkipped += 1;
       continue;

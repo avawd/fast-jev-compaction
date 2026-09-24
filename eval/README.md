@@ -32,6 +32,12 @@ Each segment runs in three **arms**, all through the branch's own `compact()` an
 | `trunc` | every call the rules left undecided gets `drop_result` | a scorer that truncates everything it is unsure of |
 | `floor` | every undecided call gets `drop_call` | the **floor**: a scorer that drops everything it is asked about |
 
+Every arm passes the segment's `cwd` as a compact option, unless `--options` sets one. It is the
+`cwd` recorded on the segment's last main-thread user/assistant row, which is what the hook's
+`$.session.cwd()` returns at that point. Branches without the option ignore it. The JSON records it
+per segment. On the current corpus it changes no rule decision, because the commands mostly `cd` to
+an absolute path first. Pass `--options '{"cwd":""}'` to turn it off.
+
 A real scorer run falls between `floor` and `rules`. If `trunc` or `floor` leaves a call undecided,
 the harness prints `WARN ... Scorer contract may have changed`.
 
@@ -169,16 +175,17 @@ the live segment, the live verbatim compaction kept 27.3% of never-echoed facts:
 | coding-2 | 1284 | 375/374 | 606.2k | 16.1% | FAIL (0.09) | 493 | 96.3% | 20.9% | 4.5% | - | 3/46/73 of 81 |
 | bash-heavy | 1080 | 338/335 | 381.4k | 0% | FAIL (0) | 283 | 100% | 45.9% | 9.9% | - | 0/55/121 of 125 |
 
-**optimize @ f866375** (Stage 1, 2a rules and 2b scorer merged; gate over tool-result bytes):
+**optimize @ fd200d4** (Stage 1, 2a and 2b plus the rule fixes; gate over tool-result bytes; `cwd`
+passed):
 
 | segment | msgs | calls/unp | unpinned res | rules rm% | gate(ratio) | facts | surv rules | trunc | floor | next (live) | laterRef lost r/t/f |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| ops-live* | 303 | 100/99 | 177.1k | 35.4% | pass (0.353) | 198 | 70.7% | 51.5% | 47.5% | 27.3% verbatim | 0/0/0 of 73 |
-| long-ops | 1050 | 260/259 | 362.6k | 42.1% | pass (0.42) | 304 | 73% | 41.1% | 24% | 0% summary | 0/0/0 of 110 |
+| ops-live* | 303 | 100/99 | 177.1k | 35.1% | pass (0.35) | 198 | 70.7% | 51.5% | 47.5% | 27.3% verbatim | 0/0/0 of 73 |
+| long-ops | 1050 | 260/259 | 362.6k | 41.6% | pass (0.416) | 304 | 74.7% | 41.1% | 24% | 0% summary | 0/0/0 of 110 |
 | mixed | 498 | 149/147 | 299.3k | 12.2% | FAIL (0.121) | 368 | 81% | 55.2% | 54.9% | 3.3% summary | 0/0/0 of 81 |
-| coding | 733 | 206/205 | 272.3k | 55.9% | pass (0.558) | 116 | 64.7% | 49.1% | 37.9% | 0.9% summary | 0/0/0 of 34 |
-| coding-2 | 1284 | 375/374 | 606.2k | 45.9% | pass (0.459) | 493 | 74.2% | 66.5% | 64.1% | - | 0/0/1 of 81 |
-| bash-heavy | 1080 | 338/335 | 381.4k | 51.1% | pass (0.508) | 283 | 63.3% | 50.9% | 41.3% | - | 0/0/0 of 125 |
+| coding | 733 | 206/205 | 272.3k | 54.8% | pass (0.548) | 116 | 64.7% | 49.1% | 37.1% | 0.9% summary | 0/0/0 of 34 |
+| coding-2 | 1284 | 375/374 | 606.2k | 45.1% | pass (0.45) | 493 | 74.2% | 66.5% | 64.1% | - | 0/0/1 of 81 |
+| bash-heavy | 1080 | 338/335 | 381.4k | 50.5% | pass (0.503) | 283 | 63.3% | 50.9% | 41.3% | - | 0/0/0 of 125 |
 
 Live validation run 1 (claude-scorer @ 5963d67, still with `--disallowedTools`): the plugin loaded from the plugin
 dir and the global copy was disabled. One fork took 8269 ms and hit the 6000 ms timeout. That left
