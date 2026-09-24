@@ -4,6 +4,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
+import { gateRatio } from '../src/gate.js';
 import { makeScorer } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
@@ -22,6 +23,14 @@ export type HookConfig = {
    * live hooks).
    */
   claudeTimeoutMs: number;
+  /** Tail kept, beside the head, when truncating a test/build/deploy-like result. */
+  truncateTailChars: number;
+  /** Read and Bash file-read results older than this many messages are truncated. */
+  staleAfterMessages: number;
+  /** Never drop a result whose introduced tokens are quoted later. */
+  pinReferenced: boolean;
+  /** Strip JSON furniture from MCP results. */
+  stripMcpFurniture: boolean;
 };
 
 const MIN_CLAUDE_TIMEOUT_MS = 500;
@@ -35,6 +44,10 @@ const DEFAULTS: HookConfig = {
   maxCandidates: 400,
   useClaudeScorer: true,
   claudeTimeoutMs: 6000,
+  truncateTailChars: 1000,
+  staleAfterMessages: 60,
+  pinReferenced: true,
+  stripMcpFurniture: true,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -44,6 +57,11 @@ function num(options: PluginOptions, key: keyof HookConfig, fallback: number): n
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function bool(options: PluginOptions, key: keyof HookConfig, fallback: boolean): boolean {
+  const value = options[key];
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 export function resolveHookConfig(options: PluginOptions): HookConfig {
@@ -60,6 +78,10 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       MIN_CLAUDE_TIMEOUT_MS,
       MAX_CLAUDE_TIMEOUT_MS,
     ),
+    truncateTailChars: num(options, 'truncateTailChars', DEFAULTS.truncateTailChars),
+    staleAfterMessages: num(options, 'staleAfterMessages', DEFAULTS.staleAfterMessages),
+    pinReferenced: bool(options, 'pinReferenced', DEFAULTS.pinReferenced),
+    stripMcpFurniture: bool(options, 'stripMcpFurniture', DEFAULTS.stripMcpFurniture),
   };
 }
 
@@ -121,7 +143,7 @@ export async function compactSession(
 
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(reductionRatio(result) * 100)}% reduction; rules ${s.byRule}, claude ${s.byClaude} (${s.claude}), ` +
+  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${s.claude}), ` +
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
 }
 
@@ -187,7 +209,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep);
-      if (reductionRatio(result) < config.minReductionRatio) {
+      if (gateRatio(result) < config.minReductionRatio) {
         notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`);
         return next(event);
       }

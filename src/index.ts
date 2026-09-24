@@ -11,4 +11,5 @@ export * from './pin.js';
 export * from './rules-age.js';
 export * from './shape.js';
 export * from './annotate.js';
+export * from './gate.js';
 export * from './shell.js';

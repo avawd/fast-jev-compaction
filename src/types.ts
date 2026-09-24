@@ -120,6 +120,8 @@ export interface CompactResult {
     messagesAfter: number;
     charsBefore: number;
     charsAfter: number;
+    /** Tool-result characters before compaction; the denominator of `gateRatio`. */
+    resultCharsBefore: number;
     calls: number;
     kept: number;
     resultsDropped: number;

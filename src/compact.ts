@@ -1,5 +1,6 @@
 import { annotateCalls } from './annotate.js';
 import { collectToolCalls } from './calls.js';
+import { resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
 import type {
@@ -218,6 +219,7 @@ export async function compact(
       messagesBefore: messages.length,
       messagesAfter: kept.length,
       charsBefore,
+      resultCharsBefore: resultChars(messages),
       charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
       calls: calls.length,
       kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),

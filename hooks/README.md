@@ -16,7 +16,7 @@
     can only fork the main session, so it has nothing to say about a subagent's transcript.
   - **Everything else**: rules, then one `$.model.fork` call over the calls the rules leave
     undecided, bounded by `claudeTimeoutMs` via `$.clock.sleep` raced against the fork. Below
-    `minReductionRatio`, or on any unexpected error, the result goes to `next(event)` instead of
+    `minReductionRatio` (characters saved over tool-result characters, `gateRatio`), or on any unexpected error, the result goes to `next(event)` instead of
     replacing the transcript.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and
   calls `$.session.compact()` once `context.percent` reaches `compactAtPercent`, guarded against
