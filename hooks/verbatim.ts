@@ -89,8 +89,10 @@ function bool(options: PluginOptions, key: keyof HookConfig, fallback: boolean):
 export function resolveHookConfig(options: PluginOptions): HookConfig {
   const flag = options['useClaudeScorer'];
   return {
-    compactAtPercent: num(options, 'compactAtPercent', DEFAULTS.compactAtPercent),
-    minReductionRatio: num(options, 'minReductionRatio', DEFAULTS.minReductionRatio),
+    // Below 1% every turn would compact; a gate at or under 0 would bill a fork for a transcript it hands
+    // back unchanged, and one at 1 or more could never be met.
+    compactAtPercent: clamp(num(options, 'compactAtPercent', DEFAULTS.compactAtPercent), 1, 100),
+    minReductionRatio: clamp(num(options, 'minReductionRatio', DEFAULTS.minReductionRatio), 0.01, 0.95),
     preserveRecentMessages: num(options, 'preserveRecentMessages', DEFAULTS.preserveRecentMessages),
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
     maxCandidates: num(options, 'maxCandidates', DEFAULTS.maxCandidates),

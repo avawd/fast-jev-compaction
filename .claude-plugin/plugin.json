@@ -4,8 +4,8 @@
   "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
   "license": "MIT",
   "userConfig": {
-    "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction.", "default": 60 },
-    "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum characters saved, as a share of the transcript's tool-result characters, required to replace history; below it the built-in summary runs.", "default": 0.25 },
+    "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction. 1–100.", "default": 60 },
+    "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum characters saved, as a share of the transcript's tool-result characters, required to replace history; below it the built-in summary runs. 0.01–0.95.", "default": 0.25 },
     "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched, counted one per content block (text, thinking, tool call, tool result) as Claude Code hands them over.", "default": 6 },
     "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },
     "truncateTailChars": { "type": "number", "title": "Truncated tool result tail", "description": "Characters also kept from the end of a test/build/deploy-like result, or to hold a token quoted later.", "default": 1000 },

@@ -130,8 +130,10 @@ export const MAX_CONCURRENT_FORKS = 8;
  * FIRST wave under the cap, but a chunk that splits into halves re-asks while the other chunks are
  * still running, so only a limiter on the fork itself holds the cap. A slot is freed however the
  * call settles, a synchronous throw included (it becomes a rejection, which runFork already reads).
+ * A call still queued when `expired()` turns true is refused instead of started: nobody is waiting
+ * for its answer any more, and it would bill a fork for nothing.
  */
-function limitForks(fork: ForkFn, max: number): ForkFn {
+function limitForks(fork: ForkFn, max: number, expired: () => boolean = () => false): ForkFn {
   let active = 0;
   const waiting: Array<() => void> = [];
   return (request) =>
@@ -150,7 +152,13 @@ function limitForks(fork: ForkFn, max: number): ForkFn {
         });
       };
       if (active < max) start();
-      else waiting.push(start);
+      else {
+        waiting.push(() => {
+          if (!expired()) return start();
+          reject(new Error('the deadline passed while this fork waited for a slot'));
+          waiting.shift()?.();
+        });
+      }
     });
 }
 
@@ -245,7 +253,7 @@ export async function scoreWithClaude(
     expiry.catch(() => {});
     shared = { timeoutMs: options.timeout.timeoutMs, sleep: () => expiry };
   }
-  const limited = limitForks(fork, MAX_CONCURRENT_FORKS);
+  const limited = limitForks(fork, MAX_CONCURRENT_FORKS, () => expired);
   const results = await Promise.all(
     chunk(candidates, Math.max(options.chunkSize, Math.ceil(candidates.length / MAX_CONCURRENT_FORKS))).map((part) =>
       scoreChunkWithRetry(limited, part, options, shared, now, () => expired)),

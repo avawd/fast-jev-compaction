@@ -379,3 +379,19 @@ describe('register', () => {
     });
   });
 });
+
+describe('resolveHookConfig clamps (review 2)', () => {
+  it('keeps minReductionRatio inside (0, 1): a gate of 0 or less would bill a fork and change nothing', () => {
+    expect(resolveHookConfig({ minReductionRatio: 0 }).minReductionRatio).toBeGreaterThan(0);
+    expect(resolveHookConfig({ minReductionRatio: -1 }).minReductionRatio).toBeGreaterThan(0);
+    expect(resolveHookConfig({ minReductionRatio: 5 }).minReductionRatio).toBeLessThan(1);
+    expect(resolveHookConfig({ minReductionRatio: 0.3 }).minReductionRatio).toBe(0.3);
+  });
+
+  it('keeps compactAtPercent between 1 and 100', () => {
+    expect(resolveHookConfig({ compactAtPercent: 0 }).compactAtPercent).toBe(1);
+    expect(resolveHookConfig({ compactAtPercent: -20 }).compactAtPercent).toBe(1);
+    expect(resolveHookConfig({ compactAtPercent: 400 }).compactAtPercent).toBe(100);
+    expect(resolveHookConfig({ compactAtPercent: 60 }).compactAtPercent).toBe(60);
+  });
+});

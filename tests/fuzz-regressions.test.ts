@@ -69,3 +69,30 @@ describe('fuzz regressions', () => {
     expect(most).toBeLessThanOrEqual(MAX_CONCURRENT_FORKS);
   });
 });
+
+describe('review 2 regressions', () => {
+  it('a fork queued behind the cap never starts after the deadline has passed', async () => {
+    const calls = Array.from({ length: 2 * MAX_CONCURRENT_FORKS }, (_, i) => call(`t${i + 1}`));
+    const last = `t${2 * MAX_CONCURRENT_FORKS}`;
+    let deadlinePassedAt = Infinity;
+    const lateStarts: number[] = [];
+    const fork: ForkFn = ({ prompt }) => {
+      const at = Date.now();
+      if (at >= deadlinePassedAt) lateStarts.push(at);
+      // The last chunk is refused at once, so its halves queue behind seven forks that outlive the deadline.
+      if (prompt.includes(`\n${last} `)) {
+        return Promise.resolve({ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' });
+      }
+      return new Promise((resolve) => setTimeout(() => resolve({ isAnswered: false, reason: 'aborted' }), 60));
+    };
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(() => { deadlinePassedAt = Date.now(); resolve(); }, ms));
+    await scoreWithClaude(fork, calls, {
+      maxCandidates: 400, keepThreshold: 0.5, chunkSize: 2, context: { messageCount: 3 },
+      timeout: { timeoutMs: 15, sleep },
+    });
+    // Let every fork that is still queued or running settle before judging.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(lateStarts).toEqual([]);
+  });
+});

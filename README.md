@@ -134,7 +134,7 @@ debug log names the keys it looked for).
 | `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
-| `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets a slow but healthy fork (31 s was measured) count, and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
+| `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets most slow but healthy forks count (they measured up to about 31 s end to end, so the slowest can still miss it and fall back to the rules alone), and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 
