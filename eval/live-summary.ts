@@ -29,6 +29,8 @@ interface RecallConfig {
 export interface LogFacts {
   pluginLoads: Array<{ enabled: boolean; hooksJson: string }>;
   forks: Array<{ ms?: number; line: string }>;
+  /** Fork lines reporting an API error (e.g. invalid_request); the target is 0. */
+  forkApiErrors: number;
   forkRequests: number;
   outcome?: string;
   kept?: number;
@@ -45,7 +47,7 @@ export interface LogFacts {
 const PLUGIN = 'verbatim-compaction';
 
 export function parseDebugLog(text: string): LogFacts {
-  const out: LogFacts = { pluginLoads: [], forks: [], forkRequests: 0, hookAnswered: false, coreRan: false, hookErrors: [] };
+  const out: LogFacts = { pluginLoads: [], forks: [], forkApiErrors: 0, forkRequests: 0, hookAnswered: false, coreRan: false, hookErrors: [] };
   const seen = new Set<string>();
   for (const line of text.split('\n')) {
     let m = line.match(/Read hooks\.json for plugin (\S+) \(enabled=(true|false)\): (\S+)/);
@@ -57,6 +59,7 @@ export function parseDebugLog(text: string): LogFacts {
     if (m) {
       const ms = m[1]!.match(/^(\d+)ms/);
       out.forks.push({ ms: ms ? Number(ms[1]) : undefined, line: m[1]! });
+      if (/api error/i.test(m[1]!)) out.forkApiErrors += 1;
     }
     if (line.includes('API REQUEST') && line.includes('source=hook_prompt')) out.forkRequests += 1;
     m = line.match(/\[verbatim-compaction\] \$\.ui\.log: (.*)$/);
@@ -67,7 +70,7 @@ export function parseDebugLog(text: string): LogFacts {
         out.kept = Number(k[1]);
         out.total = Number(k[2]);
       }
-      const r = m[1]!.match(/(\d+)% reduction/);
+      const r = m[1]!.match(/(\d+)% (?:reduction|of tool output)/); // pre- and post-gateRatio wording
       if (r) out.reductionPct = Number(r[1]);
       const c = m[1]!.match(/claude \d+ \(([^)]*)\)/);
       if (c) out.claudeStatus = c[1];
@@ -133,6 +136,28 @@ export function parseStream(text: string): StreamFacts {
   return out;
 }
 
+export interface RecallScore {
+  set: string;
+  hit: string[];
+  miss: string[];
+  /** A recall turn that used a tool answered from the tool, not from context: scored 0. */
+  failed: boolean;
+  answer: string;
+}
+
+/**
+ * Scores every set against all post-compaction answers joined: queued stream-json prompts can be
+ * coalesced into one turn (seen live), and the expected tokens are set-specific.
+ */
+export function scoreRecall(answers: readonly string[], sets: readonly RecallSet[], toolUses: readonly string[]): RecallScore[] {
+  const answer = answers.join('\n');
+  const failed = toolUses.length > 0;
+  return sets.map((s) => {
+    if (failed) return { set: s.name, hit: [], miss: [...s.expected], failed, answer };
+    return { set: s.name, ...scoreAnswer(answer, s.expected), failed, answer };
+  });
+}
+
 export function scoreAnswer(answer: string, expected: readonly string[]): { hit: string[]; miss: string[] } {
   const a = answer.toLowerCase();
   const hit = expected.filter((t) => a.includes(t.toLowerCase()));
@@ -183,10 +208,7 @@ async function main(): Promise<void> {
     const stream = parseStream(readFileSync(join(dir, file), 'utf8'));
     const loaded = log.pluginLoads.filter((p) => p.enabled).map((p) => dirname(dirname(p.hooksJson)));
     const wrongCopy = loaded.some((d) => resolve(d) !== resolve(meta.pluginDir));
-    // Queued stream-json prompts can be coalesced into one turn (seen live: both recall sets answered in one
-    // reply), so every set is scored against all post-compaction answers; the expected tokens are set-specific.
-    const answered = stream.answers.join('\n');
-    const recall = sets.map((s) => ({ set: s.name, ...scoreAnswer(answered, s.expected), answer: answered }));
+    const recall = scoreRecall(stream.answers, sets, stream.recallToolUses);
     const transcript = stream.sessionId ? join(homedir(), '.claude', 'projects', projectSlug(config.cwd), `${stream.sessionId}.jsonl`) : '';
     const ret = transcript ? await retention(transcript, sets.flatMap((s) => s.expected)) : undefined;
     const fallback = (log.outcome?.startsWith('fallback') ?? false) || log.coreRan || !log.hookAnswered;
@@ -198,10 +220,11 @@ async function main(): Promise<void> {
       pluginConfig: log.pluginConfigKey,
       forks: log.forks,
       forkRequests: log.forkRequests,
+      forkApiErrors: log.forkApiErrors,
       outcome: log.outcome,
       claudeStatus: log.claudeStatus,
       fallback,
-      timeout: log.claudeStatus === 'timeout' || /timeout/.test(log.outcome ?? ''),
+      timeout: /^timeout/.test(log.claudeStatus ?? '') || /timeout/.test(log.outcome ?? ''),
       hookSettledMs: log.hookSettledMs,
       hookErrors: log.hookErrors,
       preTokens: stream.preTokens,
@@ -219,12 +242,12 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nlive eval ${dir}\nplugin-dir ${meta.pluginDir}; session ${meta.session}; sets ${sets.map((s) => s.name).join(',')}`);
-  console.log('| run | loaded from | forks (ms) | outcome | fallback | pre→post tok | hook ms (incl. next) | ' + sets.map((s) => `recall ${s.name}`).join(' | ') + ' | ' + sets.map((s) => `ctx ${s.name} before→after`).join(' | ') + ' | parser |');
-  console.log('|' + '---|'.repeat(7 + sets.length * 2 + 1));
+  console.log('| run | loaded from | forks (ms) | outcome | fork api-err | fallback | pre→post tok | hook ms (incl. next) | ' + sets.map((s) => `recall ${s.name}`).join(' | ') + ' | ' + sets.map((s) => `ctx ${s.name} before→after`).join(' | ') + ' | parser |');
+  console.log('|' + '---|'.repeat(8 + sets.length * 2 + 1));
   for (const r of rows as Array<Record<string, any>>) {
     const loaded = (r.pluginLoaded as string[]).map((d) => (d === meta.pluginDir ? 'plugin-dir' : d)).join(',') || 'NONE';
     const forks = `${r.forks.length}: ${r.forks.map((f: { ms?: number; line: string }) => f.ms ?? f.line.slice(0, 30)).join('/')}`;
-    const recall = (r.recall as Array<{ hit: string[]; miss: string[] }>).map((x) => `${x.hit.length}/${x.hit.length + x.miss.length}`);
+    const recall = (r.recall as RecallScore[]).map((x) => (x.failed ? `FAILED (tool use) 0/${x.miss.length}` : `${x.hit.length}/${x.hit.length + x.miss.length}`));
     const ctx = sets.map((s) => {
       if (!r.retention) return '-';
       const b = s.expected.filter((t) => r.retention[t]?.before).length;
@@ -232,10 +255,10 @@ async function main(): Promise<void> {
       return `${b}→${a}/${s.expected.length}`;
     });
     const parser = !r.parserCheck ? '-' : r.parserCheck.ok === null ? `n/a (parsed ${r.parserCheck.parsed})` : `${r.parserCheck.ok ? 'ok' : 'MISMATCH'} ${r.parserCheck.parsed}/${r.parserCheck.hookSaw}`;
-    console.log(`| ${r.run} | ${loaded}${r.wrongCopyLoaded ? ' (WRONG COPY)' : ''} | ${forks} | ${(r.outcome ?? 'NO OUTCOME LINE').slice(0, 110)} | ${r.fallback ? 'YES' : 'no'} | ${r.preTokens ?? '-'}→${r.postTokens ?? '-'} | ${r.hookSettledMs ?? '-'} | ${recall.join(' | ')} | ${ctx.join(' | ')} | ${parser} |`);
+    console.log(`| ${r.run} | ${loaded}${r.wrongCopyLoaded ? ' (WRONG COPY)' : ''} | ${forks} | ${(r.outcome ?? 'NO OUTCOME LINE').slice(0, 110)} | ${r.forkApiErrors} | ${r.fallback ? 'YES' : 'no'} | ${r.preTokens ?? '-'}→${r.postTokens ?? '-'} | ${r.hookSettledMs ?? '-'} | ${recall.join(' | ')} | ${ctx.join(' | ')} | ${parser} |`);
   }
   const all = rows as Array<Record<string, any>>;
-  console.log(`\nruns ${all.length}; fallbacks ${all.filter((r) => r.fallback).length}; timeouts ${all.filter((r) => r.timeout).length}; wrong copy ${all.filter((r) => r.wrongCopyLoaded).length}; tool use during recall ${all.filter((r) => r.recallToolUses.length).length}`);
+  console.log(`\nruns ${all.length}; fork api-errors ${all.reduce((n, r) => n + r.forkApiErrors, 0)}; fallbacks ${all.filter((r) => r.fallback).length}; timeouts ${all.filter((r) => r.timeout).length}; wrong copy ${all.filter((r) => r.wrongCopyLoaded).length}; recall FAILED by tool use ${all.filter((r) => r.recallToolUses.length).length}`);
   for (const r of all) {
     for (const x of r.recall as Array<{ set: string; miss: string[]; answer: string }>) {
       console.log(`  run${r.run} ${x.set}: missed [${x.miss.join(', ')}]`);
