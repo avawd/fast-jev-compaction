@@ -49,6 +49,8 @@ export interface ToolCall {
   refTokens?: string[];
   /** `refTokens.length`; shown to the scorer as `ref-later:n`. */
   refLater?: number;
+  /** The session's working directory, when known: relative paths in Bash commands resolve against it. */
+  cwd?: string;
 }
 
 export type CallAction = 'keep' | 'drop_result' | 'drop_call';
@@ -139,12 +141,14 @@ export interface CompactOptions {
   truncateHeadChars?: number;
   /** Extra characters kept from the end of a log-like result (test/build/deploy...). Default 1000. */
   truncateTailChars?: number;
-  /** Read and Bash file-read results older than this many messages are truncated. Default 60. */
+  /** Read and Bash file-read results older than this many messages (one per content block) are truncated. Default 100. */
   staleAfterMessages?: number;
   /** Never drop a result whose introduced tokens are quoted later. Default true. */
   pinReferenced?: boolean;
   /** Strip JSON furniture (self links, avatars, feature flags...) from MCP results. Default true. */
   stripMcpFurniture?: boolean;
+  /** The session's working directory (absolute), for resolving relative paths. Unknown if absent. */
+  cwd?: string;
 }
 
 export interface ResolvedCompactOptions {
@@ -154,6 +158,7 @@ export interface ResolvedCompactOptions {
   staleAfterMessages: number;
   pinReferenced: boolean;
   stripMcpFurniture: boolean;
+  cwd?: string;
 }
 
 export interface CompactResult {

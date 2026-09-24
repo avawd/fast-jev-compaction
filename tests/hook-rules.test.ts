@@ -8,7 +8,7 @@ const m = (role: Message['role'], text: string, extra: Partial<Message> = {}): M
 describe('resolveHookConfig (Stage 2a options)', () => {
   it('defaults the rule options and reads them from userConfig', () => {
     expect(resolveHookConfig({})).toMatchObject({
-      truncateTailChars: 1000, staleAfterMessages: 60, pinReferenced: true, stripMcpFurniture: true,
+      truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
     });
     expect(resolveHookConfig({ truncateTailChars: 500, staleAfterMessages: 30, pinReferenced: false, stripMcpFurniture: false }))
       .toMatchObject({ truncateTailChars: 500, staleAfterMessages: 30, pinReferenced: false, stripMcpFurniture: false });
@@ -54,5 +54,14 @@ describe('summarize', () => {
     ];
     const { result } = await compactSession(messages, resolveHookConfig({ useClaudeScorer: false }));
     expect(summarize(result)).toMatch(/^4\d% of tool output \(3\d% of transcript\); rules 1/);
+  });
+});
+
+describe('sessionCwd', () => {
+  it('reads $.session.cwd() and tolerates an engine without it or one that throws', async () => {
+    const { sessionCwd } = await import('../hooks/verbatim.ts');
+    expect(await sessionCwd({ session: { cwd: async () => '/w/opt' } } as never)).toBe('/w/opt');
+    expect(await sessionCwd({ session: {} } as never)).toBeUndefined();
+    expect(await sessionCwd({ session: { cwd: async () => { throw new Error('no'); } } } as never)).toBeUndefined();
   });
 });

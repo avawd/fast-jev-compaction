@@ -32,6 +32,12 @@ Each segment runs in three **arms**, all through the branch's own `compact()` an
 | `trunc` | every call the rules left undecided gets `drop_result` | a scorer that truncates everything it is unsure of |
 | `floor` | every undecided call gets `drop_call` | the **floor**: a scorer that drops everything it is asked about |
 
+Every arm passes the segment's `cwd` as a compact option, unless `--options` sets one. It is the
+`cwd` recorded on the segment's last main-thread user/assistant row, which is what the hook's
+`$.session.cwd()` returns at that point. Branches without the option ignore it. The JSON records it
+per segment. On the current corpus it changes no rule decision, because the commands mostly `cd` to
+an absolute path first. Pass `--options '{"cwd":""}'` to turn it off.
+
 A real scorer run falls between `floor` and `rules`. If `trunc` or `floor` leaves a call undecided,
 the harness prints `WARN ... Scorer contract may have changed`.
 
@@ -47,7 +53,7 @@ the harness prints `WARN ... Scorer contract may have changed`.
 | `facts` | **never-echoed facts**: sha, #PR, Jira key, 4+ digit number, money or URL tokens that an unpinned tool result introduced (no earlier message held them) and that no assistant text ever repeats. Only the verbatim output carries them |
 | `surv ceil=rules / trunc / floor` | share of those facts still present anywhere in the compacted context |
 | `next (live)` | the same facts in the next segment of the same file, which is what actually happened live. `summary` means the built-in summary message ran; `verbatim` means the rows a verbatim compaction carried over (see `carriedPrefix`). The `*` segment is the live one, where the spec's gate is survival ≥70% |
-| `laterRef lost r/t/f` | tokens an unpinned result introduced and a later assistant text or tool input quoted, missing from the compacted copy of that result, for rules/trunc/floor, out of the total |
+| `laterRef lost r/t/f` | tokens an unpinned result introduced and a later assistant text or non-authoring tool input quoted, that are absent from the **whole compacted context before that quote**, for rules/trunc/floor, out of the total. A newer carrier the plugin kept instead counts as kept. An Edit/Write/MultiEdit/NotebookEdit input is not a quote, because it carries its own copy of the text (this mirrors the plugin's pin rule) |
 
 The JSON (`eval/out/offline-<branch>@<sha>.json`, or `--json <path>`) holds every number per arm,
 including decision counts by rule. `--compare` diffs two of them.
@@ -110,9 +116,14 @@ The recall config is `--config`, then `$VC_EVAL_RECALL`, then `eval/recall.local
 ```
 claude -p --resume <session> --fork-session --plugin-dir <dir> \
   --settings '{"enabledPlugins":{"verbatim-compaction@verbatim-compaction":false}[,"pluginConfigs":...]}' \
-  --input-format stream-json --output-format stream-json --verbose --debug --debug-file runN.debug.log \
-  --disallowedTools "Bash,Read,Grep,Glob,Agent,WebFetch,WebSearch,Edit,Write,ToolSearch,<MCP servers>"
+  --input-format stream-json --output-format stream-json --verbose --debug --debug-file runN.debug.log
 ```
+
+There is **no `--disallowedTools`**. The scorer's fork resends the main thread's request, tools list
+included, and a narrowed list made forks fail with `invalid_request` (2 of 11 with the flag, 0 of 19
+without, measured by the scorer work). Instead, every recall question is prefixed with "Answer from
+memory only; do not use any tools." A recall turn that uses any tool anyway is scored **FAILED**
+(0 hits), because its answer did not come from the compacted context.
 
 stdin carries "Reply with just: ok", then `/compact`, then one message per recall set. Runs are
 sequential. `--fork-session` never modifies the original session, but **every run leaves a new
@@ -127,10 +138,11 @@ The inline copy registers as `verbatim-compaction@inline`, and the global copy l
 |---|---|
 | loaded from | `Read hooks.json for plugin verbatim-compaction (enabled=true): …`. It flags `WRONG COPY` if anything but `--plugin-dir` registered |
 | forks (ms) | every `$.model.fork (verbatim-compaction): Nms …` line, plus the count of `source=hook_prompt` requests |
+| fork api-err | fork lines reporting `API error …`. The target is 0 |
 | outcome, fallback | the plugin's `$.ui.log` `kept …` / `fallback …` line. Fallback also counts when core ran or no "a hook's N messages stand" line appears |
 | pre→post tok | the `compact_boundary` event's `compact_metadata` |
 | hook ms (incl. next) | `session.compact settled in`. On a fallback this includes the built-in summary |
-| recall `<set>` | expected tokens found (case-insensitive substring) in the post-compaction answers |
+| recall `<set>` | expected tokens found (case-insensitive substring) in the post-compaction answers. `FAILED (tool use)` if the recall turn called any tool |
 | ctx `<set>` before→after | expected tokens present in the forked transcript before compaction, and in the context after it (the carried rows, or the summary message). This measures retention without depending on the model's answer. `before` < all means the recall set no longer fits the session and must be refreshed |
 | parser | the fidelity check above |
 
@@ -147,21 +159,42 @@ Stream-json coalesces queued prompts. In the validation run, both recall questio
 one reply. So each set is scored against all post-compaction answers joined together. The expected
 tokens are specific to each set, so they cannot cross-match.
 
-## Baseline (branch claude-scorer @ 5963d67, 2026-09-24)
+## Baselines (2026-09-24)
 
-Offline. The rules alone never clear the 0.25 gate. On the live segment, the live verbatim
-compaction kept 27.3% of never-echoed facts:
+`laterRef lost` uses the definition above; earlier tables in this file's history over-counted it.
+
+**claude-scorer @ 5963d67** (before the optimisation). The rules alone never clear the 0.25 gate. On
+the live segment, the live verbatim compaction kept 27.3% of never-echoed facts:
 
 | segment | msgs | calls/unp | unpinned res | rules rm% | gate(ratio) | facts | surv rules | trunc | floor | next (live) | laterRef lost r/t/f |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| ops-live* | 303 | 100/99 | 177.1k | 0% | FAIL (0) | 198 | 100% | 32.8% | 1% | 27.3% verbatim | 0/46/74 of 74 |
-| long-ops | 1050 | 260/259 | 362.6k | 1.4% | FAIL (0.007) | 304 | 100% | 36.8% | 1.6% | 0% summary | 1/69/112 of 112 |
-| mixed | 498 | 149/147 | 299.3k | 0% | FAIL (0) | 368 | 100% | 29.3% | 0.5% | 3.3% summary | 0/54/93 of 93 |
-| coding | 733 | 206/205 | 272.3k | 39.7% | FAIL (0.206) | 116 | 96.6% | 36.2% | 8.6% | 0.9% summary | 27/50/64 of 66 |
-| coding-2 | 1284 | 375/374 | 606.2k | 16.1% | FAIL (0.09) | 493 | 96.3% | 20.9% | 4.5% | - | 15/96/124 of 127 |
-| bash-heavy | 1080 | 338/335 | 381.4k | 0% | FAIL (0) | 283 | 100% | 45.9% | 9.9% | - | 0/76/130 of 130 |
+| ops-live* | 303 | 100/99 | 177.1k | 0% | FAIL (0) | 198 | 100% | 32.8% | 1% | 27.3% verbatim | 0/40/70 of 73 |
+| long-ops | 1050 | 260/259 | 362.6k | 1.4% | FAIL (0.007) | 304 | 100% | 36.8% | 1.6% | 0% summary | 0/45/91 of 110 |
+| mixed | 498 | 149/147 | 299.3k | 0% | FAIL (0) | 368 | 100% | 29.3% | 0.5% | 3.3% summary | 0/36/80 of 81 |
+| coding | 733 | 206/205 | 272.3k | 39.7% | FAIL (0.206) | 116 | 96.6% | 36.2% | 8.6% | 0.9% summary | 3/18/29 of 34 |
+| coding-2 | 1284 | 375/374 | 606.2k | 16.1% | FAIL (0.09) | 493 | 96.3% | 20.9% | 4.5% | - | 3/46/73 of 81 |
+| bash-heavy | 1080 | 338/335 | 381.4k | 0% | FAIL (0) | 283 | 100% | 45.9% | 9.9% | - | 0/55/121 of 125 |
 
-Live, one validation run with `--plugin-dir` set to this checkout: the plugin loaded from the plugin
+**optimize @ fd200d4** (Stage 1, 2a and 2b plus the rule fixes; gate over tool-result bytes; `cwd`
+passed):
+
+| segment | msgs | calls/unp | unpinned res | rules rm% | gate(ratio) | facts | surv rules | trunc | floor | next (live) | laterRef lost r/t/f |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ops-live* | 303 | 100/99 | 177.1k | 35.1% | pass (0.35) | 198 | 70.7% | 51.5% | 47.5% | 27.3% verbatim | 0/0/0 of 73 |
+| long-ops | 1050 | 260/259 | 362.6k | 41.6% | pass (0.416) | 304 | 74.7% | 41.1% | 24% | 0% summary | 0/0/0 of 110 |
+| mixed | 498 | 149/147 | 299.3k | 12.2% | FAIL (0.121) | 368 | 81% | 55.2% | 54.9% | 3.3% summary | 0/0/0 of 81 |
+| coding | 733 | 206/205 | 272.3k | 54.8% | pass (0.548) | 116 | 64.7% | 49.1% | 37.1% | 0.9% summary | 0/0/0 of 34 |
+| coding-2 | 1284 | 375/374 | 606.2k | 45.1% | pass (0.45) | 493 | 74.2% | 66.5% | 64.1% | - | 0/0/1 of 81 |
+| bash-heavy | 1080 | 338/335 | 381.4k | 50.5% | pass (0.503) | 283 | 63.3% | 50.9% | 41.3% | - | 0/0/0 of 125 |
+
+Live validation run 1 (claude-scorer @ 5963d67, still with `--disallowedTools`): the plugin loaded from the plugin
 dir and the global copy was disabled. One fork took 8269 ms and hit the 6000 ms timeout. That left
 0% reduction, so the hook fell back to the built-in summary (433,745→11,714 tokens; the hook settled
 in 119 s including the summary). Recall: basic 7/7, hard 0/4. Context: basic 7→7, hard 4→0.
+
+Live validation run 2 (optimize @ f866375, no `--disallowedTools`): the plugin loaded from the plugin
+dir. There were 5 concurrent forks (3.7, 7.1, 5.5, 6.2 and 10.4 s). **One reported `API error no
+status`**, returning 0 replies after 3.7 s. The outcome was verbatim: kept 634/634 messages, 59% of
+tool output removed (26% of the transcript), no fallback, 439,123→174,997 tokens, and the hook took
+10.5 s. Recall: basic 7/7, hard 4/4. Context: basic 7→7, hard 4→4. No recall tool use. The parser
+check was ok (634/634).

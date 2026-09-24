@@ -19,7 +19,9 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   preserveRecentMessages: 6,
   truncateHeadChars: 300,
   truncateTailChars: 1000,
-  staleAfterMessages: 60,
+  // Rows as the engine hands them over (one per content block). Calibrated as 60 merged
+  // messages; merged-to-row ratios on the review corpus are 1.49-1.76 (median 1.64): ~100 rows.
+  staleAfterMessages: 100,
   pinReferenced: true,
   stripMcpFurniture: true,
 };
@@ -54,6 +56,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     ),
     pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
+    ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
 }
 

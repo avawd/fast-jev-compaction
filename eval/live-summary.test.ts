@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDebugLog, parseStream, scoreAnswer } from './live-summary.ts';
+import { parseDebugLog, parseStream, scoreAnswer, scoreRecall } from './live-summary.ts';
 
 // Lines in the shape 2.1.281 writes them (copied from a validation run's debug log, paths generic).
 const LOG = [
@@ -49,5 +49,35 @@ describe('parseStream', () => {
 describe('scoreAnswer', () => {
   it('matches expected tokens case-insensitively', () => {
     expect(scoreAnswer('merged as #922 (FE09588)', ['922', 'fe09588', 'ABC-4534'])).toEqual({ hit: ['922', 'fe09588'], miss: ['ABC-4534'] });
+  });
+});
+
+describe('fork api errors', () => {
+  it('counts fork lines that report an API error', () => {
+    const f = parseDebugLog(
+      'x [DEBUG] $.model.fork (verbatim-compaction): 812ms, 0 replies, API error no status\n' +
+        'x [DEBUG] $.model.fork (verbatim-compaction): 5100ms, 1 replies',
+    );
+    expect(f.forks).toHaveLength(2);
+    expect(f.forkApiErrors).toBe(1);
+  });
+});
+
+describe('scoreRecall', () => {
+  const sets = [{ name: 'hard', question: 'q', expected: ['abc1234', '456'] }];
+  it('scores every set against all answers', () => {
+    expect(scoreRecall(['abc1234 and 456'], sets, [])).toEqual([{ set: 'hard', hit: ['abc1234', '456'], miss: [], failed: false, answer: 'abc1234 and 456' }]);
+  });
+  it('fails a recall that used a tool, whatever the answer says', () => {
+    expect(scoreRecall(['abc1234 and 456'], sets, ['Bash'])).toEqual([
+      { set: 'hard', hit: [], miss: ['abc1234', '456'], failed: true, answer: 'abc1234 and 456' },
+    ]);
+  });
+});
+
+describe('outcome wording', () => {
+  it('reads the reduction from the tool-output wording too', () => {
+    const f = parseDebugLog('x [DEBUG] [verbatim-compaction] $.ui.log: kept 634/634 messages, no summary (59% of tool output (26% of transcript); rules 32, claude 70 (ran 10.4s), kept 3)');
+    expect([f.kept, f.total, f.reductionPct, f.claudeStatus]).toEqual([634, 634, 59, 'ran 10.4s']);
   });
 });

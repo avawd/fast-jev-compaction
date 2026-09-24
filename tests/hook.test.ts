@@ -35,7 +35,7 @@ describe('resolveHookConfig', () => {
     expect(resolveHookConfig({})).toEqual({
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 20000,
-      truncateTailChars: 1000, staleAfterMessages: 60, pinReferenced: true, stripMcpFurniture: true,
+      truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
       keepThreshold: 0.5, forkChunkSize: 60,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);

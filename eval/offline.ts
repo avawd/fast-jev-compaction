@@ -43,6 +43,8 @@ export interface SegmentReport {
   live: boolean;
   file: string;
   segment: number;
+  /** The cwd passed to compact() (from the transcript), if any. */
+  cwd?: string;
   messages: number;
   calls: number;
   unpinned: number;
@@ -112,10 +114,10 @@ function nextReport(segs: Segment[], seg: Segment, facts: FactSets): SegmentRepo
   const next = segs[seg.index + 1];
   if (!next) return undefined;
   if (next.startsWithSummary) {
-    const s = survival(facts, next.messages.slice(0, 1));
+    const s = survival(facts, next.messages.slice(0, 1), seg.messages);
     return { kind: 'summary', neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) } };
   }
-  const s = survival(facts, carriedPrefix(seg.messages, next.messages));
+  const s = survival(facts, carriedPrefix(seg.messages, next.messages), seg.messages);
   return {
     kind: 'verbatim',
     neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) },
@@ -131,6 +133,8 @@ async function evalSegment(
   minReduction: number,
 ): Promise<SegmentReport> {
   const seg = segs[entry.segment]!;
+  // The hook passes $.session.cwd() so rules can match paths exactly (branches without the option ignore it).
+  options = seg.cwd && options['cwd'] === undefined ? { ...options, cwd: seg.cwd } : options;
   const preserve = typeof options['preserveRecentMessages'] === 'number' ? (options['preserveRecentMessages'] as number) : 6;
   const calls = api.collectToolCalls(seg.messages, preserve);
   const unpinned = calls.filter((c) => !c.pinned);
@@ -143,7 +147,7 @@ async function evalSegment(
     const after = resultsById(run.result.messages);
     let removed = 0;
     for (const c of unpinned) removed += c.resultChars - (after.get(c.tool_use_id)?.length ?? 0);
-    const s: Survival = survival(facts, run.result.messages);
+    const s: Survival = survival(facts, run.result.messages, seg.messages);
     const decisions: Record<string, number> = {};
     for (const d of run.result.decisions) {
       const key = d.source === 'pinned' ? 'pinned' : `${d.action}:${d.rule ?? d.source}`;
@@ -171,6 +175,7 @@ async function evalSegment(
     live: entry.live === true,
     file: entry.file,
     segment: entry.segment,
+    ...(typeof options['cwd'] === 'string' ? { cwd: options['cwd'] as string } : {}),
     messages: seg.messages.length,
     calls: calls.length,
     unpinned: unpinned.length,
@@ -241,7 +246,7 @@ async function printFacts(api: PluginApi, entry: CorpusEntry, limit: number): Pr
   const calls = api.collectToolCalls(seg.messages, 6).filter((c) => !c.pinned);
   const facts = factSets(seg.messages, calls);
   const results = resultsById(seg.messages);
-  const rules = await runArm(api, seg.messages, 'rules', {});
+  const rules = await runArm(api, seg.messages, 'rules', seg.cwd ? { cwd: seg.cwd } : {});
   const kept = contextBlob(rules.result.messages);
   const input = new Map<string, string>();
   for (const m of seg.messages) for (const u of m.toolUses) input.set(u.tool_use_id, `${u.tool} ${JSON.stringify(u.input).slice(0, 100)}`);
