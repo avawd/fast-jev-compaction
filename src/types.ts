@@ -83,6 +83,8 @@ export interface ForkRun {
   candidates: number;
   ms: number;
   status: ClaudeStatus;
+  /** One half of a chunk whose first fork the API rejected. */
+  retry?: true;
 }
 
 export interface ScoreOutcome {

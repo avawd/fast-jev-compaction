@@ -85,7 +85,43 @@ describe('scoreWithClaude', () => {
     const out = await scoreWithClaude(fork, many, opts({ chunkSize: 2 }));
     expect(out.status).toBe('partial');
     expect([...out.verdicts.keys()]).toEqual(['t1', 't2']);
-    expect(out.forks.map((f) => f.status)).toEqual(['ran', 'unparseable']);
+    // the failed chunk was retried as two halves, which failed the same way
+    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ' retry' : ''}`))
+      .toEqual(['2 ran', '2 unparseable', '1 unparseable retry', '1 unparseable retry']);
+  });
+
+  it('retries a chunk the API rejected as two concurrent halves, once', async () => {
+    const many = Array.from({ length: 4 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
+    const sizes: number[] = [];
+    const fork: ForkFn = async ({ prompt }) => {
+      const ids = idsIn(prompt);
+      sizes.push(ids.length);
+      if (ids.length === 4) return { isAnswered: false, reason: 'api-error', status: null } as never;
+      if (ids.includes('t3')) return { text: '{"result_needed":["t3"' }; // one half still fails: no deeper retry
+      return { text: reply({ call_matters: ids }) };
+    };
+    const out = await scoreWithClaude(fork, many, opts());
+    expect(sizes).toEqual([4, 2, 2]);
+    expect([...out.verdicts.keys()]).toEqual(['t1', 't2']);
+    expect(out.status).toBe('partial');
+    expect(out.forks).toEqual([
+      { candidates: 4, ms: expect.any(Number), status: 'api-error' },
+      { candidates: 2, ms: expect.any(Number), status: 'ran', retry: true },
+      { candidates: 2, ms: expect.any(Number), status: 'unparseable', retry: true },
+    ]);
+  });
+
+  it('does not retry a timeout, an abort, a missing fork, or a single-call chunk', async () => {
+    for (const answer of [{ isAnswered: false, reason: 'aborted' }, { isAnswered: false, reason: 'nothing-to-fork' }]) {
+      let n = 0;
+      await scoreWithClaude((async () => { n += 1; return answer; }) as unknown as ForkFn, calls, opts());
+      expect(n).toBe(1);
+    }
+    let m = 0;
+    await scoreWithClaude(async () => { m += 1; return { text: 'nope' }; }, [calls[0]!], opts());
+    expect(m).toBe(1);
+    const timedOut = await scoreWithClaude(() => new Promise(() => {}), calls, opts({ timeout: { timeoutMs: 1, sleep: async () => {} } }));
+    expect(timedOut.forks).toHaveLength(1);
   });
 
   it('reports the failure itself when every fork fails', async () => {
@@ -129,7 +165,7 @@ describe('scoreWithClaude', () => {
     expect(out.status).toBe('timeout');
     expect(out.verdicts.size).toBe(0);
     expect(waited).toEqual([6000]);
-    expect(out.forks).toHaveLength(3);
+    expect(out.forks).toHaveLength(3); // a timeout is never retried
   });
 
   it('uses the reply when the fork answers before the timeout', async () => {

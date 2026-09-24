@@ -165,7 +165,7 @@ export function summarize(result: CompactResult): string {
 export function describeForks(result: CompactResult): string | undefined {
   const s = result.stats;
   if (!s.forks || s.forks.length === 0) return undefined;
-  const runs = s.forks.map((f) => `${f.candidates} calls ${f.ms}ms ${f.status}`).join(', ');
+  const runs = s.forks.map((f) => `${f.retry ? 'retry ' : ''}${f.candidates} calls ${f.ms}ms ${f.status}`).join(', ');
   const plural = s.forks.length === 1 ? 'fork' : 'forks';
   return `scorer: wait ${s.wait ?? 'race'}; ${s.forks.length} ${plural} [${runs}]; claude ${s.claudeMs ?? 0}ms; total ${s.ms}ms`;
 }

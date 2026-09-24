@@ -105,40 +105,81 @@ export interface ClaudeScoreOptions {
   now?: () => number;
 }
 
+type ChunkResult = { verdicts: Map<string, Verdict>; runs: ForkRun[] };
+
+/**
+ * Failures worth one retry in halves. Live on 2.1.281 one 60-call chunk out of three was
+ * rejected in two of three runs (status-less `api-error`, or a reply cut off into unparseable
+ * text) while its neighbours passed, as the API does with per-item prompts: something in that
+ * chunk's lines, not the load. A timeout, an abort or a missing fork would fail the same way again.
+ */
+function retryable(status: ClaudeStatus): boolean {
+  return status === 'api-error' || status === 'unparseable' || status === 'empty';
+}
+
 async function scoreChunk(
   fork: ForkFn,
   calls: readonly ToolCall[],
   options: ClaudeScoreOptions,
   timeout: ForkTimeout | undefined,
   now: () => number,
-): Promise<{ verdicts: Map<string, Verdict>; run: ForkRun }> {
+  retry = false,
+): Promise<ChunkResult> {
   const started = now();
   const answer = await runFork(fork, buildJevPrompt(calls, options.context), timeout);
-  const run = (status: ClaudeStatus): ForkRun => ({ candidates: calls.length, ms: now() - started, status });
+  const run = (status: ClaudeStatus): ForkRun => ({
+    candidates: calls.length, ms: now() - started, status, ...(retry ? { retry: true as const } : {}),
+  });
   const verdicts = new Map<string, Verdict>();
-  if ('status' in answer) return { verdicts, run: run(answer.status) };
+  if ('status' in answer) return { verdicts, runs: [run(answer.status)] };
   const parsed = parseJevReply(answer.text, new Set(calls.map((x) => x.id)));
-  if (!parsed) return { verdicts, run: run('unparseable') };
+  if (!parsed) return { verdicts, runs: [run('unparseable')] };
   for (const call of calls) {
     const action = decide(call.id, parsed, options.keepThreshold);
     if (action !== 'keep') verdicts.set(call.id, { action, source: 'claude' });
   }
-  return { verdicts, run: run('ran') };
+  return { verdicts, runs: [run('ran')] };
 }
 
-/** `ran` when every fork answered, the failure when none did, `partial` in between. */
-function overallStatus(runs: readonly ForkRun[]): ClaudeStatus {
-  const ran = runs.filter((r) => r.status === 'ran').length;
-  if (ran === runs.length) return 'ran';
-  return ran > 0 ? 'partial' : runs[0]!.status;
+/** One chunk, and when the API rejected it, its two halves once, concurrently, before the deadline. */
+async function scoreChunkWithRetry(
+  fork: ForkFn,
+  calls: readonly ToolCall[],
+  options: ClaudeScoreOptions,
+  timeout: ForkTimeout | undefined,
+  now: () => number,
+  expired: () => boolean,
+): Promise<ChunkResult> {
+  const first = await scoreChunk(fork, calls, options, timeout, now);
+  const status = first.runs[0]!.status;
+  if (!retryable(status) || calls.length < 2 || expired()) return first;
+  const half = Math.ceil(calls.length / 2);
+  const halves = await Promise.all(
+    [calls.slice(0, half), calls.slice(half)].map((part) => scoreChunk(fork, part, options, timeout, now, true)),
+  );
+  const verdicts = new Map<string, Verdict>();
+  for (const h of halves) for (const [id, verdict] of h.verdicts) verdicts.set(id, verdict);
+  return { verdicts, runs: [...first.runs, ...halves.flatMap((h) => h.runs)] };
+}
+
+/**
+ * Per chunk: answered when its fork or both retried halves ran. `ran` when every chunk answered,
+ * the first failure when none of the forks ran, `partial` in between.
+ */
+function overallStatus(chunks: readonly ChunkResult[]): ClaudeStatus {
+  const answered = (c: ChunkResult) =>
+    c.runs[0]!.status === 'ran' || (c.runs.length > 1 && c.runs.slice(1).every((r) => r.status === 'ran'));
+  if (chunks.every(answered)) return 'ran';
+  const anyRan = chunks.some((c) => c.runs.some((r) => r.status === 'ran'));
+  return anyRan ? 'partial' : chunks[0]!.runs[0]!.status;
 }
 
 /**
  * Asks Jev's two questions about each call through session forks: candidates
  * are split into chunks of `chunkSize`, one `runFork` per chunk, all
- * concurrent and all racing ONE shared deadline (a single sleep). Answers are
- * merged; a chunk whose fork failed or whose reply did not parse decides
- * nothing (its calls are kept).
+ * concurrent and all racing ONE shared deadline (a single sleep). A chunk the
+ * API rejected is retried once as two halves. Answers are merged; whatever
+ * still failed decides nothing (its calls are kept).
  */
 export async function scoreWithClaude(
   fork: ForkFn,
@@ -149,15 +190,16 @@ export async function scoreWithClaude(
   if (candidates.length === 0) return { verdicts: new Map(), status: 'skipped', forks: [] };
   const now = options.now ?? Date.now;
   let shared: ForkTimeout | undefined;
+  let expired = false;
   if (options.timeout) {
-    const expiry = options.timeout.sleep(options.timeout.timeoutMs);
+    const expiry = options.timeout.sleep(options.timeout.timeoutMs).then(() => { expired = true; });
     shared = { timeoutMs: options.timeout.timeoutMs, sleep: () => expiry };
   }
   const results = await Promise.all(
-    chunk(candidates, options.chunkSize).map((part) => scoreChunk(fork, part, options, shared, now)),
+    chunk(candidates, options.chunkSize).map((part) =>
+      scoreChunkWithRetry(fork, part, options, shared, now, () => expired)),
   );
   const verdicts = new Map<string, Verdict>();
   for (const result of results) for (const [id, verdict] of result.verdicts) verdicts.set(id, verdict);
-  const forks = results.map((r) => r.run);
-  return { verdicts, status: overallStatus(forks), forks };
+  return { verdicts, status: overallStatus(results), forks: results.flatMap((r) => r.runs) };
 }
