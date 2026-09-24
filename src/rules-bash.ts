@@ -195,8 +195,21 @@ function familyStepKeys(command: string): string[] {
   return workSteps(command).map(stepFamilyKey).filter((k): k is string => k !== undefined);
 }
 
+/** A supersession verdict citing every later call it relied on (see Verdict.evidence). */
+function withEvidence(rule: 'bash_read_superseded' | 'readonly_superseded', ids: readonly string[]): Verdict {
+  const [evidence, ...rest] = [...new Set(ids)];
+  const verdict: Verdict = { action: 'drop_result', source: 'rule', rule, evidence: evidence! };
+  if (rest.length > 0) verdict.moreEvidence = rest;
+  return verdict;
+}
+
 function samePath(a: string, b: string): boolean {
   return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+}
+
+function nearestReader(later: ReadonlyArray<{ path: string; id: string }>, path: string): string | undefined {
+  for (let i = later.length - 1; i >= 0; i -= 1) if (samePath(path, later[i]!.path)) return later[i]!.id;
+  return undefined;
 }
 
 function isWrapper(call: ToolCall): boolean {
@@ -219,25 +232,28 @@ function touchedPaths(call: ToolCall): string[] {
  */
 export function bashRules(calls: readonly ToolCall[], decided: ReadonlySet<string>): Map<string, Verdict> {
   const verdicts = new Map<string, Verdict>();
-  const pathsLater: string[] = [];
-  const familiesLater = new Set<string>();
+  // Pushed newest first, so the last match is the nearest later call.
+  const pathsLater: Array<{ path: string; id: string }> = [];
+  const familiesLater = new Map<string, string>();
   for (let i = calls.length - 1; i >= 0; i -= 1) {
     const call = calls[i]!;
     const command = bashCommand(call);
     const family = command ? readonlyStepKeys(command) : undefined;
     const reads = command ? sourceReadPaths(command) : [];
     if (!call.pinned && !call.isError && !decided.has(call.id) && !isWrapper(call)) {
-      if (reads.length > 0 && reads.every((p) => pathsLater.some((q) => samePath(p, q)))) {
-        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'bash_read_superseded' });
-      } else if (family && family.every((k) => familiesLater.has(k))) {
-        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'readonly_superseded' });
+      const readBy = reads.map((p) => nearestReader(pathsLater, p));
+      const rerunBy = (family ?? []).map((k) => familiesLater.get(k));
+      if (reads.length > 0 && readBy.every((id) => id !== undefined)) {
+        verdicts.set(call.id, withEvidence('bash_read_superseded', readBy as string[]));
+      } else if (family && rerunBy.every((id) => id !== undefined)) {
+        verdicts.set(call.id, withEvidence('readonly_superseded', rerunBy as string[]));
       } else if (AGENT_TOOLS.has(call.tool) && AGENT_BOILERPLATE.test((call.resultText ?? '').slice(0, 200))) {
         verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'agent_boilerplate' });
       }
     }
     if (!call.isError) {
-      pathsLater.push(...touchedPaths(call));
-      for (const key of familyStepKeys(command)) familiesLater.add(key);
+      for (const path of touchedPaths(call)) pathsLater.push({ path, id: call.id });
+      for (const key of familyStepKeys(command)) familiesLater.set(key, call.id);
     }
   }
   return verdicts;

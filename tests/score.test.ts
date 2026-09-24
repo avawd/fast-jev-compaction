@@ -77,6 +77,19 @@ describe('evidence protection', () => {
     expect(out.verdicts.get('t3')?.source).toBe('claude');
   });
 
+  it('never offers any of the calls a multi-evidence Bash verdict relied on', async () => {
+    const seen: string[] = [];
+    const calls = [
+      c('t1', 'Bash', { command: 'cat a/x.ts; cat a/y.ts' }), c('t2', 'Read', { file_path: 'a/x.ts' }),
+      c('t3', 'Read', { file_path: 'a/y.ts' }), c('t4', 'Bash', { command: 'npm test' }),
+    ];
+    const out = await makeScorer({ fork: greedy(seen), useClaudeScorer: true, maxCandidates: 400 })(calls);
+    expect(out.verdicts.get('t1')).toMatchObject({ rule: 'bash_read_superseded' });
+    expect(seen[0]).not.toMatch(/^t2 /m);
+    expect(seen[0]).not.toMatch(/^t3 /m);
+    expect(seen[0]).toMatch(/^t4 /m);
+  });
+
   it('never offers the later Read that made an earlier one stale', async () => {
     const seen: string[] = [];
     const read = [c('t1', 'Read', { file_path: 'src/a.ts' }), c('t2', 'Read', { file_path: 'src/a.ts' })];

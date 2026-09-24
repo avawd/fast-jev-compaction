@@ -124,8 +124,8 @@ describe('bashRules', () => {
       bash('cat lib/c.ts'),
     ];
     const v = bashRules(calls, new Set());
-    expect(v.get('t1')).toEqual({ action: 'drop_result', source: 'rule', rule: 'bash_read_superseded' });
-    expect(v.get('t3')).toEqual({ action: 'drop_result', source: 'rule', rule: 'bash_read_superseded' });
+    expect(v.get('t1')).toMatchObject({ action: 'drop_result', source: 'rule', rule: 'bash_read_superseded', evidence: 't2' });
+    expect(v.get('t3')).toMatchObject({ action: 'drop_result', source: 'rule', rule: 'bash_read_superseded', evidence: 't4' });
     expect(v.has('t4')).toBe(false);
     expect(v.has('t5')).toBe(false);
   });
@@ -154,7 +154,7 @@ describe('bashRules', () => {
       bash('gh run list'),
     ];
     const v = bashRules(calls, new Set());
-    expect(v.get('t1')).toEqual({ action: 'drop_result', source: 'rule', rule: 'readonly_superseded' });
+    expect(v.get('t1')).toMatchObject({ action: 'drop_result', source: 'rule', rule: 'readonly_superseded', evidence: 't3' });
     expect(v.size).toBe(1);
   });
 
@@ -202,6 +202,27 @@ describe('bashRules', () => {
     ];
     const v = bashRules(calls, new Set(['t3']));
     expect([...v.keys()]).toEqual([]);
+  });
+});
+
+describe('bashRules evidence', () => {
+  it('names the nearest later call that re-read the file', () => {
+    fresh();
+    const calls = [bash('cat a/x.ts'), c('Read', { file_path: 'a/x.ts' }), c('Read', { file_path: 'a/x.ts' })];
+    expect(bashRules(calls, new Set()).get('t1')).toEqual({
+      action: 'drop_result', source: 'rule', rule: 'bash_read_superseded', evidence: 't2',
+    });
+  });
+
+  it('names every call it relied on when several files or steps were covered by different calls', () => {
+    fresh();
+    const calls = [
+      bash('cat a/x.ts; cat a/y.ts'), c('Read', { file_path: 'a/x.ts' }), c('Edit', { file_path: 'a/y.ts' }),
+      bash('git status && git log'), bash('git log'), bash('git status'),
+    ];
+    const v = bashRules(calls, new Set());
+    expect(v.get('t1')).toMatchObject({ evidence: 't2', moreEvidence: ['t3'] });
+    expect(v.get('t4')).toMatchObject({ rule: 'readonly_superseded', evidence: 't6', moreEvidence: ['t5'] });
   });
 });
 

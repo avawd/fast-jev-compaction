@@ -26,7 +26,7 @@ function forkTimeout(options: ScorerOptions): ForkTimeout | undefined {
 export function makeScorer(options: ScorerOptions): Scorer {
   return async (calls) => {
     const verdicts = applyRules(calls);
-    const evidence = new Set([...verdicts.values()].flatMap((v) => (v.evidence ? [v.evidence] : [])));
+    const evidence = new Set([...verdicts.values()].flatMap((v) => [...(v.evidence ? [v.evidence] : []), ...(v.moreEvidence ?? [])]));
     const undecided = calls.filter((call) => !call.pinned && !verdicts.has(call.id) && !evidence.has(call.id));
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };

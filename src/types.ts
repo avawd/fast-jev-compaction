@@ -71,6 +71,8 @@ export interface Verdict {
    * losing, so it must never itself be offered for dropping.
    */
   evidence?: string;
+  /** Further evidence when one later call was not enough (a multi-file read, a multi-step chain). */
+  moreEvidence?: string[];
 }
 
 /**
