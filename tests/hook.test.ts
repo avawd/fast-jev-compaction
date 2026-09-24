@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compactSession, resolveHookConfig, summarize, toSessionMessages } from '../hooks/verbatim.ts';
 import type { Message } from '../src/index.js';
-import { harness, NEXT_RESULT } from './harness.ts';
+import { DROP_ALL, harness, NEXT_RESULT } from './harness.ts';
 
 type SessionMessage = Message & { handle?: string };
 const big = 'y'.repeat(3000);
@@ -22,10 +22,20 @@ function transcript(): SessionMessage[] {
 }
 
 describe('resolveHookConfig', () => {
+  it('clamps keepThreshold to [0, 1] and forkChunkSize to a whole number in [1, 400]', () => {
+    expect(resolveHookConfig({ keepThreshold: 0.7 }).keepThreshold).toBe(0.7);
+    expect(resolveHookConfig({ keepThreshold: -1 }).keepThreshold).toBe(0);
+    expect(resolveHookConfig({ keepThreshold: 3 }).keepThreshold).toBe(1);
+    expect(resolveHookConfig({ forkChunkSize: 0 }).forkChunkSize).toBe(1);
+    expect(resolveHookConfig({ forkChunkSize: 1000 }).forkChunkSize).toBe(400);
+    expect(resolveHookConfig({ forkChunkSize: 25.7 }).forkChunkSize).toBe(25);
+  });
+
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 20000,
+      keepThreshold: 0.5, forkChunkSize: 60,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({
@@ -51,7 +61,7 @@ describe('compactSession', () => {
   it('prunes by rules and Claude and keeps untouched engine objects', async () => {
     const input = transcript();
     const { result, messages } = await compactSession(input, resolveHookConfig({}), async () => ({
-      text: '{"drop":["t3"],"truncate":[]}',
+      text: DROP_ALL,
     }));
     expect(result.stats).toMatchObject({ byRule: 1, byClaude: 1, claude: 'ran' });
     expect(messages[0]).toBe(input[0]);
@@ -107,7 +117,7 @@ describe('register', () => {
     });
 
     it('returns the pruned messages and toasts on success', async () => {
-      const h = harness({ fork: async () => ({ text: '{"drop":["t3"],"truncate":[]}' }) });
+      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
       const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
       expect(h.nextCalls).toHaveLength(0);
       expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
@@ -127,7 +137,7 @@ describe('register', () => {
     it('cancels the pending timeout sleep once a fast fork wins the race', async () => {
       let sleepSignal: AbortSignal | undefined;
       const h = harness({
-        fork: async () => ({ text: '{"drop":["t3"],"truncate":[]}' }),
+        fork: async () => ({ text: DROP_ALL }),
         sleep: (_ms, opts) => { sleepSignal = opts?.signal; return new Promise(() => {}); },
       });
       await h.compact(prunable());
@@ -153,14 +163,51 @@ describe('register', () => {
       expect(h.toasts[0]).toMatch(/claude 0 \(skipped\)/);
     });
 
-    it('skips precompute outright: engine skip shape, no fork, no toast', async () => {
-      const h = harness();
-      const out = await h.compact({ ...prunable(), trigger: 'precompute' });
-      expect(out).toMatchObject({ skip: expect.any(String) });
-      expect((out as { messages?: unknown }).messages).toBeUndefined();
-      expect(h.forkCalls).toHaveLength(0);
+    it('answers precompute with the real pipeline: pruned messages, fork run, log but no toast', async () => {
+      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      const out = (await h.compact({ ...prunable(), trigger: 'precompute' })) as { messages: SessionMessage[] };
+      expect(out.messages).toBeDefined();
+      expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
+      expect(h.forkCalls).toHaveLength(1);
+      expect(h.nextCalls).toHaveLength(0);
       expect(h.toasts).toHaveLength(0);
-      expect(h.logs).toHaveLength(1);
+      expect(h.logs.join('\n')).toMatch(/^precompute: kept /m);
+    });
+
+    it('hands a precompute below the threshold to next(event), so core precomputes its summary', async () => {
+      const h = harness();
+      const event = { trigger: 'precompute', messages: claudeOnly() };
+      expect(await h.compact(event)).toBe(NEXT_RESULT);
+      expect(h.nextCalls).toEqual([event]);
+      expect(h.toasts).toHaveLength(0);
+    });
+
+    it('never races the short timeout on precompute: nobody is waiting, so the forks get the ceiling', async () => {
+      const h = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
+      await h.compact({ ...prunable(), trigger: 'precompute' });
+      expect(h.sleeps.map((x) => x.ms)).toEqual([45_000]);
+    });
+
+    it('races claudeTimeoutMs when rules alone clear the gate, awaits the ceiling when they do not', async () => {
+      const racing = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
+      await racing.compact(prunable());
+      expect(racing.sleeps.map((x) => x.ms)).toEqual([20_000]);
+      const awaiting = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
+      await awaiting.compact({ trigger: 'auto', messages: claudeOnly() });
+      expect(awaiting.sleeps.map((x) => x.ms)).toEqual([45_000]);
+    });
+
+    it('logs per-fork timings and the wait mode to the debug log', async () => {
+      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      await h.compact(prunable());
+      expect(h.debugLogs.join('\n')).toMatch(/scorer: wait race; 1 fork \[1 calls \d+ms ran\]; claude \d+ms; total \d+ms/);
+    });
+
+    it('asks the fork about the undecided calls with their position and a preview', async () => {
+      const h = harness();
+      await h.compact(prunable());
+      expect(h.forkCalls[0]).toMatch(/^t3 Bash msg 6\/13 npm test → ok 3000ch \| y{79}…/m);
+      expect(h.forkCalls[0]).not.toMatch(/^t2 /m); // t1's stale_read evidence
     });
 
     it('logs the effective config to the debug log once per load', async () => {
@@ -182,7 +229,7 @@ describe('register', () => {
     });
 
     it('prefixes only the toast; the engine already names the plugin on log lines', async () => {
-      const h = harness({ fork: async () => ({ text: '{"drop":["t3"],"truncate":[]}' }) });
+      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
       await h.compact(prunable());
       expect(h.toasts[0]).toMatch(/^verbatim-compaction: /);
       expect(h.logs.every((line) => !line.startsWith('verbatim-compaction'))).toBe(true);

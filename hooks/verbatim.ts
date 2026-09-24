@@ -4,7 +4,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
-import { makeScorer } from '../src/score.js';
+import { makeScorer, rulesGate } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
 
@@ -20,6 +20,10 @@ export type HookConfig = {
    * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS].
    */
   claudeTimeoutMs: number;
+  /** Maps the fork's `unsure` list: < 0.5 keep, up to 0.75 truncate, above drop. Clamped to [0, 1]. */
+  keepThreshold: number;
+  /** Most calls per fork; more candidates run as concurrent forks. Whole number in [1, 400]. */
+  forkChunkSize: number;
 };
 
 /**
@@ -33,6 +37,13 @@ export type HookConfig = {
  */
 const MIN_CLAUDE_TIMEOUT_MS = 500;
 const MAX_CLAUDE_TIMEOUT_MS = 45_000;
+/**
+ * How long the forks may take when the rules alone cannot clear the gate (a timeout then means
+ * the built-in summary) and on `precompute` (nobody waits): the ceiling, under the 60 s a
+ * headless turn waits. The shorter `claudeTimeoutMs` applies only when rules alone clear it.
+ */
+const CLAUDE_AWAIT_MS = MAX_CLAUDE_TIMEOUT_MS;
+const MAX_FORK_CHUNK_SIZE = 400;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
@@ -42,6 +53,8 @@ const DEFAULTS: HookConfig = {
   maxCandidates: 400,
   useClaudeScorer: true,
   claudeTimeoutMs: 20_000,
+  keepThreshold: 0.5,
+  forkChunkSize: 60,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -67,6 +80,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       MIN_CLAUDE_TIMEOUT_MS,
       MAX_CLAUDE_TIMEOUT_MS,
     ),
+    keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
+    forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
   };
 }
 
@@ -114,13 +129,22 @@ export async function compactSession(
   config: HookConfig,
   fork?: ForkFn,
   sleep?: SleepFn,
+  /** Nobody waits on the result (`precompute`): always give the forks the ceiling. */
+  background = false,
 ): Promise<{ result: CompactResult; messages: SessionMessage[] }> {
   const scorer = makeScorer({
     fork,
     sleep,
     useClaudeScorer: config.useClaudeScorer,
     maxCandidates: config.maxCandidates,
+    keepThreshold: config.keepThreshold,
+    chunkSize: config.forkChunkSize,
+    messageCount: messages.length,
     claudeTimeoutMs: config.claudeTimeoutMs,
+    claudeAwaitMs: Math.max(config.claudeTimeoutMs, CLAUDE_AWAIT_MS),
+    rulesClearGate: background
+      ? () => false
+      : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
   });
   const result = await compact(messages, scorer, config);
   return { result, messages: toSessionMessages(messages, result.messages) };
@@ -135,6 +159,15 @@ export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(reductionRatio(result) * 100)}% reduction; rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
+}
+
+/** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */
+export function describeForks(result: CompactResult): string | undefined {
+  const s = result.stats;
+  if (!s.forks || s.forks.length === 0) return undefined;
+  const runs = s.forks.map((f) => `${f.candidates} calls ${f.ms}ms ${f.status}`).join(', ');
+  const plural = s.forks.length === 1 ? 'fork' : 'forks';
+  return `scorer: wait ${s.wait ?? 'race'}; ${s.forks.length} ${plural} [${runs}]; claude ${s.claudeMs ?? 0}ms; total ${s.ms}ms`;
 }
 
 type Ui = {
@@ -183,9 +216,6 @@ function mayFork(event: SessionCompactInput): boolean {
   return event.agentId === undefined;
 }
 
-/** `precompute` computes and keeps nothing; the real compaction that follows runs the full pipeline. */
-const PRECOMPUTE_SKIP_REASON = 'precompute skipped; the real compaction runs the full pipeline';
-
 /** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
 const EMPTY_SKIP_REASON = 'nothing to compact yet';
 
@@ -215,10 +245,6 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.compact', async ($, event, next) => {
     if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
-    if (event.trigger === 'precompute') {
-      notify($, PRECOMPUTE_SKIP_REASON, false);
-      return { skip: PRECOMPUTE_SKIP_REASON };
-    }
     // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
     // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
     const cancelSleep = new AbortController();
@@ -229,17 +255,24 @@ export const register: Register = (on: On, options: PluginOptions) => {
         return { skip: EMPTY_SKIP_REASON };
       }
       if (wantsSummary(event)) return next(event);
+      // A precompute runs in the background ahead of the threshold; what it returns is kept and
+      // installed by the compaction that comes, so it runs the real pipeline, gives the forks the
+      // ceiling, and reports in the log only (nobody is looking at a toast for it).
+      const background = event.trigger === 'precompute';
+      const prefix = background ? 'precompute: ' : '';
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
-      const { result, messages } = await compactSession(event.messages, config, fork, sleep);
+      const { result, messages } = await compactSession(event.messages, config, fork, sleep, background);
+      const forks = describeForks(result);
+      if (forks) debug($, forks);
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify($, `fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`);
+        notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
         return next(event);
       }
-      notify($, `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`);
+      notify($, `${prefix}kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, !background);
       return { messages };
     } catch (error) {
-      notify($, `fallback to built-in summary (${message(error)})`);
+      notify($, `fallback to built-in summary (${message(error)})`, event.trigger !== 'precompute');
       return next(event);
     } finally {
       cancelSleep.abort();

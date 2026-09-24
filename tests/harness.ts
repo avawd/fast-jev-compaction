@@ -35,6 +35,15 @@ export interface Harness {
   signal: AbortSignal;
 }
 
+/** The fork reply that keeps every listed candidate whole (a call in none of the lists is dropped). */
+export function keepAll(prompt: string): string {
+  const ids = [...prompt.matchAll(/^(t\d+) /gm)].map((m) => m[1]);
+  return JSON.stringify({ result_needed: ids, call_matters: [], unsure: [] });
+}
+
+/** The fork reply that drops every listed candidate. */
+export const DROP_ALL = '{"result_needed":[],"call_matters":[],"unsure":[]}';
+
 export const NEXT_RESULT = { from: 'next' };
 
 export function harness(options: FakeOptions = {}): Harness {
@@ -56,7 +65,7 @@ export function harness(options: FakeOptions = {}): Harness {
       fork: async (request: { prompt: string }) => {
         h.forkCalls.push(request.prompt);
         // The live 2.1.281 shape; tests pass the older `{ text }` / null shapes explicitly.
-        return options.fork ? options.fork(request) : { isAnswered: true, text: '{"drop":[],"truncate":[]}' };
+        return options.fork ? options.fork(request) : { isAnswered: true, text: keepAll(request.prompt) };
       },
     },
     session: {
