@@ -26,6 +26,8 @@ export interface Harness {
   forkCalls: string[];
   toasts: string[];
   logs: string[];
+  /** Lines logged with `{ to: 'debug' }`: the debug log only, never the transcript. */
+  debugLogs: string[];
   sleeps: Array<{ ms: number; signal?: AbortSignal }>;
   usageCalls: number;
   compactCalls: number;
@@ -45,7 +47,7 @@ export function harness(options: FakeOptions = {}): Harness {
   const h: Harness = {
     compact: (event) => run('session.compact', event),
     turnComplete: (event) => run('turn.complete', event),
-    forkCalls: [], toasts: [], logs: [], sleeps: [],
+    forkCalls: [], toasts: [], logs: [], debugLogs: [], sleeps: [],
     usageCalls: 0, compactCalls: 0, nextCalls: [],
     signal: controller.signal,
   };
@@ -69,7 +71,10 @@ export function harness(options: FakeOptions = {}): Harness {
       },
     },
     ui: {
-      log: (text: string) => { h.logs.push(text); options.log?.(text); },
+      log: (text: string, opts?: { to?: string }) => {
+        (opts?.to === 'debug' ? h.debugLogs : h.logs).push(text);
+        options.log?.(text);
+      },
       toast: (text: string) => { h.toasts.push(text); options.toast?.(text); },
     },
     clock: {

@@ -56,7 +56,7 @@ describe('compactSession', () => {
     expect(result.stats).toMatchObject({ byRule: 1, byClaude: 1, claude: 'ran' });
     expect(messages[0]).toBe(input[0]);
     expect(messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
-    expect(summarize(result)).toMatch(/rules 1, claude 1/);
+    expect(summarize(result)).toMatch(/rules 1, claude 1 \(ran \d+\.\ds\)/);
   });
 
   it('is rules-only without a fork', async () => {
@@ -96,7 +96,7 @@ describe('register', () => {
       expect(out.messages).toBeDefined();
       expect(h.nextCalls).toHaveLength(0);
       expect(h.forkCalls).toHaveLength(1);
-      expect(h.toasts.join('\n')).toMatch(/rules 1, claude 0 \(error\)/);
+      expect(h.toasts.join('\n')).toMatch(/rules 1, claude 0 \(error \d+\.\ds\)/);
     });
 
     it('falls back to next(event) on an unexpected error', async () => {
@@ -112,14 +112,14 @@ describe('register', () => {
       expect(h.nextCalls).toHaveLength(0);
       expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
       expect(h.toasts).toHaveLength(1);
-      expect(h.toasts[0]).toMatch(/rules 1, claude 1 \(ran\)/);
+      expect(h.toasts[0]).toMatch(/rules 1, claude 1 \(ran \d+\.\ds\)/);
     });
 
     it('keeps rule verdicts when the fork outlasts claudeTimeoutMs', async () => {
       const h = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
       const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
       expect(out.messages).toBeDefined();
-      expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout\)/);
+      expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout \d+\.\ds\)/);
       expect(h.sleeps).toHaveLength(1);
       expect(h.sleeps[0]?.ms).toBe(20000);
     });
@@ -161,6 +161,24 @@ describe('register', () => {
       expect(h.forkCalls).toHaveLength(0);
       expect(h.toasts).toHaveLength(0);
       expect(h.logs).toHaveLength(1);
+    });
+
+    it('logs the effective config to the debug log once per load', async () => {
+      const h = harness({ userConfig: { claudeTimeoutMs: 30000 } });
+      await h.compact(prunable());
+      await h.compact(prunable());
+      await h.turnComplete({ reason: 'answer', answer: 'x', durationMs: 1, isAborted: false, turnId: 'x' });
+      const lines = h.debugLogs.filter((line) => line.startsWith('config '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('"claudeTimeoutMs":30000');
+      expect(lines[0]).toContain('"compactAtPercent":60');
+      expect(h.logs.some((line) => line.startsWith('config '))).toBe(false);
+    });
+
+    it('reports a skipped Claude stage without a duration', async () => {
+      const h = harness();
+      await h.compact({ ...prunable(), agentId: 'a1' });
+      expect(h.toasts[0]).toMatch(/claude 0 \(skipped\)/);
     });
 
     it('prefixes only the toast; the engine already names the plugin on log lines', async () => {
@@ -212,6 +230,13 @@ describe('register', () => {
       const h = harness({ percent: 59 });
       expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
       expect(h.compactCalls).toBe(0);
+    });
+
+    it('logs the context percent against the threshold at debug level', async () => {
+      const h = harness({ percent: 59 });
+      await h.turnComplete(answered);
+      expect(h.debugLogs).toContain('context 59% (compacts at 60%)');
+      expect(h.logs).toHaveLength(0);
     });
 
     it('compacts once at or above the threshold', async () => {

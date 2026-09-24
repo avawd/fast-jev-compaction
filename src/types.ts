@@ -78,6 +78,8 @@ export interface ScoreOutcome {
   /** Keyed by `ToolCall.id`. Calls absent from the map are kept. */
   verdicts: Map<string, Verdict>;
   claude: ClaudeStatus;
+  /** How long the Claude stage waited, when it ran at all. */
+  claudeMs?: number;
 }
 
 /** Receives every paired call (pinned ones included, as evidence) and returns verdicts. */
@@ -122,6 +124,8 @@ export interface CompactResult {
     byRule: number;
     byClaude: number;
     claude: ClaudeStatus;
+    /** How long the Claude stage waited; absent when it never started. */
+    claudeMs?: number;
     ms: number;
   };
 }

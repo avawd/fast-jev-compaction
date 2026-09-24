@@ -126,13 +126,20 @@ export async function compactSession(
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
+/** `ran 5.2s`, `timeout 20.0s`, or the bare status when the Claude stage never started. */
+function claudeStage(stats: CompactResult['stats']): string {
+  return stats.claudeMs === undefined ? stats.claude : `${stats.claude} ${(stats.claudeMs / 1000).toFixed(1)}s`;
+}
+
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(reductionRatio(result) * 100)}% reduction; rules ${s.byRule}, claude ${s.byClaude} (${s.claude}), ` +
+  return `${Math.round(reductionRatio(result) * 100)}% reduction; rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
 }
 
-type Ui = { ui: { log: (t: string) => void; toast: (t: string, o?: { timeoutMs?: number }) => void } };
+type Ui = {
+  ui: { log: (t: string, o?: { to?: 'transcript' | 'debug' }) => void; toast: (t: string, o?: { timeoutMs?: number }) => void };
+};
 
 /** Reports without ever throwing: a broken UI must not turn a good compaction into a failed hook. */
 function notify($: Ui, text: string, toast = true): void {
@@ -150,6 +157,16 @@ function notify($: Ui, text: string, toast = true): void {
   } catch {
     // The log line above already carries it.
   }
+}
+
+/** The debug log only: detail for whoever investigates, never a transcript line. Returns true. */
+function debug($: Ui, text: string): true {
+  try {
+    $.ui.log(text, { to: 'debug' });
+  } catch {
+    // Diagnostics must never fail the hook.
+  }
+  return true;
 }
 
 function message(error: unknown): string {
@@ -193,8 +210,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
   let autoCompactOff = false;
+  // register() has no `$`, so the effective config is logged by the first hook that runs.
+  let configLogged = false;
 
   on('session.compact', async ($, event, next) => {
+    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
     if (event.trigger === 'precompute') {
       notify($, PRECOMPUTE_SKIP_REASON, false);
       return { skip: PRECOMPUTE_SKIP_REASON };
@@ -227,10 +247,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
     if (compacting || autoCompactOff || event.agentId !== undefined || event.reason !== 'answer') return next(event);
     compacting = true;
     try {
       const { context } = await $.session.usage();
+      debug($, `context ${context.percent ?? 0}% (compacts at ${config.compactAtPercent}%)`);
       if ((context.percent ?? 0) >= config.compactAtPercent) autoCompactOff = !(await requestCompaction($));
     } catch (error) {
       notify($, `auto-compact skipped (${message(error)})`, false);

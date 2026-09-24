@@ -192,23 +192,21 @@ export async function compact(
   });
   const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
-  return {
-    messages: kept,
-    decisions,
-    stats: {
-      messagesBefore: messages.length,
-      messagesAfter: kept.length,
-      charsBefore,
-      charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
-      calls: calls.length,
-      kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
-      resultsDropped: by((d) => d.action === 'drop_result'),
-      callsDropped: by((d) => d.action === 'drop_call'),
-      pinned: by((d) => d.source === 'pinned'),
-      byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
-      byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
-      claude: outcome.claude,
-      ms: Date.now() - started,
-    },
+  const stats: CompactResult['stats'] = {
+    messagesBefore: messages.length,
+    messagesAfter: kept.length,
+    charsBefore,
+    charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
+    calls: calls.length,
+    kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
+    resultsDropped: by((d) => d.action === 'drop_result'),
+    callsDropped: by((d) => d.action === 'drop_call'),
+    pinned: by((d) => d.source === 'pinned'),
+    byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
+    byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
+    claude: outcome.claude,
+    ms: Date.now() - started,
   };
+  if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
+  return { messages: kept, decisions, stats };
 }

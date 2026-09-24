@@ -31,8 +31,12 @@ export function makeScorer(options: ScorerOptions): Scorer {
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };
     }
+    const started = Date.now();
     const claude = await scoreWithClaude(options.fork, undecided, options.maxCandidates, forkTimeout(options));
+    const claudeMs = Date.now() - started;
     for (const [id, verdict] of claude.verdicts) if (!verdicts.has(id)) verdicts.set(id, verdict);
-    return { verdicts, claude: claude.status };
+    return claude.status === 'skipped'
+      ? { verdicts, claude: claude.status }
+      : { verdicts, claude: claude.status, claudeMs };
   };
 }
