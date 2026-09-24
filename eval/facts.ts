@@ -11,12 +11,15 @@
  *    verbatim tool output carries them, so a compaction that drops the output
  *    loses them for good.
  *  - later-referenced tokens: introduced by an unpinned result and quoted by a
- *    LATER assistant text or tool input. Losing them from that result means the
- *    later reference points at nothing.
+ *    LATER assistant text or non-authoring tool input. The token counts as lost
+ *    only when no copy of it remains in the compacted context before that
+ *    quote (see survival), so a newer carrier the plugin kept instead counts.
  */
 import type { EvalMessage } from './parse.ts';
 
 export const FACT_KINDS = new Set(['sha', 'pr', 'jira', 'num', 'money', 'url']);
+/** Tools whose input authors content rather than quoting it (mirrors the plugin's pin rule). */
+export const AUTHORING_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 const TOKEN_RES: Array<[string, RegExp]> = [
   ['uuid', /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g],
@@ -114,7 +117,9 @@ export function factSets(messages: readonly EvalMessage[], calls: readonly Unpin
     for (const u of m.toolUses) {
       for (const t of tokensOf(inputText(u.input)).keys()) {
         note(t);
-        (quoted.get(t) ?? quoted.set(t, []).get(t)!).push(i);
+        // An authoring input (Edit old_string, Write content) carries its own copy of the text, so
+        // it leaves nothing dangling when the result it came from goes; not a reference.
+        if (!AUTHORING_TOOLS.has(u.tool)) (quoted.get(t) ?? quoted.set(t, []).get(t)!).push(i);
       }
     }
     for (const r of m.toolResults ?? []) {
@@ -171,23 +176,69 @@ export interface Survival {
   laterRefTotal: number;
 }
 
+/** Tool ids tagged by side, so a call row never matches its own result row. */
+function toolIds(m: EvalMessage): string[] {
+  return [...m.toolUses.map((u) => `use:${u.tool_use_id}`), ...(m.toolResults ?? []).map((r) => `result:${r.tool_use_id}`)];
+}
+
+/**
+ * For each compacted message, the index of the original message it came from.
+ * Compaction keeps order, so one forward walk suffices: a message matches by
+ * identity, by a shared tool id (a rebuilt/truncated row), or by role and text.
+ * A message with no original (e.g. a built-in summary) inherits the previous
+ * origin, or -1 at the start, i.e. it sits before everything after it.
+ */
+export function originIndices(compacted: readonly EvalMessage[], original: readonly EvalMessage[]): number[] {
+  const out: number[] = [];
+  let next = 0;
+  let last = -1;
+  for (const m of compacted) {
+    const ids = new Set(toolIds(m));
+    let found = -1;
+    for (let j = next; j < original.length; j += 1) {
+      const o = original[j]!;
+      const same =
+        o === m ||
+        (ids.size > 0 ? toolIds(o).some((id) => ids.has(id)) : toolIds(o).length === 0 && o.role === m.role && o.text === m.text);
+      if (same) {
+        found = j;
+        break;
+      }
+    }
+    if (found >= 0) {
+      last = found;
+      next = found + 1;
+    }
+    out.push(last);
+  }
+  return out;
+}
+
 /**
  * How the fact sets fare in a compacted transcript. A never-echoed fact
- * survives if it appears anywhere in the context; a later-referenced token is
- * lost if the compacted copy of ITS result no longer holds it (the later quote
- * itself is untouched by compaction, so searching the whole context would
- * always find it).
+ * survives if it appears anywhere in the context. A later-referenced token is
+ * lost only when nothing in the compacted context BEFORE its first quote still
+ * holds it: the plugin may keep a newer carrier of the same token instead of
+ * the one that introduced it, and the quote itself is not evidence (it is the
+ * reference that would dangle). `original` is the uncompacted segment, used to
+ * place each compacted message relative to the quote.
  */
-export function survival(facts: FactSets, compacted: readonly EvalMessage[]): Survival {
+export function survival(facts: FactSets, compacted: readonly EvalMessage[], original: readonly EvalMessage[]): Survival {
   const blob = contextBlob(compacted);
-  const results = resultsById(compacted);
   let survived = 0;
   for (const f of facts.neverEchoed) if (blob.includes(f.token)) survived += 1;
+  const origin = originIndices(compacted, original);
+  const prefixBlob = new Map<number, string>();
+  const before = (quotedAt: number): string => {
+    let text = prefixBlob.get(quotedAt);
+    if (text === undefined) {
+      text = contextBlob(compacted.filter((_, i) => origin[i]! < quotedAt));
+      prefixBlob.set(quotedAt, text);
+    }
+    return text;
+  };
   let lost = 0;
-  for (const r of facts.laterReferenced) {
-    const text = results.get(r.tool_use_id);
-    if (text === undefined || !text.includes(r.token)) lost += 1;
-  }
+  for (const r of facts.laterReferenced) if (!before(r.quotedAt).includes(r.token)) lost += 1;
   return {
     neverEchoedSurvived: survived,
     neverEchoedTotal: facts.neverEchoed.length,

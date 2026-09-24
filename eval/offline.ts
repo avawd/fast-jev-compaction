@@ -112,10 +112,10 @@ function nextReport(segs: Segment[], seg: Segment, facts: FactSets): SegmentRepo
   const next = segs[seg.index + 1];
   if (!next) return undefined;
   if (next.startsWithSummary) {
-    const s = survival(facts, next.messages.slice(0, 1));
+    const s = survival(facts, next.messages.slice(0, 1), seg.messages);
     return { kind: 'summary', neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) } };
   }
-  const s = survival(facts, carriedPrefix(seg.messages, next.messages));
+  const s = survival(facts, carriedPrefix(seg.messages, next.messages), seg.messages);
   return {
     kind: 'verbatim',
     neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) },
@@ -143,7 +143,7 @@ async function evalSegment(
     const after = resultsById(run.result.messages);
     let removed = 0;
     for (const c of unpinned) removed += c.resultChars - (after.get(c.tool_use_id)?.length ?? 0);
-    const s: Survival = survival(facts, run.result.messages);
+    const s: Survival = survival(facts, run.result.messages, seg.messages);
     const decisions: Record<string, number> = {};
     for (const d of run.result.decisions) {
       const key = d.source === 'pinned' ? 'pinned' : `${d.action}:${d.rule ?? d.source}`;

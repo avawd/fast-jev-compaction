@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { factSets, survival, tokensOf } from './facts.ts';
+import { factSets, originIndices, survival, tokensOf } from './facts.ts';
 import type { EvalMessage } from './parse.ts';
 
 const call = (id: string, tool: string, input: Record<string, unknown>): EvalMessage => ({
@@ -53,8 +53,55 @@ describe('factSets + survival', () => {
 
   it('scores a compacted transcript: whole-context search for facts, own-result search for refs', () => {
     const facts = factSets(messages, calls);
-    expect(survival(facts, messages)).toEqual({ neverEchoedSurvived: 1, neverEchoedTotal: 1, laterRefLost: 0, laterRefTotal: 2 });
+    expect(survival(facts, messages, messages)).toEqual({ neverEchoedSurvived: 1, neverEchoedTotal: 1, laterRefLost: 0, laterRefTotal: 2 });
     const dropped = messages.filter((_, i) => i !== 1 && i !== 2);
-    expect(survival(facts, dropped)).toEqual({ neverEchoedSurvived: 1, neverEchoedTotal: 1, laterRefLost: 2, laterRefTotal: 2 });
+    expect(survival(facts, dropped, messages)).toEqual({ neverEchoedSurvived: 1, neverEchoedTotal: 1, laterRefLost: 2, laterRefTotal: 2 });
+  });
+});
+
+describe('laterRef lost', () => {
+  // u1 introduces #4321 (a 'pr' and a 'num' token); u2 carries it again (newer); an assistant message quotes it after both.
+  const messages: EvalMessage[] = [
+    { role: 'user', text: 'go', toolUses: [] },
+    call('u1', 'Bash', { command: 'gh pr list' }),
+    result('u1', 'open: #4321 fix things'),
+    call('u2', 'Bash', { command: 'gh pr view' }),
+    result('u2', 'pr #4321 is open'),
+    say('Merging #4321 now.'),
+  ];
+  const facts = factSets(messages, [
+    { tool_use_id: 'u1', tool: 'Bash', resultIndex: 2 },
+    { tool_use_id: 'u2', tool: 'Bash', resultIndex: 4 },
+  ]);
+
+  it('is not lost when a newer carrier still holds the token before the quote', () => {
+    const withoutFirst = messages.filter((_, i) => i !== 1 && i !== 2);
+    expect(survival(facts, withoutFirst, messages)).toMatchObject({ laterRefLost: 0, laterRefTotal: 2 });
+  });
+
+  it('is lost when the only remaining copies are at or after the quote', () => {
+    const withoutBoth = messages.filter((_, i) => i < 1 || i > 4);
+    expect(survival(facts, withoutBoth, messages)).toMatchObject({ laterRefLost: 2, laterRefTotal: 2 });
+  });
+
+  it('maps rebuilt (truncated) messages back by tool id, and an unknown row to the one before it', () => {
+    const rebuilt = { ...messages[4]!, toolResults: [{ tool_use_id: 'u2', text: '[truncated]' }] };
+    const summary = { role: 'user' as const, text: 'summary of earlier work', toolUses: [] };
+    expect(originIndices([summary, messages[0]!, rebuilt, messages[5]!], messages)).toEqual([-1, 0, 4, 5]);
+    const truncatedBoth = messages.map((m, i) => (i === 2 || i === 4 ? { ...m, toolResults: [{ tool_use_id: m.toolResults![0]!.tool_use_id, text: '[truncated]' }] } : m));
+    expect(survival(facts, truncatedBoth, messages)).toMatchObject({ laterRefLost: 2 });
+  });
+});
+
+describe('authoring inputs', () => {
+  it('do not count as a later reference', () => {
+    const messages: EvalMessage[] = [
+      { role: 'user', text: 'go', toolUses: [] },
+      call('u1', 'Read', { file_path: '/a/b.ts' }),
+      result('u1', 'const someLongIdentifierName = 1'),
+      call('u2', 'Edit', { file_path: '/a/b.ts', old_string: 'someLongIdentifierName', new_string: 'x' }),
+    ];
+    const facts = factSets(messages, [{ tool_use_id: 'u1', tool: 'Read', resultIndex: 2 }]);
+    expect(facts.laterReferenced).toEqual([]);
   });
 });
