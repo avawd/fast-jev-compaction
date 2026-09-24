@@ -49,6 +49,8 @@ export interface ToolCall {
   refTokens?: string[];
   /** `refTokens.length`; shown to the scorer as `ref-later:n`. */
   refLater?: number;
+  /** The session's working directory, when known: relative paths in Bash commands resolve against it. */
+  cwd?: string;
 }
 
 export type CallAction = 'keep' | 'drop_result' | 'drop_call';
@@ -145,6 +147,8 @@ export interface CompactOptions {
   pinReferenced?: boolean;
   /** Strip JSON furniture (self links, avatars, feature flags...) from MCP results. Default true. */
   stripMcpFurniture?: boolean;
+  /** The session's working directory (absolute), for resolving relative paths. Unknown if absent. */
+  cwd?: string;
 }
 
 export interface ResolvedCompactOptions {
@@ -154,6 +158,7 @@ export interface ResolvedCompactOptions {
   staleAfterMessages: number;
   pinReferenced: boolean;
   stripMcpFurniture: boolean;
+  cwd?: string;
 }
 
 export interface CompactResult {

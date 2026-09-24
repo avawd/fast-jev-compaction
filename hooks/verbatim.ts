@@ -153,6 +153,8 @@ export async function compactSession(
   sleep?: SleepFn,
   /** Nobody waits on the result (`precompute`): always give the forks the ceiling. */
   background = false,
+  /** The session's working directory, so the rules resolve relative Bash paths. */
+  cwd?: string,
 ): Promise<{ result: CompactResult; messages: SessionMessage[] }> {
   const scorer = makeScorer({
     fork,
@@ -168,7 +170,7 @@ export async function compactSession(
       ? () => false
       : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
   });
-  const result = await compact(messages, scorer, config);
+  const result = await compact(messages, scorer, cwd ? { ...config, cwd } : config);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -258,6 +260,20 @@ async function requestCompaction($: EngineInterface): Promise<boolean> {
   }
 }
 
+/**
+ * `$.session.cwd()`, or undefined when the engine lacks it or refuses: the rules then fall
+ * back to suffix-matching relative paths. Top-level on purpose: the engine validates `$`
+ * use only in top-level functions of this module.
+ */
+export async function sessionCwd($: { session: { cwd: () => Promise<string> } }): Promise<string | undefined> {
+  try {
+    const cwd = await $.session.cwd();
+    return typeof cwd === 'string' && cwd.startsWith('/') ? cwd : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
@@ -284,7 +300,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const prefix = background ? 'precompute: ' : '';
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
-      const { result, messages } = await compactSession(event.messages, config, fork, sleep, background);
+      const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
       const forks = describeForks(result);
       if (forks) debug($, forks);
       if (gateRatio(result) < config.minReductionRatio) {

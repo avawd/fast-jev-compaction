@@ -84,15 +84,31 @@ describe('isReadOnlyCommand', () => {
 describe('readonlyFamilyKey', () => {
   it('keys read-only commands by family and first argument', () => {
     expect(readonlyFamilyKey('cd /r && git status')).toBe('git status');
-    expect(readonlyFamilyKey('git log --oneline -5')).toBe('git log');
-    expect(readonlyFamilyKey('git -C /r diff --stat main')).toBe('git diff main');
-    expect(readonlyFamilyKey('gh api "repos/o/r/actions/runs?branch=b" --jq .x')).toBe('gh api repos/o/r/actions/runs?branch=b');
-    expect(readonlyFamilyKey('gh pr view 12')).toBe('gh pr view');
-    expect(readonlyFamilyKey('docker logs web --tail 50')).toBe('docker logs web');
+    expect(readonlyFamilyKey('git status --short')).toBe('git status');
+    expect(readonlyFamilyKey('git log --oneline -5')).toBe('git log -5');
+    expect(readonlyFamilyKey('git -C /r diff --stat main')).toBe('git diff --stat main');
+    expect(readonlyFamilyKey('gh api "repos/o/r/actions/runs?branch=b" --jq .x')).toBe('gh api repos/o/r/actions/runs?branch=b --jq .x');
+    expect(readonlyFamilyKey('gh pr view 12')).toBe('gh pr view 12');
+    expect(readonlyFamilyKey('docker logs web --tail 50')).toBe('docker logs web --tail 50');
     expect(readonlyFamilyKey('ls -la src')).toBe('ls src');
-    expect(readonlyFamilyKey('git --no-pager diff --stat')).toBe('git diff');
+    expect(readonlyFamilyKey('git --no-pager diff --stat')).toBe('git diff --stat');
     expect(readonlyFamilyKey('git worktree list | head -20')).toBe('git worktree list | head -20');
     expect(readonlyFamilyKey('sleep 30; gh run list')).toBe('gh run list');
+  });
+
+  it('tells apart commands that print different things (F3)', () => {
+    for (const [a, b] of [
+      ['gh pr view 123', 'gh pr view 456'], ['gh pr view 123 --json body', 'gh pr view 123'],
+      ['gh run view 111 --log', 'gh run view 222'], ['gh pr checks 12', 'gh pr checks 34'],
+      ['git log -20 --oneline', 'git log -1'], ['git diff', 'git diff --cached'], ['git diff HEAD~3', 'git diff HEAD~1'],
+      ['git show abc123', 'git show def456'], ['git stash show 0', 'git stash show 1'],
+      ['gh api repos/o/r/pulls/12', 'gh api repos/o/r/pulls/12/comments'],
+      ['docker logs app --tail 50', 'docker logs app --tail 5'],
+      ['git log --oneline -5 -- src/a.ts', 'git log --oneline -5 -- src/b.ts'], ['git log -n 5', 'git log -n 50'],
+    ]) {
+      expect(readonlyFamilyKey(a!), `${a} vs ${b}`).not.toBe(readonlyFamilyKey(b!));
+    }
+    expect(readonlyFamilyKey('git status')).toBe(readonlyFamilyKey('git status -sb'));
   });
 
   it('keeps a pipeline in the key so a different filter is a different command', () => {
@@ -120,7 +136,7 @@ describe('bashRules', () => {
       bash('cd /repo && cat lib/a.ts'),
       c('Edit', { file_path: '/repo/lib/a.ts', old_string: 'a', new_string: 'b' }),
       bash('sed -n 1,40p lib/b.ts'),
-      bash('sed -n 40,80p lib/b.ts'),
+      bash('sed -n 1,40p lib/b.ts'),
       bash('cat lib/c.ts'),
     ];
     const v = bashRules(calls, new Set());
@@ -163,7 +179,7 @@ describe('bashRules', () => {
     const calls = [
       bash('cd /r && git status --short && echo --- && git log --oneline -3'),
       bash('cd /r && git status && gh pr view 12'),
-      bash('git log -5 && npm test'),
+      bash('git log --oneline -3 && npm test'),
       bash('cd /r && git status && gh pr view 12'),
     ];
     const v = bashRules(calls, new Set());
@@ -202,6 +218,65 @@ describe('bashRules', () => {
     ];
     const v = bashRules(calls, new Set(['t3']));
     expect([...v.keys()]).toEqual([]);
+  });
+});
+
+describe('bashRules: only a whole read is evidence (F1)', () => {
+  const full = (label: string, later: ToolCall) => it(`a full read is superseded by ${label}`, () => {
+    fresh();
+    expect(bashRules([bash('cat src/a.ts'), later], new Set()).get('t1')?.rule).toBe('bash_read_superseded');
+  });
+  const partial = (label: string, later: () => ToolCall) => it(`a full read is NOT superseded by ${label}`, () => {
+    fresh();
+    const first = bash('cat src/a.ts');
+    expect(bashRules([first, later()], new Set()).has('t1')).toBe(false);
+  });
+  full('an unranged Read', { ...c('Read', { file_path: 'src/a.ts' }), id: 't2' });
+  full('an Edit', { ...c('Edit', { file_path: 'src/a.ts' }), id: 't2' });
+  full('a later cat of the whole file', { ...bash('cat -n src/a.ts'), id: 't2' });
+  partial('a ranged Read', () => c('Read', { file_path: 'src/a.ts', offset: 100, limit: 20 }));
+  partial('a PDF page Read', () => c('Read', { file_path: 'src/a.ts', pages: '2' }));
+  partial('wc -l', () => bash('wc -l src/a.ts'));
+  partial('grep', () => bash('grep foo src/a.ts'));
+  partial('head', () => bash('head -3 src/a.ts'));
+  partial('sed -n', () => bash("sed -n '1,5p' src/a.ts"));
+  partial('cat piped through head', () => bash('cat src/a.ts | head -5'));
+
+  it('a partial read is superseded by an identical later command', () => {
+    fresh();
+    const v = bashRules([bash('cd /r && grep -n foo src/a.ts'), bash('cd /r; grep -n foo src/a.ts')], new Set());
+    expect(v.get('t1')).toMatchObject({ rule: 'bash_read_superseded', evidence: 't2' });
+    fresh();
+    expect(bashRules([bash('cd /r && grep -n foo src/a.ts'), bash('cd /s && grep -n foo src/a.ts')], new Set()).size).toBe(0);
+  });
+});
+
+describe('bashRules: paths resolve against the session cwd (F2)', () => {
+  const at = (cwd: string) => (x: ToolCall): ToolCall => ({ ...x, cwd });
+  it('does not cross worktrees when the cwd is known', () => {
+    fresh();
+    const calls = [bash('cat src/compact.ts'), c('Read', { file_path: '/other/worktree/src/compact.ts' })].map(at('/w/opt'));
+    expect(bashRules(calls, new Set()).size).toBe(0);
+    fresh();
+    const same = [bash('cat src/compact.ts'), c('Read', { file_path: '/w/opt/src/compact.ts' })].map(at('/w/opt'));
+    expect(bashRules(same, new Set()).get('t1')?.evidence).toBe('t2');
+  });
+
+  it('honours a leading cd, absolute or relative to the cwd', () => {
+    fresh();
+    expect(bashRules([bash('cd /a && cat x/README.md'), c('Read', { file_path: '/b/x/README.md' })].map(at('/w')), new Set()).size).toBe(0);
+    fresh();
+    expect(bashRules([bash('cd sub && cat x/R.md'), c('Read', { file_path: '/w/sub/x/R.md' })].map(at('/w')), new Set()).size).toBe(1);
+  });
+
+  it('never matches two different absolute paths by suffix', () => {
+    fresh();
+    expect(bashRules([bash('cat /a/x/README.md'), c('Read', { file_path: '/b/x/README.md' })], new Set()).size).toBe(0);
+  });
+
+  it('falls back to suffix matching only when no cwd is known', () => {
+    fresh();
+    expect(bashRules([bash('cat src/a.ts'), c('Read', { file_path: '/repo/src/a.ts' })], new Set()).size).toBe(1);
   });
 });
 

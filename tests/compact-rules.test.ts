@@ -86,3 +86,29 @@ describe('compact with the Stage 2a rules', () => {
     expect(resultText((await run(near, { pinReferenced: false })).messages, 'u1')).toBeUndefined();
   });
 });
+
+describe('compact passes the session cwd to the rules (F2)', () => {
+  it('annotates every call with options.cwd so Bash paths resolve against it', async () => {
+    let seen: readonly ToolCall[] = [];
+    const scorer: Scorer = async (calls) => { seen = calls; return { verdicts: new Map(), claude: 'skipped' }; };
+    const messages = [msg('user', 'go'), use('u1', 'Bash', { command: 'cat src/a.ts' }), res('u1', 'x'), ...tail(8)];
+    await compact(messages, scorer, { cwd: '/w/opt' });
+    expect(seen[0]!.cwd).toBe('/w/opt');
+    await compact(messages, scorer, {});
+    expect(seen[0]!.cwd).toBeUndefined();
+    await compact(messages, scorer, { cwd: 'relative/dir' });
+    expect(seen[0]!.cwd).toBeUndefined();
+  });
+
+  it('keeps a Bash read of one worktree when only another worktree\'s copy is re-read', async () => {
+    const messages = [msg('user', 'go'),
+      use('u1', 'Bash', { command: 'cat src/compact.ts' }, 'Reading.'), res('u1', 'y'.repeat(4000)),
+      use('u2', 'Read', { file_path: '/elsewhere/src/compact.ts' }, 'Reading.'), res('u2', 'z'.repeat(4000)),
+      ...tail(8)];
+    const out = await compact(messages, rulesOnly, { cwd: '/w/opt' });
+    expect(out.decisions.find((d) => d.id === 't1')?.rule).toBeUndefined();
+    const same = await compact(messages.map((m) => m.toolUses[0]?.tool === 'Read'
+      ? { ...m, toolUses: [{ ...m.toolUses[0]!, input: { file_path: '/w/opt/src/compact.ts' } }] } : m), rulesOnly, { cwd: '/w/opt' });
+    expect(same.decisions.find((d) => d.id === 't1')?.rule).toBe('bash_read_superseded');
+  });
+});

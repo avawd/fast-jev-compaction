@@ -54,6 +54,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     ),
     pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
+    ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
 }
 

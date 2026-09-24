@@ -56,3 +56,12 @@ describe('summarize', () => {
     expect(summarize(result)).toMatch(/^4\d% of tool output \(3\d% of transcript\); rules 1/);
   });
 });
+
+describe('sessionCwd', () => {
+  it('reads $.session.cwd() and tolerates an engine without it or one that throws', async () => {
+    const { sessionCwd } = await import('../hooks/verbatim.ts');
+    expect(await sessionCwd({ session: { cwd: async () => '/w/opt' } } as never)).toBe('/w/opt');
+    expect(await sessionCwd({ session: {} } as never)).toBeUndefined();
+    expect(await sessionCwd({ session: { cwd: async () => { throw new Error('no'); } } } as never)).toBeUndefined();
+  });
+});
