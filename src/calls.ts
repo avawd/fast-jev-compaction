@@ -1,3 +1,4 @@
+import { sliceWhole } from './text.js';
 import type { Message, ToolCall, ToolResult } from './types.js';
 
 /** Enough of a result for the scorer's preview (it shows 80 chars after collapsing whitespace). */
@@ -34,7 +35,7 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
-        resultHead: found.result.text.slice(0, RESULT_HEAD_CHARS),
+        resultHead: sliceWhole(found.result.text, RESULT_HEAD_CHARS),
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||

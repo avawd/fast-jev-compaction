@@ -150,3 +150,39 @@ describe('resultHead', () => {
     expect(calls[0]?.resultChars).toBe(500);
   });
 });
+
+describe('well-formed prompts', () => {
+  const EMOJI = '🚨'; // one astral char: two UTF-16 units
+  const wellFormed = (s: string) => (s as string & { isWellFormed(): boolean }).isWellFormed();
+
+  it('resultHead never ends on half a surrogate pair, whatever the cut', () => {
+    for (let pad = 190; pad <= 202; pad += 1) {
+      const text = `${'r'.repeat(pad)}${EMOJI.repeat(10)}`;
+      const calls = collectToolCalls([
+        { role: 'user', text: 'go', toolUses: [] },
+        { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Read', input: {} }] },
+        { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'u1', text }] },
+      ], 0);
+      expect(wellFormed(calls[0]!.resultHead!)).toBe(true);
+    }
+  });
+
+  it('every built prompt is well-formed for astral chars at every cut boundary', () => {
+    for (let pad = 0; pad < 12; pad += 1) {
+      const long = (n: number) => `${'x'.repeat(n - 6 + pad)}${EMOJI.repeat(8)}`;
+      const calls = [
+        c('t1', 'Bash', { command: long(400) }, { resultHead: long(80) }),
+        c('t2', 'Read', { file_path: long(400) }, { resultHead: long(200) }),
+        c('t3', 'Grep', { pattern: EMOJI }, { resultHead: `${'y'.repeat(pad)}${EMOJI}` }),
+      ];
+      expect(wellFormed(buildJevPrompt(calls, { messageCount: 9 }))).toBe(true);
+    }
+  });
+
+  it('repairs a lone surrogate that reaches the prompt from anywhere (a final guard)', () => {
+    const broken = c('t1', 'Read', { file_path: 'a\uD83D' }, { resultHead: '\uDEA8b' });
+    const prompt = buildJevPrompt([broken], { messageCount: 3 });
+    expect(wellFormed(prompt)).toBe(true);
+    expect(prompt).toContain('a�');
+  });
+});

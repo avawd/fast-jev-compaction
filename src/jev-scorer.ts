@@ -90,8 +90,20 @@ export function jevCandidateLine(call: ToolCall, ctx: JevContext): string {
   return line;
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** `String.prototype.toWellFormed` (ES2024, past this build's lib): each lone surrogate becomes U+FFFD. */
+export function toWellFormed(text: string): string {
+  return text.replace(LONE_SURROGATE, '\uFFFD');
+}
+
+/**
+ * The prompt for one fork. Every cut above keeps surrogate pairs whole, but a lone surrogate
+ * can also arrive in the transcript itself (a tool input, a result head), and the API rejects a
+ * request body carrying one, so the finished prompt is repaired as a last guard.
+ */
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
-  return [
+  return toWellFormed([
     'Context maintenance request. Do not continue the task and do not call tools.',
     'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
@@ -100,7 +112,7 @@ export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): str
     'A call in result_needed is kept whole; one only in call_matters or in unsure keeps the call but its output is truncated; one in none of them is removed with its output.',
     '',
     ...calls.map((call) => jevCandidateLine(call, ctx)),
-  ].join('\n');
+  ].join('\n'));
 }
 
 function idList(value: unknown, ids: ReadonlySet<string>): Set<string> | undefined {
