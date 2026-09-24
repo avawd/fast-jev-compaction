@@ -1,4 +1,4 @@
-// Written by Claude Code 2.1.281.
+// Written by Claude Code 2.1.282.
 // Claude Code function hooks: the plugin API's TypeScript declarations.
 //
 // EARLY ACCESS: this surface may change between releases without notice.
@@ -930,6 +930,17 @@ declare module 'claude-code' {
        * under the pointer or the focus: a secondary control, a path in a list.
        */
       dimColor?: boolean;
+      /**
+       * Which button of several is the main action: `"primary"` is drawn as the
+       * surface marks the one to press, `"secondary"`, and absent, as before.
+       *
+       * The terminal draws a primary `[ label ]` in the accent color, a desktop
+       * its own primary button; `dimColor`, `hover`, the focus and the pointer
+       * apply to both. `plain` wins: a plain Button draws the same either way.
+       *
+       * @example <Button variant="primary" onPress={save}>Save</Button>
+       */
+      variant?: 'primary' | 'secondary';
       /**
        * The site's focus ring starts here when the site takes the keyboard,
        * instead of on nothing, as the DOM's `autofocus`: Enter acts on it at once.
@@ -5076,7 +5087,8 @@ declare module 'claude-code' {
        */
       key?: string;
       /**
-       * The markdown drawn, as an assistant reply would write it.
+       * The markdown drawn, as an assistant reply would write it; a `<context>`
+       * block, hidden in a reply's own text, is drawn here as written.
        *
        * At most 10000 characters, tab and newline its only control characters;
        * a link whose scheme is not `https:`, `http:` or `file:` draws as text,
@@ -7434,6 +7446,14 @@ declare module 'claude-code' {
        */
       isFilled: boolean;
       /**
+       * Why the box did not take the text, when the engine itself refused
+       * (PromptFillResult): `no_composer` where the session binds no box,
+       * `dialog` while one holds the keys. A hook's refusal carries none, so
+       * a caller choosing a fallback treats an absent cause as unknown and
+       * does not act as if no box existed.
+       */
+      refusal?: 'no_composer' | 'dialog';
+      /**
        * The draft after the fill; unchanged when `isFilled` is false; `''` where
        * no box is drawn or the caller may not read it (see above).
        */
@@ -7514,6 +7534,18 @@ declare module 'claude-code' {
        * out.
        */
       isFilled: boolean;
+      /**
+       * Why the box did not take the text, on the two refusals the engine
+       * itself answers: the session binds no prompt box (`no_composer`:
+       * headless, or a surface that draws its own composer), or a dialog holds
+       * the keys (`dialog`), so the write would land under it, unseen. A hook's
+       * own refusal carries none: the site strips a cause a hook writes itself,
+       * keeping only one its `next` gave it, passed up as it was. A caller
+       * branching on the cause treats an absent one as unknown and takes its
+       * refusing arm; `no_composer` is the only value that says no box exists
+       * to protect.
+       */
+      refusal?: 'no_composer' | 'dialog';
   };
 
   /**
@@ -8037,6 +8069,16 @@ declare module 'claude-code' {
            */
           dimColor?: TextProps['dimColor'];
           /**
+           * `"primary"` marks the main action of several, drawn as the surface
+           * marks the one to press; `"secondary"`, and absent, draw as before.
+           *
+           * The terminal draws a primary in the accent color; `plain` wins over
+           * it. Carried to every surface as written, never filled in.
+           *
+           * @example { key: 'save', label: 'Save', variant: 'primary' }
+           */
+          variant?: ButtonProps['variant'];
+          /**
            * The site's ring starts on this element when the site takes the
            * keyboard; the first drawn of several. Absent draws as before.
            */
@@ -8436,7 +8478,8 @@ declare module 'claude-code' {
        */
       AssistantMessage: {
           /**
-           * The block's text, markdown, as the transcript will draw it.
+           * The block's text, markdown, as the surface's transcript will draw it:
+           * what it hides of a reply (the terminal's, a `<context>` block) is gone.
            */
           text: string;
           /**
@@ -8767,8 +8810,9 @@ declare module 'claude-code' {
        * The dim hint line under the prompt (`? for shortcuts`, `esc to
        * interrupt`, the pills beside them). One instance.
        *
-       * A hook rewrites `hint` and the rewrite is drawn in the line's place, or
-       * draws its own tree; `isDraft` and `isWorking` say what the line is for.
+       * A hook rewrites `hint`, drawn in the line's place, or draws its own tree;
+       * `isDraft` and `isWorking` say what the line is for. On the terminal, until
+       * a new answer lands the last keeps its row (the engine's line before any).
        *
        * Raised on the terminal and desktop surfaces only.
        */
@@ -9678,6 +9722,12 @@ declare module 'claude-code' {
        * The event's discriminator (`pull_request.closed`, `check_suite`).
        */
       kind: string;
+      /**
+       * The envelope's sender-kind attribute as the server stamped it (`system`
+       * for a relay's own event, `rc_owner` for the user's own relayed message);
+       * absent when the envelope carries none.
+       */
+      from?: string;
       /**
        * The envelope's JSON body (`{ pr: "acme/app#12", outcome: "merged" }`).
        */
@@ -11366,8 +11416,8 @@ declare module 'claude-code' {
        * What the turn cost: its responses' token counts summed and the model of
        * the last, read off the API responses the engine already holds.
        *
-       * Absent when the turn got no response (interrupted before one, an API
-       * error).
+       * A response a `turn.step` hook made up counts only when its stop states
+       * usage; absent when no counted response came (an interrupt, an API error).
        */
       usage?: TurnUsage;
   };
@@ -13881,7 +13931,7 @@ declare module 'claude-code' {
     Monitor: {
       /** Short human-readable description of what you are monitoring (shown in notifications). */
       description: string
-      /** Kill the monitor after this deadline. Default 300000ms. Deadlines above 1800000ms are capped to 1800000ms. You are notified at expiry and can re-arm. */
+      /** Kill the monitor after this deadline. Default 300000ms. Deadlines above 600000ms are capped to 600000ms. You are notified at expiry and can re-arm. */
       timeout_ms: number
       /** Shell command or script. Each stdout line is an event; exit ends the watch. */
       command?: string
