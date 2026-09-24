@@ -9,11 +9,24 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
 1. **Rules** (local, free): a read of a file that is later successfully edited or read again in full is
    truncated (a later ranged read or a failed edit does not count); an identical search repeated later is
    dropped; a failed call later retried successfully is dropped.
-2. **Claude** (optional): one tool-less `$.model.fork` of your own session is shown the remaining
-   candidates and returns `{"drop":[…],"truncate":[…]}`. It reuses the session's prompt cache and model.
-   A cold cache, an error, or a fork slower than `claudeTimeoutMs` falls back to the rules alone. A
-   subagent's own compaction uses the rules only (the fork can only fork the main session). A
-   `precompute` run is skipped outright; the real compaction that follows runs the full pipeline.
+2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
+   about each remaining call: must its **result** stay verbatim, and does the **call** itself still
+   matter? The answer is three id lists, `{"result_needed":[…],"call_matters":[…],"unsure":[…]}`:
+   result needed keeps the call whole, call matters truncates its output, `unsure` follows
+   `keepThreshold`, and a call in no list is removed. Candidates are split into chunks of
+   `forkChunkSize` (60), one fork per chunk, all concurrent; each reuses the session's prompt cache,
+   so three forks take about as long as one (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose
+   fork fails or whose reply does not parse decides nothing, and its calls are kept.
+   The forks race the short `claudeTimeoutMs` only when the rules alone already clear
+   `minReductionRatio`; otherwise they are the only way to clear it, so they may take up to 45 s.
+   A subagent's own compaction uses the rules only (the fork can only fork the main session).
+   A `precompute` run (see below) runs the full pipeline in the background.
+
+   Why lists and not Jev's per-call probabilities: on Claude Code 2.1.281 the API rejected every
+   fork asked to answer one line per call (digit scores such as `t12 93`, and letters such as
+   `t12 K`), with `invalid_request` and no output, once there were 10 or more candidates. The same
+   candidates passed at 10, 30 and 60 when the reply was JSON lists. So `keepThreshold` is not a
+   probability cut here. It only decides what `unsure` becomes.
 
 If the result saves less than `minReductionRatio`, Claude Code's built-in summary runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
@@ -74,6 +87,21 @@ debug log names the keys it looked for).
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
 | `claudeTimeoutMs` | 20000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
+| `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
+| `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
+
+### Precompute
+
+When Claude Code precomputes a compaction in the background (`trigger: 'precompute'`), the hook runs
+the full pipeline there and returns the pruned transcript, which Claude Code keeps for the compaction
+that comes (or hands to the built-in summary below `minReductionRatio`). The forks then always get the
+45 s ceiling, and nothing is toasted. Claude Code 2.1.281 arms a precompute only when **all** of these hold (read
+from its source): you are signed in with claude.ai (OAuth) against the first-party API; the
+server-side flag `tengu_sepia_moth` is on for the account; the setting `precomputeCompactionEnabled` is
+`true` (its default is `false`); auto-compact is on; and the context is within the precompute buffer
+(20% by default) below the auto-compact threshold. In `-p`/SDK sessions it is also held back while the
+session has had only one user prompt. This path is covered by harness tests only: no live run has
+armed it yet (see the commit that added this section for the probe).
 
 ## Cost
 
