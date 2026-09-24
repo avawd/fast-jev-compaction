@@ -4,7 +4,7 @@
  * to clear the matching KNOWN_BUG flag in fuzz-hook.test.ts.
  */
 import { describe, expect, it } from 'vitest';
-import { scoreWithClaude, type ForkFn, type ToolCall } from '../src/index.js';
+import { MAX_CONCURRENT_FORKS, scoreWithClaude, type ForkFn, type ForkReply, type ToolCall } from '../src/index.js';
 
 function call(id: string): ToolCall {
   return { id, tool_use_id: `u-${id}`, tool: 'Bash', input: { command: `echo ${id}` }, callIndex: 1, resultIndex: 2, resultChars: 5000, isError: false, pinned: false };
@@ -42,5 +42,30 @@ describe('fuzz regressions', () => {
       controller.abort();
     });
     expect(leaked).toEqual([]);
+  });
+
+  // Found by fuzz-integrity seeds 163 and 212 (FUZZ_SEEDS=300, after merging optimize 184a24d).
+  // Chunking caps the FIRST wave at MAX_CONCURRENT_FORKS, but a chunk whose fork and whole re-ask
+  // both failed splits into two halves (claude-scorer.ts:170, scoreChunkWithRetry's Promise.all over
+  // the halves) while the other chunks' forks are still running: 7 slow + 2 halves = 9. Worst
+  // case is 2 × the cap (every chunk splitting at once).
+  it.fails('KNOWN BUG: half retries push concurrent forks past MAX_CONCURRENT_FORKS', async () => {
+    const calls = Array.from({ length: 2 * MAX_CONCURRENT_FORKS }, (_, i) => call(`t${i + 1}`));
+    const last = `t${2 * MAX_CONCURRENT_FORKS}`;
+    let inFlight = 0;
+    let most = 0;
+    const fork: ForkFn = ({ prompt }) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      const done = () => { inFlight -= 1; };
+      // The last chunk is refused at once (first ask and whole re-ask); every other fork is slow.
+      const reply: Promise<ForkReply> = prompt.includes(`\n${last} `) && prompt.includes(`\nt${2 * MAX_CONCURRENT_FORKS - 1} `)
+        ? Promise.resolve({ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' })
+        : new Promise((resolve) => setTimeout(() => resolve({ isAnswered: false, reason: 'aborted' }), 20));
+      reply.then(done, done);
+      return reply;
+    };
+    await scoreWithClaude(fork, calls, { maxCandidates: 400, keepThreshold: 0.5, chunkSize: 2, context: { messageCount: 3 } });
+    expect(most).toBeLessThanOrEqual(MAX_CONCURRENT_FORKS);
   });
 });

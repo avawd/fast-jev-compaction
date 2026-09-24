@@ -43,6 +43,8 @@ export interface Transcript {
   cwd?: string;
   /** tool_use_ids of MCP results whose JSON holds a number literal JSON.stringify would rewrite. */
   exoticMcp: Set<string>;
+  /** Env-assignment, header and heredoc values planted in Bash commands; no fork prompt may carry one. */
+  secrets: string[];
 }
 
 const EMOJI = ['😀', '🎉', '𝔘', '🚀', '𠜎'];
@@ -81,7 +83,29 @@ function plantPair(text: string, at: number, facts: readonly string[], r: Rng): 
 
 const FILES = ['src/a.ts', 'src/b.ts', '/repo/src/a.ts', './src/b.ts', 'lib/x.log', 'README.md', '/repo/tasks/t1.output'];
 
-function bashCommand(r: Rng, i: number): string {
+/**
+ * A command carrying a credential the way sessions do: an env assignment (leading, after `cd`,
+ * mid-chain, exported, quoted), an Authorization header, or a heredoc body.
+ */
+function secretCommand(r: Rng, i: number, secrets: string[]): string {
+  const s = `sk${(0x5eed00 + i * 7919 + secrets.length).toString(16)}Q${secrets.length}x`;
+  secrets.push(s);
+  return pick(r, [
+    `API_KEY=${s} curl -s https://api.example.test/v1`,
+    `curl -s -H 'Authorization: Bearer ${s}' https://api.example.test/v1/items`,
+    `curl -H "Authorization: token ${s}" -H 'Accept: application/json' https://api.example.test/x`,
+    `curl --header "Authorization: Basic ${s}" https://api.example.test/y`,
+    `cd /repo && GITHUB_TOKEN=${s} gh api repos/o/r/pulls`,
+    `npm run build && DEPLOY_KEY="${s} extra words" ./deploy.sh`,
+    `export TOKEN=${s}; curl https://api.example.test/z`,
+    `env PASSWORD='${s}' node seed.js`,
+    `cat > .env <<EOF\nSECRET_VALUE=${s}\nEOF`,
+    `cat > .env <<'EOF'\n${s}\nEOF\nnpm test`,
+  ]);
+}
+
+function bashCommand(r: Rng, i: number, secrets: string[]): string {
+  if (chance(r, 0.12)) return secretCommand(r, i, secrets);
   const file = () => pick(r, FILES);
   const cmd = pick(r, [
     'npm test', 'npm run build', 'npm run typecheck', 'git status', 'git log --oneline -5', 'git diff',
@@ -90,8 +114,8 @@ function bashCommand(r: Rng, i: number): string {
     `cat ${file()} | head -20`, 'gh pr view 12', 'ls -la', `wc -l ${file()}`, 'git push origin x', `echo ${i}`,
     'rg -n "useState" src', 'docker ps', 'git worktree list', `cat > /tmp/x <<'EOF'\n${'h'.repeat(180)}\nEOF`,
   ]);
-  // A command long enough to be clipped at INPUT_CHARS (200), with an astral char on the cut.
-  if (chance(r, 0.05)) return `${cmd} # ${'c'.repeat(Math.max(0, 196 - cmd.length))}${pick(r, EMOJI)} tail`;
+  // A command long enough to be clipped at INPUT_CHARS (120, formerly 200), with an astral char on the cut.
+  if (chance(r, 0.05)) return `${cmd} # ${'c'.repeat(Math.max(0, pick(r, [116, 196]) - cmd.length))}${pick(r, EMOJI)} tail`;
   return cmd;
 }
 
@@ -166,9 +190,9 @@ function resultFor(r: Rng, use: ToolUse, i: number, f: string | undefined): Buil
   return { text, exotic: false };
 }
 
-function inputFor(r: Rng, tool: string, i: number): Record<string, unknown> {
+function inputFor(r: Rng, tool: string, i: number, secrets: string[]): Record<string, unknown> {
   switch (tool) {
-    case 'Bash': return chance(r, 0.3) ? { command: bashCommand(r, i), description: 'run it' } : { command: bashCommand(r, i) };
+    case 'Bash': return chance(r, 0.3) ? { command: bashCommand(r, i, secrets), description: 'run it' } : { command: bashCommand(r, i, secrets) };
     case 'Read': return chance(r, 0.3) ? { file_path: pick(r, FILES), offset: 10, limit: 20 } : { file_path: pick(r, FILES) };
     case 'Edit': return { file_path: pick(r, FILES), old_string: 'a', new_string: 'b' };
     case 'Write': return { file_path: pick(r, FILES), content: 'x'.repeat(int(r, 10, 400)) };
@@ -202,6 +226,7 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   const messages: Row[] = [row({ role: 'user', text: 'Start the task.', toolUses: [] })];
   const quotes: Quote[] = [];
   const exoticMcp = new Set<string>();
+  const secrets: string[] = [];
   const introduced: string[] = [];
   const merged = chance(r, 0.1);
   let n = 0;
@@ -209,7 +234,7 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   for (let i = 0; i < turns; i += 1) {
     const uses: ToolUse[] = (chance(r, 0.2) ? [`u${i}a`, `u${i}b`] : [`u${i}`]).map((id) => {
       const tool = pick(r, TOOLS);
-      return { tool_use_id: id, tool, input: inputFor(r, tool, i) };
+      return { tool_use_id: id, tool, input: inputFor(r, tool, i, secrets) };
     });
     if (chance(r, 0.4)) messages.push(row({ role: 'assistant', text: '', toolUses: [] })); // thinking
     const text = chance(r, 0.5) ? `Now step ${i}.` : '';
@@ -261,7 +286,7 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   if (chance(r, 0.1)) messages.push(row({ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'inflight', tool: 'Bash', input: { command: 'npm test' } }] }));
   else messages.push(row({ role: 'user', text: 'Carry on.', toolUses: [] }));
   const cwd = chance(r, 0.5) ? '/repo' : undefined;
-  return { messages, quotes, exoticMcp, ...(cwd ? { cwd } : {}) };
+  return { messages, quotes, exoticMcp, secrets, ...(cwd ? { cwd } : {}) };
 }
 
 /** Ids listed in a scorer prompt's candidate lines. */
@@ -281,10 +306,11 @@ function validReply(r: Rng, ids: readonly string[]): string {
 
 export type ForkMode =
   | 'valid' | 'legacy' | 'prose' | 'lazy' | 'cutoff' | 'garbage' | 'badTypes' | 'refusal' | 'api529'
-  | 'aborted' | 'emptyReply' | 'nothing' | 'weirdReason' | 'null' | 'syncThrow' | 'reject' | 'never' | 'late' | 'lateReject';
+  | 'refusedFrame' | 'lazyUnder' | 'partialCover' | 'aborted' | 'emptyReply' | 'nothing' | 'weirdReason' | 'null' | 'syncThrow' | 'reject' | 'never' | 'late' | 'lateReject';
 
 const SAFE_MODES: ForkMode[] = [
-  'valid', 'valid', 'valid', 'valid', 'legacy', 'prose', 'lazy', 'cutoff', 'garbage', 'badTypes', 'refusal',
+  'valid', 'valid', 'valid', 'valid', 'legacy', 'prose', 'lazy', 'lazyUnder', 'partialCover', 'cutoff', 'garbage',
+  'badTypes', 'refusal', 'refusedFrame', 'refusedFrame',
   'api529', 'aborted', 'emptyReply', 'nothing', 'weirdReason', 'null', 'syncThrow', 'reject',
 ];
 /** Modes that only settle through the timeout; offered only when one is set. */
@@ -293,6 +319,13 @@ const SLOW_MODES: ForkMode[] = ['never', 'late', 'lateReject'];
 export interface FakeFork {
   fork: ForkFn;
   prompts: string[];
+  /** Most forks started and not yet settled at any one time. */
+  maxInFlight: () => number;
+  /**
+   * Ids some well-formed reply covering at least MIN_COVERAGE put in a cutting list: the only
+   * ids a claude verdict may name. Lazy, cut-off, refused and garbage replies add none.
+   */
+  decidable: Set<string>;
 }
 
 /**
@@ -305,7 +338,15 @@ export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeF
   const prompts: string[] = [];
   const base = syncThrows ? SAFE_MODES : SAFE_MODES.filter((m) => m !== 'syncThrow');
   const modes = timed ? [...base, ...SLOW_MODES] : base;
-  const fork = ((request: { prompt: string }): Promise<ForkReply> => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const decidable = new Set<string>();
+  const accept = (json: string): string => {
+    const lists = JSON.parse(json) as Record<string, string[] | undefined>;
+    for (const key of ['call_matters', 'unsure', 'drop']) for (const id of lists[key] ?? []) decidable.add(id);
+    return json;
+  };
+  const reply = (request: { prompt: string }): Promise<ForkReply> => {
     const prompt = request.prompt;
     const attempt = (attempts.get(prompt) ?? 0) + 1;
     attempts.set(prompt, attempt);
@@ -315,13 +356,19 @@ export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeF
     const mode = pick(r, modes);
     const answered = (text: string): ForkReply => ({ isAnswered: true, text });
     switch (mode) {
-      case 'valid': return Promise.resolve(answered(validReply(r, ids)));
-      case 'legacy': return Promise.resolve({ text: validReply(r, ids) });
-      case 'prose': return Promise.resolve(answered(`Sure, here it is:\n${validReply(r, ids)}\nHope that helps {}`));
+      case 'valid': return Promise.resolve(answered(accept(validReply(r, ids))));
+      case 'legacy': return Promise.resolve({ text: accept(validReply(r, ids)) });
+      case 'prose': return Promise.resolve(answered(`Sure, here it is:\n${accept(validReply(r, ids))}\nHope that helps {}`));
       case 'lazy': return Promise.resolve(answered(JSON.stringify({ result_needed: [], call_matters: [], drop: ids.slice(0, Math.floor(ids.length * 0.5)) })));
       case 'cutoff': { const v = validReply(r, ids); return Promise.resolve(answered(v.slice(0, int(r, 0, v.length - 1)))); }
       case 'garbage': return Promise.resolve(answered("I can't help with that request."));
       case 'badTypes': return Promise.resolve(answered('{"result_needed":[1,2],"call_matters":{},"drop":"t1"}'));
+      // 2.1.281's safeguard refusal: a status-less api-error frame naming invalid_request.
+      case 'refusedFrame': return Promise.resolve({ isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' });
+      // Sorts just under MIN_COVERAGE (80%) of the chunk: must read as unparseable and be retried.
+      case 'lazyUnder': return Promise.resolve(answered(JSON.stringify({ result_needed: [], call_matters: [], unsure: [], drop: ids.slice(0, Math.max(0, Math.ceil(ids.length * 0.8) - 1)) })));
+      // Sorts at least 80% and leaves the rest out: accepted, the unlisted calls kept.
+      case 'partialCover': return Promise.resolve(answered(accept(JSON.stringify({ result_needed: [], call_matters: [], drop: ids.slice(0, Math.ceil(ids.length * 0.8)) }))));
       case 'refusal': return Promise.resolve({ isAnswered: false, reason: 'api-error', status: null });
       case 'api529': return Promise.resolve({ isAnswered: false, reason: 'api-error', status: 529 });
       case 'aborted': return Promise.resolve({ isAnswered: false, reason: 'aborted' });
@@ -332,11 +379,19 @@ export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeF
       case 'syncThrow': throw new Error('fork threw synchronously');
       case 'reject': return Promise.reject(new Error('fork rejected'));
       case 'never': return new Promise<ForkReply>(() => {});
-      case 'late': return new Promise((resolve) => setTimeout(() => resolve(answered(validReply(r, ids))), 5));
+      case 'late': return new Promise((resolve) => setTimeout(() => resolve(answered(accept(validReply(r, ids)))), 5));
       case 'lateReject': return new Promise((_, reject) => setTimeout(() => reject(new Error('late failure')), 5));
     }
+  };
+  const fork = ((request: { prompt: string }): Promise<ForkReply> => {
+    const pending = reply(request); // a synchronous throw never started a fork
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    const done = () => { inFlight -= 1; };
+    pending.then(done, done);
+    return pending;
   }) as ForkFn;
-  return { fork, prompts };
+  return { fork, prompts, maxInFlight: () => maxInFlight, decidable };
 }
 
 export function wellFormed(s: string): boolean {
