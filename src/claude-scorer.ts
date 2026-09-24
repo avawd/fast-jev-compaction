@@ -125,6 +125,35 @@ function retryable(status: ClaudeStatus): boolean {
 /** Most forks one compaction runs at once; past it, chunks grow instead. */
 export const MAX_CONCURRENT_FORKS = 8;
 
+/**
+ * `fork`, with at most `max` calls in flight; the rest wait for a slot. Sizing the chunks keeps the
+ * FIRST wave under the cap, but a chunk that splits into halves re-asks while the other chunks are
+ * still running, so only a limiter on the fork itself holds the cap. A slot is freed however the
+ * call settles, a synchronous throw included (it becomes a rejection, which runFork already reads).
+ */
+function limitForks(fork: ForkFn, max: number): ForkFn {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return (request) =>
+    new Promise<ForkReply>((resolve, reject) => {
+      const start = () => {
+        active += 1;
+        let reply: Promise<ForkReply>;
+        try {
+          reply = Promise.resolve(fork(request));
+        } catch (error) {
+          reply = Promise.reject(error);
+        }
+        reply.then(resolve, reject).finally(() => {
+          active -= 1;
+          waiting.shift()?.();
+        });
+      };
+      if (active < max) start();
+      else waiting.push(start);
+    });
+}
+
 async function scoreChunk(
   fork: ForkFn,
   calls: readonly ToolCall[],
@@ -216,9 +245,10 @@ export async function scoreWithClaude(
     expiry.catch(() => {});
     shared = { timeoutMs: options.timeout.timeoutMs, sleep: () => expiry };
   }
+  const limited = limitForks(fork, MAX_CONCURRENT_FORKS);
   const results = await Promise.all(
     chunk(candidates, Math.max(options.chunkSize, Math.ceil(candidates.length / MAX_CONCURRENT_FORKS))).map((part) =>
-      scoreChunkWithRetry(fork, part, options, shared, now, () => expired)),
+      scoreChunkWithRetry(limited, part, options, shared, now, () => expired)),
   );
   const verdicts = new Map<string, Verdict>();
   for (const result of results) for (const [id, verdict] of result.verdicts) verdicts.set(id, verdict);

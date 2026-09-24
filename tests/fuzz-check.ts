@@ -35,7 +35,7 @@ export interface CaseRun {
  * fuzz-regressions.test.ts 'KNOWN BUG: half retries push concurrent forks past MAX_CONCURRENT_FORKS'.
  * Set false once it is fixed, so the fuzz holds the real cap again.
  */
-const KNOWN_BUG_HALVES_EXCEED_CAP = true;
+const KNOWN_BUG_HALVES_EXCEED_CAP = false;
 
 const RULES: RuleName[] = ['stale_read', 'repeated_search', 'failed_then_fixed', 'mcp_write_echo', 'bash_read_superseded', 'readonly_superseded', 'agent_boilerplate', 'stale_age'];
 

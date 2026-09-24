@@ -49,7 +49,7 @@ describe('fuzz regressions', () => {
   // both failed splits into two halves (claude-scorer.ts:170, scoreChunkWithRetry's Promise.all over
   // the halves) while the other chunks' forks are still running: 7 slow + 2 halves = 9. Worst
   // case is 2 × the cap (every chunk splitting at once).
-  it.fails('KNOWN BUG: half retries push concurrent forks past MAX_CONCURRENT_FORKS', async () => {
+  it('half retries never push concurrent forks past MAX_CONCURRENT_FORKS', async () => {
     const calls = Array.from({ length: 2 * MAX_CONCURRENT_FORKS }, (_, i) => call(`t${i + 1}`));
     const last = `t${2 * MAX_CONCURRENT_FORKS}`;
     let inFlight = 0;
