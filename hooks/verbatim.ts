@@ -4,6 +4,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
+import { gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
@@ -20,6 +21,14 @@ export type HookConfig = {
    * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS].
    */
   claudeTimeoutMs: number;
+  /** Tail kept, beside the head, when truncating a test/build/deploy-like result. */
+  truncateTailChars: number;
+  /** Read and Bash file-read results older than this many messages are truncated. */
+  staleAfterMessages: number;
+  /** Never drop a result whose introduced tokens are quoted later. */
+  pinReferenced: boolean;
+  /** Strip JSON furniture from MCP results. */
+  stripMcpFurniture: boolean;
   /** Maps the fork's `unsure` list: < 0.5 keep, up to 0.75 truncate, above drop. Clamped to [0, 1]. */
   keepThreshold: number;
   /** Most calls per fork; more candidates run as concurrent forks. Whole number in [1, 400]. */
@@ -53,6 +62,10 @@ const DEFAULTS: HookConfig = {
   maxCandidates: 400,
   useClaudeScorer: true,
   claudeTimeoutMs: 20_000,
+  truncateTailChars: 1000,
+  staleAfterMessages: 60,
+  pinReferenced: true,
+  stripMcpFurniture: true,
   keepThreshold: 0.5,
   forkChunkSize: 60,
 };
@@ -64,6 +77,11 @@ function num(options: PluginOptions, key: keyof HookConfig, fallback: number): n
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function bool(options: PluginOptions, key: keyof HookConfig, fallback: boolean): boolean {
+  const value = options[key];
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 export function resolveHookConfig(options: PluginOptions): HookConfig {
@@ -80,6 +98,10 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       MIN_CLAUDE_TIMEOUT_MS,
       MAX_CLAUDE_TIMEOUT_MS,
     ),
+    truncateTailChars: num(options, 'truncateTailChars', DEFAULTS.truncateTailChars),
+    staleAfterMessages: num(options, 'staleAfterMessages', DEFAULTS.staleAfterMessages),
+    pinReferenced: bool(options, 'pinReferenced', DEFAULTS.pinReferenced),
+    stripMcpFurniture: bool(options, 'stripMcpFurniture', DEFAULTS.stripMcpFurniture),
     keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
   };
@@ -157,7 +179,7 @@ function claudeStage(stats: CompactResult['stats']): string {
 
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(reductionRatio(result) * 100)}% reduction; rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
+  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
 }
 
@@ -265,7 +287,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const { result, messages } = await compactSession(event.messages, config, fork, sleep, background);
       const forks = describeForks(result);
       if (forks) debug($, forks);
-      if (reductionRatio(result) < config.minReductionRatio) {
+      if (gateRatio(result) < config.minReductionRatio) {
         notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
         return next(event);
       }

@@ -56,6 +56,7 @@ export interface OfflineReport {
   generatedAt: string;
   src: string;
   head: string;
+  gateMeasure?: string;
   options: Record<string, unknown>;
   minReduction: number;
   segments: SegmentReport[];
@@ -282,6 +283,7 @@ async function main(): Promise<void> {
     generatedAt: new Date().toISOString(),
     src: api.srcDir,
     head: api.head,
+    gateMeasure: api.gateMeasure,
     options,
     minReduction,
     segments: [],

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, stripCdPrefix, type ToolCall,
+  buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
 } from '../src/index.js';
 
 function c(id: string, tool: string, input: Record<string, unknown>, extra: Partial<ToolCall> = {}): ToolCall {
@@ -10,14 +10,16 @@ function c(id: string, tool: string, input: Record<string, unknown>, extra: Part
   };
 }
 
-describe('stripCdPrefix', () => {
-  it('drops a leading cd … && or cd …; and nothing else', () => {
-    expect(stripCdPrefix('cd /srv/repo && npm test')).toBe('npm test');
-    expect(stripCdPrefix('cd "/a b/c"; git status')).toBe('git status');
-    expect(stripCdPrefix('cd /a && cd b && ls')).toBe('ls');
-    expect(stripCdPrefix('npm test && cd /a')).toBe('npm test && cd /a');
-    expect(stripCdPrefix('cd /only')).toBe('cd /only');
-    expect(stripCdPrefix('cdx && ls')).toBe('cdx && ls');
+describe('candidate command text', () => {
+  const line = (command: string) => jevCandidateLine(c('t1', 'Bash', { command }), { messageCount: 5 });
+  it('drops leading cd hops, env assignments and echo banners (rules-bash stripCommandPrefix)', () => {
+    expect(line('cd /srv/repo && npm test')).toContain(' msg 16/5 npm test → ');
+    expect(line('cd "/a b/c"; git status')).toContain(' msg 16/5 git status → ');
+    expect(line('cd /a && FOO=1 npm run build')).toContain(' msg 16/5 npm run build → ');
+  });
+  it('keeps a command that is only a prefix, and a cd later in the command', () => {
+    expect(line('cd /only')).toContain(' msg 16/5 cd /only → ');
+    expect(line('npm test && cd /a')).toContain(' msg 16/5 npm test && cd /a → ');
   });
 });
 
@@ -45,13 +47,13 @@ describe('jevCandidateLine', () => {
     expect(input.endsWith('…')).toBe(true);
   });
 
-  it('flags errors, and shows ref-later when the stub map knows the call', () => {
-    const line = jevCandidateLine(c('t3', 'Grep', { pattern: 'foo' }, { isError: true, resultChars: 20 }), {
-      messageCount: 10, refLater: new Map([['t3', 2]]),
-    });
+  it('flags errors, and shows ref-later from the referenced-later count', () => {
+    const line = jevCandidateLine(
+      c('t3', 'Grep', { pattern: 'foo' }, { isError: true, resultChars: 20, refLater: 2 }), { messageCount: 10 },
+    );
     expect(line).toContain('→ error 20ch');
     expect(line).toContain('ref-later:2');
-    expect(jevCandidateLine(c('t4', 'Grep', { pattern: 'foo' }), { messageCount: 10, refLater: new Map() }))
+    expect(jevCandidateLine(c('t4', 'Grep', { pattern: 'foo' }, { refLater: 0 }), { messageCount: 10 }))
       .not.toContain('ref-later');
   });
 

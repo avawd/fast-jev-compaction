@@ -17,7 +17,7 @@
   - **Everything else**: rules, then Jev-style `$.model.fork` calls over the calls the rules leave
     undecided (and not cited as a rule's evidence), one per `forkChunkSize` chunk, run concurrently
     against one shared `$.clock.sleep` deadline: `claudeTimeoutMs` when the rules alone already
-    clear `minReductionRatio`, else the 45 s ceiling. Below `minReductionRatio`, or on any
+    clear `minReductionRatio`, else the 45 s ceiling. Below `minReductionRatio` (characters saved over tool-result characters, `gateRatio`), or on any
     unexpected error, the result goes to `next(event)` instead of replacing the transcript. A debug
     log line records the wait mode and each fork's size, time and status.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and

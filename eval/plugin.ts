@@ -59,6 +59,8 @@ export interface PluginApi {
   makeScorer: (options: Record<string, unknown>) => PluginScorer;
   collectToolCalls: (messages: readonly EvalMessage[], preserveRecentMessages: number) => PluginCall[];
   reductionRatio: (result: PluginResult) => number;
+  /** Which export `reductionRatio` resolved to, so a report says what the gate column measured. */
+  gateMeasure: 'gateRatio' | 'reductionRatio';
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -95,7 +97,10 @@ export async function loadPlugin(srcArg?: string): Promise<PluginApi> {
     compact: mod['compact'] as PluginApi['compact'],
     makeScorer: mod['makeScorer'] as PluginApi['makeScorer'],
     collectToolCalls: mod['collectToolCalls'] as PluginApi['collectToolCalls'],
-    reductionRatio: mod['reductionRatio'] as PluginApi['reductionRatio'],
+    // The hook gates on `gateRatio` (tool-result bytes) where the branch has it; older branches only have
+    // `reductionRatio` (whole transcript). Use whichever the hook would, so the gate column matches it.
+    reductionRatio: (typeof mod['gateRatio'] === 'function' ? mod['gateRatio'] : mod['reductionRatio']) as PluginApi['reductionRatio'],
+    gateMeasure: typeof mod['gateRatio'] === 'function' ? 'gateRatio' : 'reductionRatio',
   };
 }
 

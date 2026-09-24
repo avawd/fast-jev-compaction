@@ -39,10 +39,28 @@ export interface ToolCall {
   isError: boolean;
   /** In the first or the newest preserved messages; never a target. */
   pinned: boolean;
+  /** The result text; attached by `annotateCalls` for the rules that read it. */
+  resultText?: string;
+  /** Messages after the one holding the result. */
+  age?: number;
+  /** Older than `staleAfterMessages`. */
+  stale?: boolean;
+  /** Distinct tokens this result carries that later assistant text or tool input quotes (see pin.ts). */
+  refTokens?: string[];
+  /** `refTokens.length`; shown to the scorer as `ref-later:n`. */
+  refLater?: number;
 }
 
 export type CallAction = 'keep' | 'drop_result' | 'drop_call';
-export type RuleName = 'stale_read' | 'repeated_search' | 'failed_then_fixed';
+export type RuleName =
+  | 'stale_read'
+  | 'repeated_search'
+  | 'failed_then_fixed'
+  | 'mcp_write_echo'
+  | 'bash_read_superseded'
+  | 'readonly_superseded'
+  | 'agent_boilerplate'
+  | 'stale_age';
 
 /** A non-keep decision about one call, and who made it. */
 export interface Verdict {
@@ -55,6 +73,8 @@ export interface Verdict {
    * losing, so it must never itself be offered for dropping.
    */
   evidence?: string;
+  /** Further evidence when one later call was not enough (a multi-file read, a multi-step chain). */
+  moreEvidence?: string[];
 }
 
 /**
@@ -117,11 +137,23 @@ export interface CompactOptions {
   preserveRecentMessages?: number;
   /** Characters of a truncated tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /** Extra characters kept from the end of a log-like result (test/build/deploy...). Default 1000. */
+  truncateTailChars?: number;
+  /** Read and Bash file-read results older than this many messages are truncated. Default 60. */
+  staleAfterMessages?: number;
+  /** Never drop a result whose introduced tokens are quoted later. Default true. */
+  pinReferenced?: boolean;
+  /** Strip JSON furniture (self links, avatars, feature flags...) from MCP results. Default true. */
+  stripMcpFurniture?: boolean;
 }
 
 export interface ResolvedCompactOptions {
   preserveRecentMessages: number;
   truncateHeadChars: number;
+  truncateTailChars: number;
+  staleAfterMessages: number;
+  pinReferenced: boolean;
+  stripMcpFurniture: boolean;
 }
 
 export interface CompactResult {
@@ -133,6 +165,8 @@ export interface CompactResult {
     messagesAfter: number;
     charsBefore: number;
     charsAfter: number;
+    /** Tool-result characters before compaction; the denominator of `gateRatio`. */
+    resultCharsBefore: number;
     calls: number;
     kept: number;
     resultsDropped: number;

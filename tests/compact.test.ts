@@ -157,15 +157,20 @@ describe('surrogate pairs', () => {
 });
 
 describe('resolveOptions', () => {
+  const rest = { truncateTailChars: 1000, staleAfterMessages: 60, pinReferenced: true, stripMcpFurniture: true };
   it('uses defaults for missing, NaN and infinite values', () => {
-    expect(resolveOptions()).toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300 });
+    expect(resolveOptions()).toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300, ...rest });
     expect(resolveOptions({ preserveRecentMessages: Number.NaN, truncateHeadChars: Number.POSITIVE_INFINITY }))
-      .toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300 });
+      .toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300, ...rest });
   });
   it('clamps negatives to zero and floors fractions', () => {
-    expect(resolveOptions({ preserveRecentMessages: -3, truncateHeadChars: -1 }))
-      .toEqual({ preserveRecentMessages: 0, truncateHeadChars: 0 });
-    expect(resolveOptions({ preserveRecentMessages: 2.9, truncateHeadChars: 10.5 }))
-      .toEqual({ preserveRecentMessages: 2, truncateHeadChars: 10 });
+    expect(resolveOptions({ preserveRecentMessages: -3, truncateHeadChars: -1, truncateTailChars: -5, staleAfterMessages: -1 }))
+      .toEqual({ ...rest, preserveRecentMessages: 0, truncateHeadChars: 0, truncateTailChars: 0, staleAfterMessages: 0 });
+    expect(resolveOptions({ preserveRecentMessages: 2.9, truncateHeadChars: 10.5, truncateTailChars: 7.7, staleAfterMessages: 9.9 }))
+      .toEqual({ ...rest, preserveRecentMessages: 2, truncateHeadChars: 10, truncateTailChars: 7, staleAfterMessages: 9 });
+  });
+  it('takes boolean switches only when they are booleans', () => {
+    expect(resolveOptions({ pinReferenced: false, stripMcpFurniture: false })).toMatchObject({ pinReferenced: false, stripMcpFurniture: false });
+    expect(resolveOptions({ pinReferenced: 'no' as never })).toMatchObject({ pinReferenced: true });
   });
 });

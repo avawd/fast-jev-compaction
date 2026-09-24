@@ -8,7 +8,33 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
 
 1. **Rules** (local, free): a read of a file that is later successfully edited or read again in full is
    truncated (a later ranged read or a failed edit does not count); an identical search repeated later is
-   dropped; a failed call later retried successfully is dropped.
+   dropped; a failed call later retried successfully is dropped. Then, for calls those leave undecided:
+   - an MCP write's echo (`create…`, `edit…`, `update…`, `transition…`, `add…`, `comment…`, over 500
+     chars) is truncated: the call records the write, the echo is the server repeating it;
+   - a Bash command that only reads files (`cat`, `sed -n`, `head`, `tail`, `grep`, `nl`, `wc`…) is
+     truncated once every file it read is later Read, edited, written or read again;
+   - a read-only Bash command (`git status/log/diff/show/branch`, `gh api`, `gh pr view`, `gh run list`,
+     `docker ps/logs`, `ls`…) is truncated once every step of it has been run again later;
+   - agent-launch boilerplate ("Async agent launched successfully") is truncated;
+   - a Read, or a Bash command that only reads, lists or searches files, is truncated once it is older
+     than `staleAfterMessages` messages.
+
+   Commands are parsed with quotes honoured; one with `$(…)`, backticks, a heredoc or a redirection to a
+   file is never treated as read-only. Failed calls and `<persisted-output>` wrappers are never targets.
+
+   **Shapes.** A truncated result keeps `truncateHeadChars` from its start, plus `truncateTailChars` from
+   its end when it is a test/build/deploy/lint/install/push run or ends with a verdict line (`57 passed`,
+   `exit code 1`…), so the verdict survives. MCP results over 500 chars that are kept lose their JSON
+   furniture (`self` links, `avatarUrls`, `iconUrl`, `expand`, `featureFlags`, null `customfield_*`, the
+   server's `context` envelope); every other value is kept exactly, and a payload JSON cannot round-trip
+   exactly (integers past 2^53) is left alone.
+
+   **Referenced-later pin.** A result that introduced a distinctive token (a sha, `#123`, `ABC-123`, a
+   path, a URL, a dollar amount, a long number or identifier) which later assistant text or a later tool
+   input quotes (edits excluded) is never dropped, whichever stage decided it: it is truncated only to a
+   head or head+tail window that still holds the token's first occurrence, or kept verbatim. Only text
+   that is never pruned (user and assistant text, pinned results) counts as already having the token;
+   an edit's input does not, because the edit itself can be dropped.
 2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
    about each remaining call: must its **result** stay verbatim, and does the **call** itself still
    matter? The answer is three id lists, `{"result_needed":[…],"call_matters":[…],"unsure":[…]}`:
@@ -28,7 +54,9 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    candidates passed at 10, 30 and 60 when the reply was JSON lists. So `keepThreshold` is not a
    probability cut here. It only decides what `unsure` becomes.
 
-If the result saves less than `minReductionRatio`, Claude Code's built-in summary runs instead. So does
+If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
+thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
+runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
 `/compact` prunes.
 
@@ -81,9 +109,13 @@ debug log names the keys it looked for).
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested |
-| `minReductionRatio` | 0.25 | Below this, fall back to the built-in summary |
+| `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
 | `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
+| `truncateTailChars` | 1000 | Characters also kept from the end of a log-like result, or to hold a pinned token |
+| `staleAfterMessages` | 60 | Read and Bash file-read results older than this many messages are truncated |
+| `pinReferenced` | true | Never drop a result whose introduced tokens are quoted later |
+| `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
 | `claudeTimeoutMs` | 20000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |

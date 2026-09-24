@@ -1,5 +1,9 @@
+import { annotateCalls } from './annotate.js';
 import { collectToolCalls } from './calls.js';
-import { sliceWhole } from './text.js';
+import { resultChars } from './gate.js';
+import { stripFurnitureInMessages } from './rules-mcp.js';
+import { planShapes } from './shape.js';
+import { sliceWhole, sliceWholeEnd } from './text.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -14,12 +18,20 @@ import type {
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   preserveRecentMessages: 6,
   truncateHeadChars: 300,
+  truncateTailChars: 1000,
+  staleAfterMessages: 60,
+  pinReferenced: true,
+  stripMcpFurniture: true,
 };
 
 export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function flag(value: boolean | undefined, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOptions {
@@ -32,21 +44,33 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
+    truncateTailChars: Math.max(
+      0,
+      Math.floor(finite(options.truncateTailChars, DEFAULT_OPTIONS.truncateTailChars)),
+    ),
+    staleAfterMessages: Math.max(
+      0,
+      Math.floor(finite(options.staleAfterMessages, DEFAULT_OPTIONS.staleAfterMessages)),
+    ),
+    pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
+    stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
   };
 }
 
 /** A result this short is left whole: the note would cost about as much as it saves. */
-function shrinks(resultChars: number, headChars: number): boolean {
-  return resultChars > headChars + 120;
+function shrinks(resultChars: number, headChars: number, tailChars = 0): boolean {
+  return resultChars > headChars + tailChars + 120;
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (!shrinks(text.length, headChars)) return text;
+function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
+  if (!shrinks(text.length, headChars, tailChars)) return text;
   const kept = sliceWhole(text, headChars);
+  const end = sliceWholeEnd(text, tailChars);
   const head = kept.length > 0 ? `${kept}\n` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length} chars of this tool result${
+  const tail = end.length > 0 ? `\n${end}` : '';
+  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length - end.length} chars of this tool result${
     isError ? ' (error)' : ''
-  }; re-run the tool if needed]`;
+  }; re-run the tool if needed]${tail}`;
 }
 
 /**
@@ -60,6 +84,8 @@ export function applyDecisions(
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
   headChars: number,
+  /** Tail characters to keep as well, by `tool_use_id` (see `planShapes`). */
+  tails: ReadonlyMap<string, number> = new Map(),
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
@@ -88,7 +114,7 @@ export function applyDecisions(
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
         const head = heads.get(result.tool_use_id) ?? headChars;
-        const text = truncatedResultText(result.text, result.isError ?? false, head);
+        const text = truncatedResultText(result.text, result.isError ?? false, head, tails.get(result.tool_use_id));
         return text === result.text
           ? result
           : {
@@ -135,9 +161,9 @@ function preferTruncation(decision: CallDecision, call: ToolCall, messages: read
 }
 
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
-function unlessNoop(decision: CallDecision, call: ToolCall, headChars: number): CallDecision {
+function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
   if (decision.action !== 'drop_result') return decision;
-  return shrinks(call.resultChars, decision.headChars ?? headChars) ? decision : { ...decision, action: 'keep' };
+  return shrinks(text.length, decision.headChars ?? headChars, tailChars) ? decision : { ...decision, action: 'keep' };
 }
 
 /** Characters of text, tool input and tool output a message holds. */
@@ -171,13 +197,14 @@ export async function compact(
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
+  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages), messages, resolved);
   const charsBefore = messages.reduce((sum, m) => sum + messageChars(m), 0);
+  const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
   const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
     ? await scorer(calls)
     : { verdicts: new Map(), claude: 'skipped' };
 
-  const decisions: CallDecision[] = calls.map((call) => {
+  const scored: CallDecision[] = calls.map((call) => {
     if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
     const verdict = outcome.verdicts.get(call.id);
     if (!verdict) return { id: call.id, tool: call.tool, action: 'keep', source: 'default' };
@@ -188,14 +215,22 @@ export async function compact(
       source: verdict.source,
     };
     if (verdict.rule) decision.rule = verdict.rule;
-    return unlessNoop(preferTruncation(decision, call, messages), call, resolved.truncateHeadChars);
+    return preferTruncation(decision, call, messages);
   });
-  const kept = applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
+  const texts = new Map(source.flatMap((m) => (m.toolResults ?? []).map((r) => [r.tool_use_id, r.text] as const)));
+  const shaped = planShapes(scored, calls, resolved, texts);
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  const decisions = shaped.decisions.map((decision) => {
+    const call = byId.get(decision.id)!;
+    return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
+  });
+  const kept = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
   const stats: CompactResult['stats'] = {
     messagesBefore: messages.length,
     messagesAfter: kept.length,
     charsBefore,
+    resultCharsBefore: resultChars(messages),
     charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
     calls: calls.length,
     kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),

@@ -1,3 +1,4 @@
+import { applyExtraRules } from './rules-extra.js';
 import type { ToolCall, Verdict } from './types.js';
 
 const READ_TOOLS = new Set(['Read']);
@@ -116,5 +117,5 @@ export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
     if (key && SEARCH_TOOLS.has(call.tool)) searchesLater.set(key, call.id);
     if (path && supersedesReads(call)) pathsTouchedLater.set(path, call.id);
   }
-  return verdicts;
+  return applyExtraRules(calls, verdicts);
 }

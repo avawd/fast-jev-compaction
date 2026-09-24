@@ -1,3 +1,4 @@
+import { stripCommandPrefix } from './rules-bash.js';
 import { sliceWhole } from './text.js';
 import type { ToolCall } from './types.js';
 
@@ -27,12 +28,6 @@ export const DEFAULT_CHUNK_SIZE = 60;
 export interface JevContext {
   /** Messages in the transcript, for the `msg i/N` position. */
   messageCount: number;
-  /**
-   * How often values a call's result introduced are referenced later, keyed by
-   * `ToolCall.id`. Filled from the referenced-later pin (pin.ts) once it lands;
-   * absent or missing an id, the field is left off the line.
-   */
-  refLater?: ReadonlyMap<string, number>;
 }
 
 /** The fork's answer: which calls fall in each list. A call in none of them is dropped. */
@@ -47,17 +42,6 @@ export type JevAction = 'keep' | 'drop_result' | 'drop_call';
 /** Cuts to at most `limit` chars with a trailing `…`, never splitting a surrogate pair. */
 function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
-}
-
-const CD_PREFIX = /^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*/;
-
-/** A Bash command without its leading `cd <dir> &&` / `cd <dir>;` hops, which carry no meaning for the scorer. */
-export function stripCdPrefix(command: string): string {
-  let rest = command;
-  for (let match = CD_PREFIX.exec(rest); match; match = CD_PREFIX.exec(rest)) {
-    rest = rest.slice(match[0].length);
-  }
-  return rest.length > 0 ? rest : command;
 }
 
 function valueText(value: unknown): string {
@@ -81,7 +65,8 @@ function inputText(call: ToolCall): string {
   if (call.tool === 'Bash' && typeof call.input['command'] === 'string') {
     const others = entries.filter(([k]) => k !== 'command' && k !== 'description');
     const rest = others.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
-    const command = stripCdPrefix(call.input['command']);
+    // Leading `cd DIR &&`, `VAR=value` and `echo "..."` banners carry nothing for the scorer.
+    const command = stripCommandPrefix(call.input['command']) || call.input['command'];
     return rest ? `${command} ${rest}` : command;
   }
   return entries.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
@@ -98,8 +83,7 @@ export function jevCandidateLine(call: ToolCall, ctx: JevContext): string {
     clip(oneLine(inputText(call)), INPUT_CHARS),
     `→ ${call.isError ? 'error' : 'ok'} ${call.resultChars}ch`,
   ];
-  const refs = ctx.refLater?.get(call.id);
-  if (typeof refs === 'number' && refs > 0) parts.push(`ref-later:${refs}`);
+  if (typeof call.refLater === 'number' && call.refLater > 0) parts.push(`ref-later:${call.refLater}`);
   let line = parts.join(' ');
   const head = call.resultHead === undefined ? '' : oneLine(call.resultHead);
   if (head.length > 0) line += ` | ${clip(head, PREVIEW_CHARS)}`;

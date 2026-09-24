@@ -1,5 +1,6 @@
 import { scoreWithClaude, type ForkFn, type ForkTimeout, type SleepFn } from './claude-scorer.js';
 import { applyDecisions, messageChars } from './compact.js';
+import { resultChars } from './gate.js';
 import { DEFAULT_CHUNK_SIZE } from './jev-scorer.js';
 import { applyRules } from './rules.js';
 import type { CallDecision, Message, Scorer, ToolCall, Verdict } from './types.js';
@@ -17,8 +18,6 @@ export interface ScorerOptions {
   chunkSize?: number;
   /** Messages in the transcript, for each candidate's `msg i/N`. */
   messageCount?: number;
-  /** Later references per call id (the referenced-later pin); shown to the forks as `ref-later:n`. */
-  refLater?: ReadonlyMap<string, number>;
   /** How long the forks may take when the rules alone already clear the gate. Needs `sleep`. */
   claudeTimeoutMs?: number;
   /** How long the forks may take when they are needed to clear the gate. Default `claudeTimeoutMs`. */
@@ -35,12 +34,11 @@ function forkTimeout(ms: number | undefined, sleep: SleepFn | undefined): ForkTi
 }
 
 /**
- * The gate as compaction will apply it, projected for a set of verdicts: the
- * character reduction they would give over `messages`, against `minRatio`.
- * Measures what the hook's gate measures (compact.ts's `reductionRatio` over
- * `messageChars`); if that denominator changes, change this with it. It skips
- * compact()'s drop_call→drop_result(0) and no-op rewrites, which move the
- * total by a few characters at most.
+ * The gate as the hook applies it (gate.ts `gateRatio`: characters saved over the tool-result
+ * characters before), projected for a set of verdicts. It skips what compact() does after scoring
+ * (drop_call→drop_result(0), head+tail shapes, the referenced-later pin, MCP furniture stripping),
+ * so it is an estimate: the pin can only lower the real saving, shapes and stripping move it by a
+ * tail's worth per call. If gateRatio's measure changes, change this with it.
  */
 export function rulesGate(messages: readonly Message[], headChars: number, minRatio: number): GateFn {
   return (calls, verdicts) => {
@@ -51,10 +49,11 @@ export function rulesGate(messages: readonly Message[], headChars: number, minRa
         decisions.push({ id: call.id, tool: call.tool, action: verdict.action, source: verdict.source });
       }
     }
+    const denominator = resultChars(messages);
+    if (denominator === 0 || decisions.length === 0) return false;
     const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
-    if (before === 0 || decisions.length === 0) return false;
     const after = applyDecisions(messages, decisions, calls, headChars).reduce((sum, m) => sum + messageChars(m), 0);
-    return (before - after) / before >= minRatio;
+    return Math.min(1, (before - after) / denominator) >= minRatio;
   };
 }
 
@@ -70,7 +69,7 @@ export function rulesGate(messages: readonly Message[], headChars: number, minRa
 export function makeScorer(options: ScorerOptions): Scorer {
   return async (calls) => {
     const verdicts = applyRules(calls);
-    const evidence = new Set([...verdicts.values()].flatMap((v) => (v.evidence ? [v.evidence] : [])));
+    const evidence = new Set([...verdicts.values()].flatMap((v) => [...(v.evidence ? [v.evidence] : []), ...(v.moreEvidence ?? [])]));
     const undecided = calls.filter((call) => !call.pinned && !verdicts.has(call.id) && !evidence.has(call.id));
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };
@@ -82,7 +81,7 @@ export function makeScorer(options: ScorerOptions): Scorer {
       maxCandidates: options.maxCandidates,
       keepThreshold: options.keepThreshold ?? 0.5,
       chunkSize: options.chunkSize ?? DEFAULT_CHUNK_SIZE,
-      context: { messageCount: options.messageCount ?? 0, ...(options.refLater ? { refLater: options.refLater } : {}) },
+      context: { messageCount: options.messageCount ?? 0 },
       timeout: forkTimeout(ms, options.sleep),
     });
     const claudeMs = Date.now() - started;
