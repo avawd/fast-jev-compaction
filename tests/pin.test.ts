@@ -126,6 +126,11 @@ describe('analyzeReferences: droppable content', () => {
     expect(distinctiveTokens('see lib/a.ts and src/x/y/z')).toEqual(expect.arrayContaining(['lib/a.ts', 'src/x/y/z']));
   });
 
+  it('ends a URL at markdown code or emphasis marks', () => {
+    expect(distinctiveTokens('* `https://x.example.net/auth/a.readonly`\\n')).toContain('https://x.example.net/auth/a.readonly');
+    expect(distinctiveTokens('**https://x.example.net/a/b**')).toContain('https://x.example.net/a/b');
+  });
+
   it('finds dollar amounts', () => {
     expect(distinctiveTokens('saves $540 a year, $1,234.50 total')).toEqual(expect.arrayContaining(['$540', '$1,234.50']));
   });

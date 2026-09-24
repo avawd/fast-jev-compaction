@@ -11,7 +11,7 @@ import type { Message, ToolCall } from './types.js';
 /** Truncation leaves text this close to head + tail alone; mirrors compact.ts. */
 const TRUNCATION_SLACK = 120;
 
-const URL_PATTERN = /https?:\/\/[^\s"'<>)\]}\\]+/g;
+const URL_PATTERN = /https?:\/\/[^\s"'<>)\]}\\`]+/g;
 // The lookbehind starts a match only at a run's first character; without it a long
 // slash-free run is rescanned from every position (quadratic). A `/` may start one
 // after another `/`, so `file:///a/b` yields `/a/b`.
@@ -45,7 +45,7 @@ function matches(text: string, pattern: RegExp): string[] {
   pattern.lastIndex = 0;
   for (const match of text.matchAll(pattern)) {
     if (out.length >= MAX_MATCHES_PER_PATTERN) break;
-    const token = match[0].replace(/[.,:;]+$/, '');
+    const token = match[0].replace(/[.,:;*_~]+$/, '');
     if (token.length >= MIN_TOKEN && !YEAR.test(token)) out.push(token);
   }
   return out;
