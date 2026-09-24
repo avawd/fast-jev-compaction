@@ -1,0 +1,290 @@
+/**
+ * One fuzz case end to end: options and scorer drawn from the seed, the real pipeline
+ * (compact + makeScorer, or a raw random scorer), the engine-facing conversion
+ * (toSessionMessages), and every transcript-integrity invariant checked against the input.
+ * Returns the violations as strings; an empty list is a pass.
+ */
+import { toSessionMessages } from '../hooks/verbatim.ts';
+import {
+  annotateCalls, applyRules, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
+} from '../src/index.js';
+import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
+
+type SessionRow = Row & { toolResults?: Array<{ tool_use_id: string; text: string; isError?: boolean }> };
+
+export interface CaseSetup {
+  options: CompactOptions;
+  /** 'claude' drives makeScorer with a fake fork; 'raw' a scorer returning random verdicts. */
+  scorerKind: 'claude' | 'raw';
+  timed: boolean;
+}
+
+export interface CaseRun {
+  result: CompactResult;
+  session: SessionRow[];
+  prompts: string[];
+  setup: CaseSetup;
+}
+
+const RULES: RuleName[] = ['stale_read', 'repeated_search', 'failed_then_fixed', 'mcp_write_echo', 'bash_read_superseded', 'readonly_superseded', 'agent_boilerplate', 'stale_age'];
+
+/** Random verdicts straight into compact(): pinned and unknown ids included, which it must ignore. */
+function rawScorer(seed: number): Scorer {
+  return async (calls) => {
+    const r = rng(seed ^ 0x5bd1e995);
+    const verdicts = new Map<string, Verdict>();
+    for (const c of calls) {
+      if (!chance(r, 0.7)) continue;
+      const verdict: Verdict = { action: chance(r, 0.5) ? 'drop_call' : 'drop_result', source: chance(r, 0.5) ? 'claude' : 'rule' };
+      if (verdict.source === 'rule') verdict.rule = pick(r, RULES);
+      verdicts.set(c.id, verdict);
+    }
+    verdicts.set('t999999', { action: 'drop_call', source: 'claude' });
+    return { verdicts, claude: 'ran' };
+  };
+}
+
+function setupFor(seed: number, transcript: Transcript): CaseSetup {
+  const r = rng(Math.imul(seed, 7) + 1);
+  const options: CompactOptions = {
+    preserveRecentMessages: int(r, 0, 8),
+    truncateHeadChars: pick(r, [0, 100, 300]),
+    truncateTailChars: pick(r, [0, 200, 1000]),
+    staleAfterMessages: pick(r, [5, 20, 60, 100]),
+    pinReferenced: chance(r, 0.9),
+    stripMcpFurniture: chance(r, 0.85),
+  };
+  if (transcript.cwd) options.cwd = transcript.cwd;
+  return { options, scorerKind: chance(r, 0.7) ? 'claude' : 'raw', timed: chance(r, 0.75) };
+}
+
+/** Runs one case. `transcript` overrides the generated one (for minimising a failing seed). */
+export async function runCase(seed: number, transcript: Transcript = genTranscript(seed)): Promise<CaseRun> {
+  const setup = setupFor(seed, transcript);
+  const r = rng(Math.imul(seed, 13) + 5);
+  const input = transcript.messages;
+  let scorer: Scorer;
+  let prompts: string[] = [];
+  if (setup.scorerKind === 'raw') scorer = rawScorer(seed);
+  else {
+    const fake = fakeFork(seed, setup.timed);
+    prompts = fake.prompts;
+    const instant = chance(r, 0.15);
+    const scorerOptions: ScorerOptions = {
+      fork: fake.fork,
+      useClaudeScorer: chance(r, 0.95),
+      maxCandidates: pick(r, [3, 400]),
+      chunkSize: pick(r, [1, 2, 5, 60]),
+      keepThreshold: pick(r, [0.3, 0.5, 0.9]),
+      messageCount: input.length,
+    };
+    if (setup.timed) {
+      // The deadline lands after every microtask-settled fork and before any `late` one.
+      scorerOptions.sleep = instant ? () => Promise.resolve() : () => new Promise<void>((resolve) => setImmediate(resolve));
+      scorerOptions.claudeTimeoutMs = 1000;
+      scorerOptions.claudeAwaitMs = 2000;
+    }
+    if (chance(r, 0.5)) scorerOptions.rulesClearGate = rulesGate(input, setup.options.truncateHeadChars ?? 300, 0.25);
+    scorer = makeScorer(scorerOptions);
+  }
+  const result = await compact(input, scorer, setup.options);
+  const session = toSessionMessages(input as never, result.messages) as unknown as SessionRow[];
+  return { result, session, prompts, setup };
+}
+
+/** Furniture removal as README describes it, written independently of rules-mcp.ts. */
+function referenceStrip(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(referenceStrip);
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (['avatarUrls', 'expand', 'featureFlags', 'iconUrl'].includes(k)) continue;
+    if (k === 'self' && typeof v === 'string' && /^https?:\/\//.test(v)) continue;
+    if (v === null && /^customfield_\d+$/.test(k)) continue;
+    out[k] = referenceStrip(v);
+  }
+  return out;
+}
+
+function referenceStripTop(value: unknown): unknown {
+  const stripped = referenceStrip(value);
+  if (stripped && typeof stripped === 'object' && !Array.isArray(stripped)) {
+    const ctx = (stripped as Record<string, unknown>)['context'];
+    if (ctx && typeof ctx === 'object' && ['invocationId', 'toolName', 'mcpClientName', 'cloudId'].some((k) => k in ctx)) {
+      const { context: _drop, ...rest } = stripped as Record<string, unknown>;
+      return rest;
+    }
+  }
+  return stripped;
+}
+
+const isEmpty = (m: Message) => m.text.trim().length === 0 && m.toolUses.length === 0 && (m.toolResults ?? []).length === 0;
+
+function rowText(m: Message): string {
+  const parts = [m.text];
+  for (const u of m.toolUses) parts.push(JSON.stringify(u.input));
+  for (const res of m.toolResults ?? []) parts.push(res.text);
+  return parts.join('\n');
+}
+
+/** Splits a truncated result into its kept head and tail around the note. */
+function splitTruncated(text: string): { head: string; tail: string; omitted: number } | undefined {
+  const at = text.indexOf(TRUNCATION_NOTE_PREFIX);
+  if (at < 0) return undefined;
+  const close = text.indexOf(']', at);
+  const omitted = Number(/truncated (\d+) chars/.exec(text.slice(at, close))?.[1]);
+  const head = at === 0 ? '' : text.slice(0, at - 1);
+  const tail = close + 1 < text.length ? text.slice(close + 2) : '';
+  return { head, tail, omitted };
+}
+
+/** Every invariant of one run. */
+export function checkCase(transcript: Transcript, run: CaseRun): string[] {
+  const failures: string[] = [];
+  const fail = (msg: string) => failures.push(msg);
+  const input = transcript.messages;
+  const { result, session, prompts, setup } = run;
+  const resolved = resolveOptions(setup.options);
+  const preserve = resolved.preserveRecentMessages;
+  const inputSet = new Set<Message>(input);
+
+  const sourceResult = new Map<string, { text: string; isError?: boolean }>();
+  for (const m of input) for (const res of m.toolResults ?? []) sourceResult.set(res.tool_use_id, res);
+  const inputUseIds = new Set(input.flatMap((m) => m.toolUses.map((u) => u.tool_use_id)));
+
+  // 1. Pairing and order: every result's tool_use sits in an earlier row; every use whose result
+  //    existed in the input still has it.
+  const usePos = new Map<string, number>();
+  session.forEach((m, k) => m.toolUses.forEach((u) => usePos.set(u.tool_use_id, k)));
+  const resultPos = new Map<string, number>();
+  session.forEach((m, k) => (m.toolResults ?? []).forEach((res) => {
+    resultPos.set(res.tool_use_id, k);
+    const p = usePos.get(res.tool_use_id);
+    if (p === undefined) fail(`orphan tool_result ${res.tool_use_id}`);
+    else if (p >= k) fail(`tool_result ${res.tool_use_id} at row ${k} not after its tool_use at ${p}`);
+  }));
+  for (const id of usePos.keys()) if (sourceResult.has(id) && !resultPos.has(id)) fail(`tool_use ${id} lost its tool_result`);
+  for (const id of usePos.keys()) if (!inputUseIds.has(id)) fail(`tool_use ${id} was invented`);
+
+  // 2. No empty rebuilt rows; a text-less assistant row (thinking) is followed by assistant content.
+  session.forEach((m, k) => {
+    if (!inputSet.has(m) && isEmpty(m)) fail(`rebuilt row ${k} is empty`);
+    if (!m.role) fail(`row ${k} has no role`);
+    if (isEmpty(m) && m.role === 'assistant') {
+      const next = session[k + 1];
+      if (!next || next.role !== 'assistant' || isEmpty(next)) fail(`thinking row ${k} lost its sibling content row`);
+    }
+  });
+
+  // 3. First row and the preserved tail are the input's own objects.
+  if (session[0] !== input[0]) fail('first row replaced');
+  const tailIn = preserve === 0 ? [] : input.slice(-preserve);
+  const tailOut = preserve === 0 ? [] : session.slice(-preserve);
+  tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
+
+  // 4. Text never edited, and rows without tool blocks are never removed or rebuilt.
+  const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
+  const plainSet = new Set<Message>(plainIn);
+  const plainOut = session.filter((m) => plainSet.has(m));
+  if (plainIn.length !== plainOut.length || plainIn.some((m, i) => plainOut[i] !== m)) fail('a plain text row was removed or rebuilt');
+  const inText = input.map((m) => m.text).filter((t) => t.trim());
+  const outText = session.map((m) => m.text).filter((t) => t.trim());
+  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i])) fail('user/assistant text changed or dropped');
+
+  // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.
+  session.forEach((m, k) => {
+    if (!wellFormed(rowText(m))) fail(`lone surrogate in row ${k}`);
+    for (const res of m.toolResults ?? []) {
+      const own = input.some((x) => (x.toolResults ?? []).includes(res as never));
+      if (!own && typeof res.isError !== 'boolean') fail(`rebuilt result ${res.tool_use_id} isError is ${typeof res.isError}`);
+    }
+  });
+  for (const p of prompts) if (!wellFormed(p)) fail('lone surrogate in a fork prompt');
+
+  // 6. Never larger: in total, and per result.
+  if (result.stats.charsAfter > result.stats.charsBefore) fail(`charsAfter ${result.stats.charsAfter} > charsBefore ${result.stats.charsBefore}`);
+  for (const m of session) for (const res of m.toolResults ?? []) {
+    const src = sourceResult.get(res.tool_use_id);
+    if (src && res.text.length > src.text.length) fail(`result ${res.tool_use_id} grew ${src.text.length} → ${res.text.length}`);
+  }
+
+  // 7. Decisions agree with the output.
+  const calls = annotateCalls(collectToolCalls(input, preserve), input, resolved);
+  const byId = new Map(calls.map((c) => [c.id, c]));
+  const after = new Map<string, string>();
+  for (const m of session) for (const res of m.toolResults ?? []) after.set(res.tool_use_id, res.text);
+  for (const d of result.decisions) {
+    const c = byId.get(d.id);
+    if (!c) { fail(`decision for unknown call ${d.id}`); continue; }
+    const src = sourceResult.get(c.tool_use_id)!.text;
+    const out = after.get(c.tool_use_id);
+    const mcp = c.tool.startsWith('mcp__');
+    const exotic = transcript.exoticMcp.has(c.tool_use_id);
+    if (c.pinned && (d.action !== 'keep' || d.source !== 'pinned')) fail(`pinned ${d.id} decided ${d.action}/${d.source}`);
+    if (d.action === 'drop_call') {
+      if (out !== undefined || usePos.has(c.tool_use_id)) fail(`drop_call ${d.id} still present`);
+      if ((input[c.callIndex]?.text ?? '').trim().length === 0) fail(`drop_call ${d.id} on a text-less tool_use row`);
+    } else if (out === undefined) fail(`${d.action} ${d.id} vanished`);
+    else if (d.action === 'drop_result') {
+      const parts = splitTruncated(out);
+      if (!parts) fail(`drop_result ${d.id} has no truncation note`);
+      else if (out.length >= src.length) fail(`drop_result ${d.id} did not shrink`);
+      else if (!mcp || exotic || !resolved.stripMcpFurniture) {
+        if (!src.startsWith(parts.head)) fail(`drop_result ${d.id} head is not the result's start`);
+        if (!src.endsWith(parts.tail)) fail(`drop_result ${d.id} tail is not the result's end`);
+        if (parts.omitted !== src.length - parts.head.length - parts.tail.length) fail(`drop_result ${d.id} note says ${parts.omitted} chars omitted`);
+      }
+    } else if (out !== src) {
+      if (!mcp || !resolved.stripMcpFurniture) fail(`kept non-MCP ${d.id} text changed`);
+      else if (exotic) fail(`kept MCP ${d.id} rewritten although it holds a number JSON.stringify would change`);
+      else {
+        try {
+          const want = JSON.stringify(referenceStripTop(JSON.parse(src)));
+          if (JSON.stringify(JSON.parse(out)) !== want) fail(`MCP strip of ${d.id} is not the source minus furniture`);
+        } catch {
+          fail(`MCP strip of ${d.id} is not valid JSON`);
+        }
+      }
+    }
+  }
+
+  // 8. The fork is never asked about a pinned call, a rule's target, or a rule's evidence; and a
+  //    claude verdict never lands on one.
+  if (setup.scorerKind === 'claude') {
+    const rules = applyRules(calls);
+    const evidence = new Set([...rules.values()].flatMap((v) => [...(v.evidence ? [v.evidence] : []), ...(v.moreEvidence ?? [])]));
+    for (const p of prompts) for (const id of promptIds(p)) {
+      if (evidence.has(id)) fail(`evidence call ${id} offered to the fork`);
+      if (rules.has(id)) fail(`rule-decided call ${id} offered to the fork`);
+      if (byId.get(id)?.pinned) fail(`pinned call ${id} offered to the fork`);
+    }
+    for (const d of result.decisions) if (d.source === 'claude' && evidence.has(d.id)) fail(`claude verdict on evidence call ${d.id}`);
+  }
+
+  // 9. A fact a result introduced and a later row quotes is still in the context before the quote.
+  if (resolved.pinReferenced) {
+    for (const q of transcript.quotes) {
+      const at = q.kind === 'text' ? session.indexOf(q.row as SessionRow) : usePos.get(q.useId) ?? -1;
+      if (at < 0) {
+        if (q.kind === 'text') fail(`quoting row for ${q.token} vanished`);
+        continue; // The quoting call itself was dropped: nothing quotes the token any more.
+      }
+      const before = session.slice(0, at).map(rowText).join('\n');
+      if (!before.includes(q.token)) fail(`later-quoted ${q.token} (quoted at row ${at}) is gone from the context before it`);
+    }
+  }
+  return failures;
+}
+
+/** What must be identical between two runs of one seed (timings excluded). */
+export function fingerprint(run: CaseRun): string {
+  const { ms: _ms, claudeMs: _c, forks, ...stats } = run.result.stats;
+  return JSON.stringify({
+    messages: run.session,
+    decisions: run.result.decisions,
+    stats,
+    forks: forks?.map(({ ms: _f, ...rest }) => rest),
+    prompts: [...run.prompts].sort(),
+  });
+}
