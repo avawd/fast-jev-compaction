@@ -197,7 +197,8 @@ function inputFor(r: Rng, tool: string, i: number, secrets: string[]): Record<st
     case 'Edit': return { file_path: pick(r, FILES), old_string: 'a', new_string: 'b' };
     case 'Write': return { file_path: pick(r, FILES), content: 'x'.repeat(int(r, 10, 400)) };
     case 'Grep': return { pattern: pick(r, ['foo', 'bar']), path: pick(r, ['src', '/repo/src']) };
-    case 'Agent': return { prompt: 'look into it', subagent_type: 'Explore' };
+    // Sometimes long, with an astral char straddling the INPUT_CHARS (120) cut.
+    case 'Agent': return { prompt: chance(r, 0.3) ? `${'p'.repeat(int(r, 100, 125))}${pick(r, EMOJI)} look into it ${'q'.repeat(200)}` : 'look into it', subagent_type: 'Explore' };
     case 'mcp__claude_ai_Atlassian__getJiraIssue': return { cloudId: 'x', issueIdOrKey: `BST-${4000 + i}` };
     case 'mcp__claude_ai_Atlassian__editJiraIssue': return { cloudId: 'x', issueIdOrKey: `BST-${4000 + i}`, fields: { summary: 's' } };
     default: return { q: i };

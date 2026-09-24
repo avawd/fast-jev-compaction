@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, MAX_CONCURRENT_FORKS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  annotateCalls, applyRules, INPUT_CHARS, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -300,6 +300,42 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
         if (split !== (halves.length === 2)) fail(`fork ${k} whole re-ask (${whole.status}, ${whole.candidates}) ${halves.length ? 'was' : 'was not'} split`);
       }
     }
+    // Candidate lines: the input is cut to INPUT_CHARS and the preview to PREVIEW_CHARS.
+    const LINE = /^(t\d+) \S+ msg \d+\/\d+ (.*?) ?→ (?:ok|error) \d+ch(?: ref-later:\d+)?(?: \| (.*))?$/;
+    for (const p of prompts) for (const line of p.split('\n').filter((l) => /^t\d+ /.test(l))) {
+      const m = LINE.exec(line);
+      if (!m) { fail(`unreadable candidate line: ${line.slice(0, 120)}`); continue; }
+      if (m[2]!.length > INPUT_CHARS) fail(`${m[1]} input shown as ${m[2]!.length} chars (cap ${INPUT_CHARS})`);
+      if ((m[3] ?? '').length > PREVIEW_CHARS) fail(`${m[1]} preview shown as ${m[3]!.length} chars (cap ${PREVIEW_CHARS})`);
+    }
+    // Every candidate belongs to exactly one chunk: a prompt either opens a chunk with ids no
+    // earlier prompt had, or re-asks a subset of exactly one earlier chunk (whole or half).
+    const chunkOf = new Map<string, number>();
+    let chunks = 0;
+    for (const p of prompts) {
+      const ids = promptIds(p);
+      if (new Set(ids).size !== ids.length) fail('a prompt lists an id twice');
+      const owners = new Set(ids.map((id) => chunkOf.get(id)));
+      if (owners.size === 1 && owners.has(undefined)) { chunks += 1; for (const id of ids) chunkOf.set(id, chunks); }
+      else if (owners.size !== 1) fail(`a prompt mixes ids of ${[...owners].map((o) => o ?? 'new').join('/')} chunks`);
+    }
+    // A chunk's half re-asks are two, disjoint, and together the whole chunk.
+    const members = new Map<number, string[]>();
+    for (const [id, c] of chunkOf) members.set(c, [...(members.get(c) ?? []), id]);
+    for (const [c, ids] of members) {
+      const halves = prompts.map(promptIds).filter((p) => p.length < ids.length && p.every((id) => chunkOf.get(id) === c));
+      if (halves.length === 0) continue;
+      const union = halves.flat();
+      if (halves.length !== 2 || new Set(union).size !== union.length || union.length !== ids.length) {
+        fail(`chunk ${c} (${ids.length} calls) re-asked as parts of ${halves.map((h) => h.length).join('+')}`);
+      }
+    }
+  }
+  // Every call has exactly one outcome.
+  const decided = result.decisions.map((d) => d.id);
+  if (new Set(decided).size !== decided.length) fail('a call has two decisions');
+  if (decided.length !== calls.length || calls.some((c) => !decided.includes(c.id))) fail(`${calls.length} calls but ${decided.length} decisions`);
+  if (setup.scorerKind === 'claude') {
     // Elision: no env-assignment value, header value or heredoc body from a Bash command reaches a fork.
     for (const p of prompts) for (const secret of transcript.secrets) if (p.includes(secret)) fail(`fork prompt carries secret ${secret}`);
   }
