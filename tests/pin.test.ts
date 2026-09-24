@@ -3,7 +3,7 @@ import {
   analyzeReferences,
   collectToolCalls,
   distinctiveTokens,
-  pinnedTail,
+  pinnedWindow,
   refLaterCounts,
   type Message,
 } from '../src/index.js';
@@ -136,24 +136,41 @@ describe('analyzeReferences: droppable content', () => {
   });
 });
 
-describe('pinnedTail', () => {
+describe('pinnedWindow', () => {
   const text = `${'h'.repeat(100)}HEADTOKEN${'m'.repeat(5000)}MIDTOKEN${'m'.repeat(5000)}TAILTOKEN${'t'.repeat(100)}`;
+  const win = (tokens: string[], head: number, preferred: number, maxTail = 1000, maxHead = 4000) =>
+    pinnedWindow(text, tokens, { head, preferredTail: preferred, maxTail, maxHead });
 
   it('keeps the preferred shape when it already covers every pinned token', () => {
-    expect(pinnedTail(text, ['HEADTOKEN'], 300, 0, 1000)).toBe(0);
-    expect(pinnedTail(text, ['HEADTOKEN', 'TAILTOKEN'], 300, 1000, 1000)).toBe(1000);
+    expect(win(['HEADTOKEN'], 300, 0)).toEqual({ head: 300, tail: 0 });
+    expect(win(['HEADTOKEN', 'TAILTOKEN'], 300, 1000)).toEqual({ head: 300, tail: 1000 });
   });
 
   it('widens to head+tail when the tail holds a pinned token', () => {
-    expect(pinnedTail(text, ['TAILTOKEN'], 300, 0, 1000)).toBe(1000);
+    expect(win(['TAILTOKEN'], 300, 0)).toEqual({ head: 300, tail: 1000 });
   });
 
-  it('returns undefined (keep verbatim) when no window covers a pinned token', () => {
-    expect(pinnedTail(text, ['MIDTOKEN'], 300, 0, 1000)).toBeUndefined();
+  it('extends the head to reach a token, up to maxHead', () => {
+    const out = win(['MIDTOKEN'], 300, 0, 1000, 6000);
+    expect(out).toBeDefined();
+    expect(out!.head).toBeGreaterThanOrEqual(5117);
+    expect(out!.head).toBeLessThanOrEqual(5117 + 200);
+    expect(out!.tail).toBe(0);
+  });
+
+  it('extends the head to the end of the line holding the token', () => {
+    const lines = `${'a'.repeat(50)}\nxx PINNEDTOKEN yy\n${'z'.repeat(5000)}`;
+    const out = pinnedWindow(lines, ['PINNEDTOKEN'], { head: 10, preferredTail: 0, maxTail: 0, maxHead: 4000 });
+    expect(out).toEqual({ head: lines.indexOf('yy') + 2, tail: 0 });
+  });
+
+  it('returns undefined (keep verbatim) past maxHead, or when the window would not shrink', () => {
+    expect(win(['MIDTOKEN'], 300, 0, 1000, 4000)).toBeUndefined();
+    expect(pinnedWindow(text, ['TAILTOKEN'], { head: 300, preferredTail: 0, maxTail: 0, maxHead: 20_000 })).toBeUndefined();
   });
 
   it('treats a token cut by the head boundary as not covered', () => {
-    expect(pinnedTail(text, ['HEADTOKEN'], 105, 0, 0)).toBeUndefined();
+    expect(win(['HEADTOKEN'], 105, 0, 0, 0)).toBeUndefined();
   });
 });
 

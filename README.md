@@ -47,12 +47,23 @@ runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
 `/compact` prunes.
 
+**Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
+refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
+as a `/compact` prompt). After the first refusal the plugin stops asking for the rest of the session and
+says so once (a toast and a log line). Send `/compact` yourself, or rely on Claude Code's own
+auto-compaction, which this plugin's `session.compact` hook still handles.
+
 ### What changes in a pruned message
 
 Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back
-exactly as Claude Code had them. A message that loses or truncates a tool call is rebuilt from its role,
-its text and its tool blocks only: images and documents, thinking blocks and the original order of its
-blocks are not preserved in that message.
+exactly as Claude Code had them. A message that loses a tool call, and the user message whose tool
+result is truncated, is rebuilt from its role, its text and its tool blocks only: images and documents,
+thinking blocks and the original order of its blocks are not preserved in that message. Truncation
+never rebuilds the assistant message that made the call.
+
+A call whose assistant message has no text of its own is truncated to its note instead of dropped.
+Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
+dropping the call would leave a message holding only thinking.
 
 ## Install
 
@@ -66,11 +77,27 @@ claude plugin install verbatim-compaction@verbatim-compaction
 
 ## Options
 
+Set options in your user settings (`~/.claude/settings.json`), a `--settings` file or managed
+settings, under the plugin's full id. Project settings are not read for plugin options.
+
+```json
+{
+  "pluginConfigs": {
+    "verbatim-compaction@verbatim-compaction": {
+      "options": { "compactAtPercent": 70, "claudeTimeoutMs": 30000 }
+    }
+  }
+}
+```
+
+A plugin loaded with `--plugin-dir` reads `verbatim-compaction@inline` instead (Claude Code 2.1.281's
+debug log names the keys it looked for).
+
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested |
 | `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
-| `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept) |
+| `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
 | `truncateTailChars` | 1000 | Characters also kept from the end of a log-like result, or to hold a pinned token |
 | `staleAfterMessages` | 60 | Read and Bash file-read results older than this many messages are truncated |
@@ -78,7 +105,7 @@ claude plugin install verbatim-compaction@verbatim-compaction
 | `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
-| `claudeTimeoutMs` | 6000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–9000 ms, well under the hook's time budget (ten seconds in the engine's test kit; not declared for live hooks) |
+| `claudeTimeoutMs` | 20000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 
 ## Cost
 

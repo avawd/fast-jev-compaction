@@ -3,6 +3,7 @@ import { collectToolCalls } from './calls.js';
 import { resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
+import { sliceWhole, sliceWholeEnd } from './text.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -12,7 +13,6 @@ import type {
   Scorer,
   ScoreOutcome,
   ToolCall,
-  ToolUse,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -57,11 +57,18 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
   };
 }
 
+/** A result this short is left whole: the note would cost about as much as it saves. */
+function shrinks(resultChars: number, headChars: number, tailChars = 0): boolean {
+  return resultChars > headChars + tailChars + 120;
+}
+
 function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
-  if (text.length <= headChars + tailChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  const tail = tailChars > 0 ? `\n${text.slice(text.length - tailChars)}` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - headChars - tailChars} chars of this tool result${
+  if (!shrinks(text.length, headChars, tailChars)) return text;
+  const kept = sliceWhole(text, headChars);
+  const end = sliceWholeEnd(text, tailChars);
+  const head = kept.length > 0 ? `${kept}\n` : '';
+  const tail = end.length > 0 ? `\n${end}` : '';
+  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length - end.length} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]${tail}`;
 }
@@ -77,13 +84,17 @@ export function applyDecisions(
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
   headChars: number,
+  /** Tail characters to keep as well, by `tool_use_id` (see `planShapes`). */
   tails: ReadonlyMap<string, number> = new Map(),
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
+  const heads = new Map<string, number>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
-    if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
+    if (!call || decision.action === 'keep') continue;
+    actions.set(call.tool_use_id, decision.action);
+    if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -94,36 +105,16 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    const toolUses = message.toolUses
-      .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => {
-        if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-          tails.get(tool.tool_use_id),
-        );
-        if ((tool.text ?? '') === text) return tool;
-        const copy: ToolUse = {
-          tool_use_id: tool.tool_use_id,
-          tool: tool.tool,
-          input: tool.input,
-          text,
-        };
-        if (tool.isError) copy.isError = true;
-        return copy;
-      });
+    // drop_result shrinks only the user row's tool_result. The assistant row's tool_use is
+    // returned as the engine's own object: rebuilding it would lose its handle (and with it
+    // every block the summary shape does not carry) for no saving the engine would count.
+    const toolUses = message.toolUses.filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call');
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(
-          result.text,
-          result.isError ?? false,
-          headChars,
-          tails.get(result.tool_use_id),
-        );
+        const head = heads.get(result.tool_use_id) ?? headChars;
+        const text = truncatedResultText(result.text, result.isError ?? false, head, tails.get(result.tool_use_id));
         return text === result.text
           ? result
           : {
@@ -155,6 +146,24 @@ export function applyDecisions(
     kept.push(rebuilt);
   }
   return kept;
+}
+
+/**
+ * A drop_call on a call whose assistant row has no text becomes a drop_result that keeps
+ * nothing but the note. Claude Code hands over one row per content block, so that row's
+ * thinking block is a sibling row with no text of its own: removing the tool_use row would
+ * leave an assistant message holding only thinking. Keeping the call costs its input alone.
+ */
+function preferTruncation(decision: CallDecision, call: ToolCall, messages: readonly Message[]): CallDecision {
+  if (decision.action !== 'drop_call') return decision;
+  if ((messages[call.callIndex]?.text ?? '').trim().length > 0) return decision;
+  return { ...decision, action: 'drop_result', headChars: 0 };
+}
+
+/** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
+function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
+  if (decision.action !== 'drop_result') return decision;
+  return shrinks(text.length, decision.headChars ?? headChars, tailChars) ? decision : { ...decision, action: 'keep' };
 }
 
 /** Characters of text, tool input and tool output a message holds. */
@@ -206,30 +215,33 @@ export async function compact(
       source: verdict.source,
     };
     if (verdict.rule) decision.rule = verdict.rule;
-    return decision;
+    return preferTruncation(decision, call, messages);
   });
   const texts = new Map(source.flatMap((m) => (m.toolResults ?? []).map((r) => [r.tool_use_id, r.text] as const)));
-  const { decisions, tails } = planShapes(scored, calls, resolved, texts);
-  const kept = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, tails);
+  const shaped = planShapes(scored, calls, resolved, texts);
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  const decisions = shaped.decisions.map((decision) => {
+    const call = byId.get(decision.id)!;
+    return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
+  });
+  const kept = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
-  return {
-    messages: kept,
-    decisions,
-    stats: {
-      messagesBefore: messages.length,
-      messagesAfter: kept.length,
-      charsBefore,
-      resultCharsBefore: resultChars(messages),
-      charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
-      calls: calls.length,
-      kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
-      resultsDropped: by((d) => d.action === 'drop_result'),
-      callsDropped: by((d) => d.action === 'drop_call'),
-      pinned: by((d) => d.source === 'pinned'),
-      byRule: by((d) => d.source === 'rule'),
-      byClaude: by((d) => d.source === 'claude'),
-      claude: outcome.claude,
-      ms: Date.now() - started,
-    },
+  const stats: CompactResult['stats'] = {
+    messagesBefore: messages.length,
+    messagesAfter: kept.length,
+    charsBefore,
+    resultCharsBefore: resultChars(messages),
+    charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
+    calls: calls.length,
+    kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
+    resultsDropped: by((d) => d.action === 'drop_result'),
+    callsDropped: by((d) => d.action === 'drop_call'),
+    pinned: by((d) => d.source === 'pinned'),
+    byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
+    byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
+    claude: outcome.claude,
+    ms: Date.now() - started,
   };
+  if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
+  return { messages: kept, decisions, stats };
 }

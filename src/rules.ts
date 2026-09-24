@@ -54,8 +54,22 @@ function pathOf(input: Record<string, unknown>): string | undefined {
   return typeof p === 'string' && p.length > 0 ? normalizePath(p) : undefined;
 }
 
+/** `offset`/`limit` bound a text read; `pages` bounds a PDF read the same way. */
 function isRanged(input: Record<string, unknown>): boolean {
-  return (input['offset'] ?? null) !== null || (input['limit'] ?? null) !== null;
+  return ['offset', 'limit', 'pages'].some((key) => (input[key] ?? null) !== null);
+}
+
+/**
+ * The tool and its canonical input, or undefined for an input that cannot be encoded (a cycle,
+ * a BigInt). Such a call is simply never matched by input: one odd input must not throw away
+ * every verdict of the compaction.
+ */
+function inputKey(call: ToolCall): string | undefined {
+  try {
+    return `${call.tool}:${canonicalJson(call.input)}`;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -76,28 +90,32 @@ function supersedesReads(call: ToolCall): boolean {
  */
 export function applyRules(calls: readonly ToolCall[]): Map<string, Verdict> {
   const verdicts = new Map<string, Verdict>();
-  const pathsTouchedLater = new Set<string>();
-  const searchesLater = new Set<string>();
-  const successesLater = new Set<string>();
+  // Each maps to the id of the nearest later call that did it: the verdict's evidence.
+  const pathsTouchedLater = new Map<string, string>();
+  const searchesLater = new Map<string, string>();
+  const successesLater = new Map<string, string>();
 
   for (let i = calls.length - 1; i >= 0; i -= 1) {
     const call = calls[i]!;
-    const key = `${call.tool}:${canonicalJson(call.input)}`;
+    const key = inputKey(call);
     const path = pathOf(call.input);
 
     if (!call.pinned) {
-      if (call.isError && successesLater.has(key)) {
-        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'failed_then_fixed' });
-      } else if (SEARCH_TOOLS.has(call.tool) && searchesLater.has(key)) {
-        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'repeated_search' });
-      } else if (READ_TOOLS.has(call.tool) && path && pathsTouchedLater.has(path)) {
-        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'stale_read' });
+      const retried = call.isError && key ? successesLater.get(key) : undefined;
+      const searched = SEARCH_TOOLS.has(call.tool) && key ? searchesLater.get(key) : undefined;
+      const touched = READ_TOOLS.has(call.tool) && path ? pathsTouchedLater.get(path) : undefined;
+      if (retried) {
+        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'failed_then_fixed', evidence: retried });
+      } else if (searched) {
+        verdicts.set(call.id, { action: 'drop_call', source: 'rule', rule: 'repeated_search', evidence: searched });
+      } else if (touched) {
+        verdicts.set(call.id, { action: 'drop_result', source: 'rule', rule: 'stale_read', evidence: touched });
       }
     }
 
-    if (!call.isError) successesLater.add(key);
-    if (SEARCH_TOOLS.has(call.tool)) searchesLater.add(key);
-    if (path && supersedesReads(call)) pathsTouchedLater.add(path);
+    if (key && !call.isError) successesLater.set(key, call.id);
+    if (key && SEARCH_TOOLS.has(call.tool)) searchesLater.set(key, call.id);
+    if (path && supersedesReads(call)) pathsTouchedLater.set(path, call.id);
   }
   return applyExtraRules(calls, verdicts);
 }

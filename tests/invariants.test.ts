@@ -30,6 +30,8 @@ function randomTranscript(r: () => number): Message[] {
     const toolResults = ids.map((id) => ({
       tool_use_id: id, text: 'z'.repeat(Math.floor(r() * 2000)), isError: r() < 0.1,
     }));
+    // A thinking block arrives as its own assistant row with no text, before its tool_use row.
+    if (r() < 0.4) out.push({ role: 'assistant', text: '', toolUses: [] });
     out.push({ role: 'assistant', text: r() < 0.3 ? `thinking ${i}` : '', toolUses });
     out.push({ role: 'user', text: '', toolUses: [], toolResults });
   }
@@ -53,6 +55,21 @@ describe('invariants over random transcripts', () => {
 
       const useIds = new Set(out.messages.flatMap((m) => m.toolUses.map((t) => t.tool_use_id)));
       for (const m of out.messages) for (const res of m.toolResults ?? []) expect(useIds.has(res.tool_use_id)).toBe(true);
+
+      const resultIds = new Set(out.messages.flatMap((m) => (m.toolResults ?? []).map((x) => x.tool_use_id)));
+      for (const id of useIds) expect(resultIds.has(id)).toBe(true);
+
+      const inputs = new Set(input);
+      const isEmpty = (m: Message) => m.text.trim().length === 0 && m.toolUses.length === 0 && (m.toolResults ?? []).length === 0;
+      out.messages.forEach((message, k) => {
+        if (!inputs.has(message)) expect(isEmpty(message)).toBe(false);
+        if (isEmpty(message) && message.role === 'assistant') {
+          // Its sibling tool_use row must still be there, carrying its call.
+          const sibling = out.messages[k + 1];
+          expect(sibling?.role).toBe('assistant');
+          expect(sibling!.toolUses.length + sibling!.text.trim().length).toBeGreaterThan(0);
+        }
+      });
 
       const inText = input.map((m) => m.text).filter((t) => t.trim().length > 0);
       const outText = out.messages.map((m) => m.text).filter((t) => t.trim().length > 0);

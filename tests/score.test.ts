@@ -58,3 +58,33 @@ describe('makeScorer', () => {
     expect(out.verdicts.get('t1')?.rule).toBe('stale_read');
   });
 });
+
+describe('evidence protection', () => {
+  // The fork replies as if it wanted every listed call gone.
+  const greedy = (seen: string[]): ForkFn => async (req) => {
+    seen.push(req.prompt);
+    const ids = [...req.prompt.matchAll(/^(t\d+) /gm)].map((m) => m[1]);
+    return { isAnswered: true, text: JSON.stringify({ drop: ids, truncate: [] }) };
+  };
+
+  it('never offers the later Grep that justified dropping an identical earlier one', async () => {
+    const seen: string[] = [];
+    const grep = [c('t1', 'Grep', { pattern: 'foo' }), c('t2', 'Grep', { pattern: 'foo' }), c('t3', 'Bash', { command: 'ls' })];
+    const out = await makeScorer({ fork: greedy(seen), useClaudeScorer: true, maxCandidates: 400 })(grep);
+    expect(out.verdicts.get('t1')).toMatchObject({ rule: 'repeated_search', evidence: 't2' });
+    expect(seen[0]).not.toMatch(/^t2 /m);
+    expect(out.verdicts.has('t2')).toBe(false);
+    expect(out.verdicts.get('t3')?.source).toBe('claude');
+  });
+
+  it('never offers the later Read that made an earlier one stale', async () => {
+    const seen: string[] = [];
+    const read = [c('t1', 'Read', { file_path: 'src/a.ts' }), c('t2', 'Read', { file_path: 'src/a.ts' })];
+    const out = await makeScorer({ fork: greedy(seen), useClaudeScorer: true, maxCandidates: 400 })(read);
+    expect(out.verdicts.get('t1')).toMatchObject({ rule: 'stale_read', evidence: 't2' });
+    expect(out.verdicts.has('t2')).toBe(false);
+    // Nothing else was undecided, so no fork was needed at all.
+    expect(seen).toHaveLength(0);
+    expect(out.claude).toBe('skipped');
+  });
+});

@@ -62,17 +62,27 @@ describe('compact with the Stage 2a rules', () => {
   });
 
   it('never drops a result whose introduced token is quoted later', async () => {
-    const body = `${'x'.repeat(2000)} deadbeef1234 ${'y'.repeat(5000)}`;
-    const messages = [msg('user', 'go'), use('u1', 'Bash', { command: './find.sh' }), res('u1', body),
-      use('u2', 'Bash', { command: 'git show deadbeef1234' }), res('u2', 'ok'), ...tail(8)];
     const dropAll: Scorer = async (calls) => ({
       verdicts: new Map(calls.filter((c) => !c.pinned).map((c) => [c.id, { action: 'drop_call' as const, source: 'claude' as const }])),
       claude: 'ran',
     });
-    const out = await compact(messages, dropAll, {});
-    expect(resultText(out.messages, 'u1')).toBe(body);
-    expect(out.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'keep', source: 'pinned' });
-    const unpinned = await compact(messages, dropAll, { pinReferenced: false });
-    expect(resultText(unpinned.messages, 'u1')).toBeUndefined();
+    const run = async (body: string, options = {}) => {
+      const messages = [msg('user', 'go'), use('u1', 'Bash', { command: './find.sh' }, 'Looking.'), res('u1', body),
+        use('u2', 'Bash', { command: 'git show deadbeef1234' }, 'Showing.'), res('u2', 'ok'), ...tail(8)];
+      return compact(messages, dropAll, options);
+    };
+    // Within reach: truncated to a head that ends at the token.
+    const near = `${'x'.repeat(2000)} deadbeef1234 ${'y'.repeat(5000)}`;
+    const reached = await run(near);
+    expect(resultText(reached.messages, 'u1')).toContain('deadbeef1234');
+    expect(resultText(reached.messages, 'u1')!.length).toBeLessThan(2200);
+    expect(reached.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'drop_result', headChars: 2013 });
+    // Out of reach (past MAX_PINNED_HEAD and the tail): kept verbatim.
+    const far = `${'x'.repeat(6000)} deadbeef1234 ${'y'.repeat(5000)}`;
+    const kept = await run(far);
+    expect(resultText(kept.messages, 'u1')).toBe(far);
+    expect(kept.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'keep', source: 'pinned' });
+    // Pin off: the call goes, token and all.
+    expect(resultText((await run(near, { pinReferenced: false })).messages, 'u1')).toBeUndefined();
   });
 });

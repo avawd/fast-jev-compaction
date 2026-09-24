@@ -1,4 +1,4 @@
-import { pinnedTail } from './pin.js';
+import { pinnedWindow } from './pin.js';
 import { bashCommand, readonlyFamilyKey, sourceReadPaths, stripCommandPrefix } from './rules-bash.js';
 import type { CallDecision, ResolvedCompactOptions, ToolCall } from './types.js';
 
@@ -9,6 +9,9 @@ const TAIL_WORD =
 /** A verdict line: counts, exit status, pass/fail markers. */
 const VERDICT =
   /(\b\d+ (?:passed|failed|skipped|errors?)\b|Tests?:|Test Files|exit(?:ed)? (?:code|status)|✓|✗|×|\bPASS\b|\bFAIL\b|error TS\d+|Build (?:succeeded|failed)|Done in|Ran \d+ tests?)/;
+
+/** Longest head a pinned token may stretch a truncation to; past it the result is kept whole. */
+export const MAX_PINNED_HEAD = 4000;
 
 /** Files whose end is a verdict: logs and background-task outputs. */
 const LOG_FILE = /\.(?:log|out|output)$|\/tasks\//;
@@ -45,7 +48,9 @@ export interface ShapePlan {
 /**
  * Decides the shape of every truncation: head only, or head + tail for
  * log-like results. A call whose result carries later-quoted tokens is never
- * dropped: it is truncated to a window holding all of them, or kept.
+ * dropped: it is truncated to a window holding all of them (a wider tail, or a
+ * head stretched up to MAX_PINNED_HEAD), or kept. A decision's own `headChars`
+ * is honoured; 0 (a drop turned truncation) keeps no tail unless a pin needs one.
  */
 export function planShapes(
   decisions: readonly CallDecision[],
@@ -59,17 +64,25 @@ export function planShapes(
   const planned = decisions.map((decision): CallDecision => {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') return decision;
-    const preferred = wantsTail(call) ? options.truncateTailChars : 0;
+    // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either.
+    const preferred = decision.headChars !== 0 && wantsTail(call) ? options.truncateTailChars : 0;
     const tokens = options.pinReferenced ? (call.refTokens ?? []) : [];
     if (tokens.length === 0) {
       if (decision.action === 'drop_result' && preferred > 0) tails.set(call.tool_use_id, preferred);
       return decision;
     }
     const text = texts.get(call.tool_use_id) ?? call.resultText ?? '';
-    const tail = pinnedTail(text, tokens, options.truncateHeadChars, preferred, options.truncateTailChars);
-    if (tail === undefined) return { id: decision.id, tool: decision.tool, action: 'keep', source: 'pinned' };
-    if (tail > 0) tails.set(call.tool_use_id, tail);
-    return decision.action === 'drop_result' ? decision : { ...decision, action: 'drop_result' };
+    const head = decision.headChars ?? options.truncateHeadChars;
+    const window = pinnedWindow(text, tokens, {
+      head,
+      preferredTail: preferred,
+      maxTail: options.truncateTailChars,
+      maxHead: Math.max(head, MAX_PINNED_HEAD),
+    });
+    if (!window) return { id: decision.id, tool: decision.tool, action: 'keep', source: 'pinned' };
+    if (window.tail > 0) tails.set(call.tool_use_id, window.tail);
+    const truncated: CallDecision = { ...decision, action: 'drop_result' };
+    return window.head === head ? truncated : { ...truncated, headChars: window.head };
   });
   return { decisions: planned, tails };
 }

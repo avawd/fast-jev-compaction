@@ -1,7 +1,19 @@
+import { sliceWhole } from './text.js';
 import type { ClaudeStatus, ToolCall, Verdict } from './types.js';
 
+/**
+ * What `$.model.fork` resolves to. Claude Code 2.1.281 always answers with a result:
+ * `isAnswered: true` and the text, or `isAnswered: false` and why not. Older engines
+ * resolved `{ text }` or null; both are still read so a downgrade degrades gracefully.
+ */
+export type ForkReply =
+  | { isAnswered: true; text: string }
+  | { isAnswered: false; reason: string; status?: number | null }
+  | { text: string }
+  | null;
+
 /** The shape of `$.model.fork`: one prompt appended to the session's own transcript. */
-export type ForkFn = (request: { prompt: string }) => Promise<{ text: string } | null>;
+export type ForkFn = (request: { prompt: string }) => Promise<ForkReply>;
 
 /** Resolves after `ms` milliseconds; injected so this module needs no engine or timer global. */
 export type SleepFn = (ms: number) => Promise<void>;
@@ -17,7 +29,7 @@ const TIMED_OUT = Symbol('timeout');
 const INPUT_CHARS = 120;
 
 function clip(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+  return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
 }
 
 export function candidateLine(call: ToolCall): string {
@@ -82,16 +94,61 @@ export function parseReply(text: string, ids: ReadonlySet<string>): Map<string, 
   return verdicts;
 }
 
+/**
+ * Names why an unanswered fork has no text, so a toast says `api-error 529` rather
+ * than `unparseable` (a reply that never arrived was never parsed).
+ */
+function unansweredStatus(reply: { reason: string; status?: number | null }): ClaudeStatus {
+  switch (reply.reason) {
+    case 'nothing-to-fork':
+      return 'no-fork';
+    case 'api-error':
+      return typeof reply.status === 'number' ? `api-error ${reply.status}` : 'api-error';
+    case 'aborted':
+      return 'aborted';
+    case 'empty-reply':
+      return 'empty';
+    default:
+      return 'error';
+  }
+}
+
+/** The reply's text, or the status that explains its absence. */
+function replyText(reply: ForkReply): { text: string } | { status: ClaudeStatus } {
+  if (reply === null) return { status: 'null' };
+  if ('isAnswered' in reply && reply.isAnswered === false) return { status: unansweredStatus(reply) };
+  const text = (reply as { text?: unknown }).text;
+  return typeof text === 'string' ? { text } : { status: 'empty' };
+}
+
 /** The fork's reply, or TIMED_OUT when `timeout` elapses first. The fork itself cannot be cancelled. */
 function forkWithin(
   fork: ForkFn,
   prompt: string,
   timeout: ForkTimeout | undefined,
-): Promise<{ text: string } | null | typeof TIMED_OUT> {
+): Promise<ForkReply | typeof TIMED_OUT> {
   const reply = fork({ prompt });
   if (!timeout) return reply;
   const expiry = timeout.sleep(timeout.timeoutMs).then((): typeof TIMED_OUT => TIMED_OUT);
   return Promise.race([reply, expiry]);
+}
+
+/**
+ * Runs one fork and reduces every outcome to its text or the status naming why there is none:
+ * a throw is `error`, the timeout `timeout`, an unanswered reply its engine reason.
+ */
+export async function runFork(
+  fork: ForkFn,
+  prompt: string,
+  timeout?: ForkTimeout,
+): Promise<{ text: string } | { status: ClaudeStatus }> {
+  let reply: ForkReply | typeof TIMED_OUT;
+  try {
+    reply = await forkWithin(fork, prompt, timeout);
+  } catch {
+    return { status: 'error' };
+  }
+  return reply === TIMED_OUT ? { status: 'timeout' } : replyText(reply);
 }
 
 export async function scoreWithClaude(
@@ -102,15 +159,8 @@ export async function scoreWithClaude(
 ): Promise<{ verdicts: Map<string, Verdict>; status: ClaudeStatus }> {
   const candidates = selectCandidates(calls, maxCandidates);
   if (candidates.length === 0) return { verdicts: new Map(), status: 'skipped' };
-  let reply: { text: string } | null | typeof TIMED_OUT;
-  try {
-    reply = await forkWithin(fork, buildPrompt(candidates), timeout);
-  } catch {
-    return { verdicts: new Map(), status: 'error' };
-  }
-  if (reply === TIMED_OUT) return { verdicts: new Map(), status: 'timeout' };
-  if (reply === null) return { verdicts: new Map(), status: 'null' };
-  if (typeof reply.text !== 'string') return { verdicts: new Map(), status: 'unparseable' };
-  const verdicts = parseReply(reply.text, new Set(candidates.map((x) => x.id)));
+  const answer = await runFork(fork, buildPrompt(candidates), timeout);
+  if ('status' in answer) return { verdicts: new Map(), status: answer.status };
+  const verdicts = parseReply(answer.text, new Set(candidates.map((x) => x.id)));
   return verdicts ? { verdicts, status: 'ran' } : { verdicts: new Map(), status: 'unparseable' };
 }

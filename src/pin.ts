@@ -126,19 +126,51 @@ function covers(text: string, tokens: readonly string[], head: number, tail: num
   });
 }
 
+export interface WindowLimits {
+  /** Head the verdict asked for. */
+  head: number;
+  /** Tail the result's kind asks for (0, or truncateTailChars for log-like output). */
+  preferredTail: number;
+  /** Largest tail a pin may widen to. */
+  maxTail: number;
+  /** Largest head a pin may extend to before the result is kept whole instead. */
+  maxHead: number;
+}
+
+/** How far past a token the head may run to end on its line. */
+const LINE_REACH = 200;
+
+/** The shortest head holding every token the tail does not: to the end of the token's line when that is near. */
+function reachingHead(text: string, tokens: readonly string[], tail: number): number {
+  let need = 0;
+  for (const token of tokens) {
+    const at = text.indexOf(token);
+    if (at < 0 || at >= text.length - tail) continue;
+    need = Math.max(need, at + token.length);
+  }
+  const eol = text.indexOf('\n', need);
+  return eol >= 0 && eol - need <= LINE_REACH ? eol : need;
+}
+
 /**
- * The tail to truncate `text` with so that the first occurrence of every
- * pinned token survives: `preferredTail` if that window already covers them,
- * else `maxTail`, else undefined (the result must be kept verbatim).
+ * The window to truncate `text` to so that the first occurrence of every
+ * pinned token survives, trying in order: the asked-for head with the
+ * preferred tail; that head with `maxTail`; a head extended to reach the
+ * tokens (at most `maxHead`), with either tail. Undefined when none of these
+ * holds them all and still shrinks the text: the result is kept verbatim.
  */
-export function pinnedTail(
+export function pinnedWindow(
   text: string,
   tokens: readonly string[],
-  head: number,
-  preferredTail: number,
-  maxTail: number,
-): number | undefined {
-  if (covers(text, tokens, head, preferredTail)) return preferredTail;
-  if (maxTail > preferredTail && covers(text, tokens, head, maxTail)) return maxTail;
-  return undefined;
+  limits: WindowLimits,
+): { head: number; tail: number } | undefined {
+  const { head, preferredTail, maxTail, maxHead } = limits;
+  if (covers(text, tokens, head, preferredTail)) return { head, tail: preferredTail };
+  if (maxTail > preferredTail && covers(text, tokens, head, maxTail)) return { head, tail: maxTail };
+  const tails = maxTail > preferredTail ? [preferredTail, maxTail] : [preferredTail];
+  const options = tails
+    .map((tail) => ({ head: Math.max(head, reachingHead(text, tokens, tail)), tail }))
+    .filter((w) => w.head <= maxHead && text.length > w.head + w.tail + TRUNCATION_SLACK)
+    .sort((a, b) => a.head + a.tail - (b.head + b.tail));
+  return options[0];
 }

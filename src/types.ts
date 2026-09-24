@@ -65,15 +65,39 @@ export interface Verdict {
   action: 'drop_result' | 'drop_call';
   source: 'rule' | 'claude';
   rule?: RuleName;
+  /**
+   * For a rule verdict, the id of the later call that justified it (the re-read, the repeated
+   * search, the successful retry). That call is the only remaining copy of what this one is
+   * losing, so it must never itself be offered for dropping.
+   */
+  evidence?: string;
 }
 
-/** What happened to the Claude stage in one compaction. */
-export type ClaudeStatus = 'ran' | 'skipped' | 'null' | 'unparseable' | 'error' | 'timeout';
+/**
+ * What happened to the Claude stage in one compaction. `unparseable` is only a reply
+ * whose text was read and was not the asked-for JSON; `no-fork`, `api-error [status]`,
+ * `aborted` and `empty` are the engine's own reasons for having no text; `null` is a
+ * pre-2.1.281 engine's empty answer; `error` a fork that threw or an unknown reason.
+ */
+export type ClaudeStatus =
+  | 'ran'
+  | 'skipped'
+  | 'null'
+  | 'unparseable'
+  | 'error'
+  | 'timeout'
+  | 'no-fork'
+  | 'api-error'
+  | `api-error ${number}`
+  | 'aborted'
+  | 'empty';
 
 export interface ScoreOutcome {
   /** Keyed by `ToolCall.id`. Calls absent from the map are kept. */
   verdicts: Map<string, Verdict>;
   claude: ClaudeStatus;
+  /** How long the Claude stage waited, when it ran at all. */
+  claudeMs?: number;
 }
 
 /** Receives every paired call (pinned ones included, as evidence) and returns verdicts. */
@@ -85,6 +109,8 @@ export interface CallDecision {
   action: CallAction;
   source: 'pinned' | 'rule' | 'claude' | 'default';
   rule?: RuleName;
+  /** Characters of the result to keep when it differs from `truncateHeadChars`. */
+  headChars?: number;
 }
 
 export interface CompactOptions {
@@ -130,6 +156,8 @@ export interface CompactResult {
     byRule: number;
     byClaude: number;
     claude: ClaudeStatus;
+    /** How long the Claude stage waited; absent when it never started. */
+    claudeMs?: number;
     ms: number;
   };
 }

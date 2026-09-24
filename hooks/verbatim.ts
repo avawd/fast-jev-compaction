@@ -1,5 +1,5 @@
 import type {
-  On, PluginOptions, Register, SessionCompactInput, SessionMessage, ToolResultSummary, ToolUseSummary,
+  EngineInterface, On, PluginOptions, Register, SessionCompactInput, SessionMessage, ToolResultSummary, ToolUseSummary,
   TurnCompleteInput,
 } from 'claude-code';
 
@@ -18,9 +18,7 @@ export type HookConfig = {
   useClaudeScorer: boolean;
   /**
    * Past this the fork is abandoned and rules alone decide. Clamped to
-   * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS]; the only declared budget
-   * figure is the ten seconds the engine's test kit allows (not declared for
-   * live hooks).
+   * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS].
    */
   claudeTimeoutMs: number;
   /** Tail kept, beside the head, when truncating a test/build/deploy-like result. */
@@ -33,8 +31,17 @@ export type HookConfig = {
   stripMcpFurniture: boolean;
 };
 
+/**
+ * The hook's 10 s budget (HookBudget.ms) counts only its own time: it stops while any `$` call
+ * is in flight. The declaration excepts a `$.clock` wait, so a live probe settled whether
+ * racing `$.clock.sleep` against the fork restarts it. On 2.1.281 a turn.complete hook that
+ * raced a fork against `$.clock.sleep(30000)` ran 30,007 ms of wall time, was not cut, and read
+ * `next.budget.remainingMs` 9999 both before and after: the in-flight fork holds the clock.
+ * So the timeout may exceed ten seconds. The ceiling stays under the 60 s a headless session
+ * waits on turn events before ending the turn without them.
+ */
 const MIN_CLAUDE_TIMEOUT_MS = 500;
-const MAX_CLAUDE_TIMEOUT_MS = 9000;
+const MAX_CLAUDE_TIMEOUT_MS = 45_000;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
@@ -43,7 +50,7 @@ const DEFAULTS: HookConfig = {
   truncateHeadChars: 300,
   maxCandidates: 400,
   useClaudeScorer: true,
-  claudeTimeoutMs: 6000,
+  claudeTimeoutMs: 20_000,
   truncateTailChars: 1000,
   staleAfterMessages: 60,
   pinReferenced: true,
@@ -141,13 +148,20 @@ export async function compactSession(
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
+/** `ran 5.2s`, `timeout 20.0s`, or the bare status when the Claude stage never started. */
+function claudeStage(stats: CompactResult['stats']): string {
+  return stats.claudeMs === undefined ? stats.claude : `${stats.claude} ${(stats.claudeMs / 1000).toFixed(1)}s`;
+}
+
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${s.claude}), ` +
+  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
 }
 
-type Ui = { ui: { log: (t: string) => void; toast: (t: string, o?: { timeoutMs?: number }) => void } };
+type Ui = {
+  ui: { log: (t: string, o?: { to?: 'transcript' | 'debug' }) => void; toast: (t: string, o?: { timeoutMs?: number }) => void };
+};
 
 /** Reports without ever throwing: a broken UI must not turn a good compaction into a failed hook. */
 function notify($: Ui, text: string, toast = true): void {
@@ -165,6 +179,16 @@ function notify($: Ui, text: string, toast = true): void {
   } catch {
     // The log line above already carries it.
   }
+}
+
+/** The debug log only: detail for whoever investigates, never a transcript line. Returns true. */
+function debug($: Ui, text: string): true {
+  try {
+    $.ui.log(text, { to: 'debug' });
+  } catch {
+    // Diagnostics must never fail the hook.
+  }
+  return true;
 }
 
 function message(error: unknown): string {
@@ -187,11 +211,32 @@ const PRECOMPUTE_SKIP_REASON = 'precompute skipped; the real compaction runs the
 /** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
 const EMPTY_SKIP_REASON = 'nothing to compact yet';
 
+/**
+ * `$.session.compact()` rejects in a headless (-p / SDK) session on 2.1.281, where compaction
+ * only runs inside a turn (a `/compact` prompt). Resolves false on a rejection, which the caller
+ * takes as final for the session: asking again every turn would only repeat the same failure.
+ * Top-level because the engine follows `$` only into functions declared at the top of the file.
+ */
+async function requestCompaction($: EngineInterface): Promise<boolean> {
+  try {
+    await $.session.compact();
+    return true;
+  } catch (error) {
+    notify($, `auto-compact off for this session: $.session.compact() was refused (${message(error)}). ` +
+      'In a headless (-p / SDK) session send /compact yourself.');
+    return false;
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
+  let autoCompactOff = false;
+  // register() has no `$`, so the effective config is logged by the first hook that runs.
+  let configLogged = false;
 
   on('session.compact', async ($, event, next) => {
+    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
     if (event.trigger === 'precompute') {
       notify($, PRECOMPUTE_SKIP_REASON, false);
       return { skip: PRECOMPUTE_SKIP_REASON };
@@ -224,11 +269,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting || event.agentId !== undefined || event.reason !== 'answer') return next(event);
+    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
+    if (compacting || autoCompactOff || event.agentId !== undefined || event.reason !== 'answer') return next(event);
     compacting = true;
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) >= config.compactAtPercent) await $.session.compact();
+      debug($, `context ${context.percent ?? 0}% (compacts at ${config.compactAtPercent}%)`);
+      if ((context.percent ?? 0) >= config.compactAtPercent) autoCompactOff = !(await requestCompaction($));
     } catch (error) {
       notify($, `auto-compact skipped (${message(error)})`, false);
     } finally {

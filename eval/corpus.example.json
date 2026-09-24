@@ -1,0 +1,16 @@
+{
+  "description": "Template. Copy to eval/corpus.local.json (gitignored) or point --corpus / VC_EVAL_CORPUS at your own file. Each entry: a Claude Code session transcript by ABSOLUTE path (never copy transcripts into this public repo), the segment index after splitting it at compact_boundary rows (eval/parse.ts), and a label. Mark at most one segment live: true (its next segment is a real verbatim compaction). A missing file or segment is skipped with a warning.",
+  "segments": [
+    {
+      "label": "ops-live",
+      "live": true,
+      "file": "/absolute/path/to/.claude/projects/<project-slug>/<session-id>.jsonl",
+      "segment": 0
+    },
+    {
+      "label": "coding",
+      "file": "/absolute/path/to/.claude/projects/<project-slug>/<session-id>.jsonl",
+      "segment": 1
+    }
+  ]
+}

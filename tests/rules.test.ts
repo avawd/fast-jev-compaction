@@ -21,8 +21,8 @@ describe('applyRules', () => {
       c('Read', { file_path: 'src/b.ts' }),
     ];
     const v = applyRules(calls);
-    expect(v.get('t1')).toEqual({ action: 'drop_result', source: 'rule', rule: 'stale_read' });
-    expect(v.get('t3')).toEqual({ action: 'drop_result', source: 'rule', rule: 'stale_read' });
+    expect(v.get('t1')).toEqual({ action: 'drop_result', source: 'rule', rule: 'stale_read', evidence: 't2' });
+    expect(v.get('t3')).toEqual({ action: 'drop_result', source: 'rule', rule: 'stale_read', evidence: 't4' });
     expect(v.has('t2')).toBe(false);
     expect(v.has('t4')).toBe(false);
   });
@@ -35,7 +35,7 @@ describe('applyRules', () => {
       c('Grep', { pattern: 'bar', path: 'src' }),
     ];
     const v = applyRules(calls);
-    expect(v.get('t1')).toEqual({ action: 'drop_call', source: 'rule', rule: 'repeated_search' });
+    expect(v.get('t1')).toEqual({ action: 'drop_call', source: 'rule', rule: 'repeated_search', evidence: 't2' });
     expect(v.size).toBe(1);
   });
 
@@ -47,7 +47,7 @@ describe('applyRules', () => {
       c('Bash', { command: 'npm run build' }, { isError: true }),
     ];
     const v = applyRules(calls);
-    expect(v.get('t1')).toEqual({ action: 'drop_call', source: 'rule', rule: 'failed_then_fixed' });
+    expect(v.get('t1')).toEqual({ action: 'drop_call', source: 'rule', rule: 'failed_then_fixed', evidence: 't2' });
     expect(v.has('t3')).toBe(false);
   });
 
@@ -82,6 +82,15 @@ describe('applyRules', () => {
     expect(applyRules(calls).size).toBe(0);
   });
 
+  it('does not count a later PDF page-range read as evidence', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'doc/spec.pdf' }),
+      c('Read', { file_path: 'doc/spec.pdf', pages: '3-5' }),
+    ];
+    expect(applyRules(calls).size).toBe(0);
+  });
+
   it('makes a ranged read stale after a later full read', () => {
     fresh();
     const calls = [
@@ -98,6 +107,39 @@ describe('applyRules', () => {
       c('Edit', { file_path: 'src/a.ts', old_string: 'x', new_string: 'y' }),
     ];
     expect(applyRules(calls).get('t1')?.rule).toBe('stale_read');
+  });
+
+  it('records the nearest later call as evidence', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'src/a.ts' }),
+      c('Read', { file_path: 'src/a.ts' }),
+      c('Edit', { file_path: 'src/a.ts' }),
+      c('Grep', { pattern: 'x' }),
+      c('Grep', { pattern: 'x' }),
+      c('Grep', { pattern: 'x' }),
+    ];
+    const v = applyRules(calls);
+    expect(v.get('t1')?.evidence).toBe('t2');
+    expect(v.get('t2')?.evidence).toBe('t3');
+    expect(v.get('t4')?.evidence).toBe('t5');
+    expect(v.get('t5')?.evidence).toBe('t6');
+  });
+
+  it('survives an input canonicalJson cannot encode (L3), and still judges the rest', () => {
+    fresh();
+    const cyclic: Record<string, unknown> = { pattern: 'x' };
+    cyclic['self'] = cyclic;
+    const calls = [
+      c('Grep', cyclic),
+      c('Grep', cyclic),
+      c('Bash', { command: 'n', big: 10n as unknown }),
+      c('Read', { file_path: 'src/a.ts' }),
+      c('Read', { file_path: 'src/a.ts' }),
+    ];
+    const v = applyRules(calls);
+    expect(v.has('t1')).toBe(false);
+    expect(v.get('t4')?.rule).toBe('stale_read');
   });
 
   it('leaves different paths and different inputs alone', () => {

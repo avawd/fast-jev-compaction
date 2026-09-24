@@ -52,7 +52,7 @@ describe('planShapes', () => {
     const text = `${'h'.repeat(2000)}PINNEDTOKEN${'t'.repeat(500)}`;
     const widened = planShapes([decision('drop_result')], [bash('./run.sh', text, { refTokens: ['PINNEDTOKEN'] })], options);
     expect(widened.tails.get('u1')).toBe(1000);
-    const mid = `${'h'.repeat(2000)}PINNEDTOKEN${'t'.repeat(5000)}`;
+    const mid = `${'h'.repeat(9000)}PINNEDTOKEN${'t'.repeat(5000)}`;
     const kept = planShapes([decision('drop_result')], [bash('./run.sh', mid, { refTokens: ['PINNEDTOKEN'] })], options);
     expect(kept.decisions).toEqual([{ id: 't1', tool: 'Bash', action: 'keep', source: 'pinned' }]);
   });
@@ -69,6 +69,32 @@ describe('planShapes', () => {
     const out = planShapes([decision('drop_call')], [bash('./run.sh', mid, { refTokens: ['PINNEDTOKEN'] })],
       resolveOptions({ pinReferenced: false }));
     expect(out.decisions).toEqual([decision('drop_call')]);
+  });
+});
+
+describe('planShapes with a per-call head', () => {
+  const options = resolveOptions({});
+  it('keeps no tail on a drop that was turned into an empty truncation (headChars 0)', () => {
+    const d: CallDecision = { id: 't1', tool: 'Bash', action: 'drop_result', source: 'claude', headChars: 0 };
+    const out = planShapes([d], [bash('npm test')], options);
+    expect(out.tails.has('u1')).toBe(false);
+    expect(out.decisions[0]).toEqual(d);
+  });
+
+  it('extends the head of a pinned result to its token instead of keeping it whole', () => {
+    const text = `${'h'.repeat(2000)}\nPINNEDTOKEN\n${'t'.repeat(5000)}`;
+    const d: CallDecision = { id: 't1', tool: 'Bash', action: 'drop_call', source: 'claude' };
+    const out = planShapes([d], [bash('./run.sh', text, { refTokens: ['PINNEDTOKEN'] })], options);
+    expect(out.decisions[0]).toMatchObject({ action: 'drop_result', headChars: 2012 });
+    expect(out.tails.has('u1')).toBe(false);
+  });
+
+  it('starts from headChars 0 for a pinned empty truncation and still reaches the token', () => {
+    const text = `${'h'.repeat(5000)}PINNEDTOKEN${'t'.repeat(100)}`;
+    const d: CallDecision = { id: 't1', tool: 'Bash', action: 'drop_result', source: 'claude', headChars: 0 };
+    const out = planShapes([d], [bash('./run.sh', text, { refTokens: ['PINNEDTOKEN'] })], options);
+    expect(out.decisions[0]).toMatchObject({ action: 'drop_result', headChars: 0 });
+    expect(out.tails.get('u1')).toBe(1000);
   });
 });
 

@@ -15,7 +15,7 @@ function transcript(): SessionMessage[] {
     m('user', '', { toolResults: [{ tool_use_id: 'u1', text: big }], handle: 'h2' }),
     m('assistant', '', { toolUses: [{ tool_use_id: 'u2', tool: 'Edit', input: { file_path: 'src/p.ts' } }], handle: 'h3' }),
     m('user', '', { toolResults: [{ tool_use_id: 'u2', text: 'ok' }], handle: 'h4' }),
-    m('assistant', '', { toolUses: [{ tool_use_id: 'u3', tool: 'Bash', input: { command: 'npm test' } }], handle: 'h5' }),
+    m('assistant', 'Running the tests.', { toolUses: [{ tool_use_id: 'u3', tool: 'Bash', input: { command: 'npm test' } }], handle: 'h5' }),
     m('user', '', { toolResults: [{ tool_use_id: 'u3', text: big }], handle: 'h6' }),
     ...Array.from({ length: 6 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`, { handle: `r${i}` })),
   ];
@@ -25,7 +25,7 @@ describe('resolveHookConfig', () => {
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
-      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 6000,
+      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 20000,
       truncateTailChars: 1000, staleAfterMessages: 60, pinReferenced: true, stripMcpFurniture: true,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
@@ -34,16 +34,16 @@ describe('resolveHookConfig', () => {
     });
   });
 
-  it('clamps claudeTimeoutMs to [500, 9000]', () => {
+  it('clamps claudeTimeoutMs to [500, 45000]', () => {
     expect(resolveHookConfig({ claudeTimeoutMs: -5 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 0 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 499 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 500 }).claudeTimeoutMs).toBe(500);
-    expect(resolveHookConfig({ claudeTimeoutMs: 9000 }).claudeTimeoutMs).toBe(9000);
-    expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(9000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(6000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(6000);
-    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(6000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 45_000 }).claudeTimeoutMs).toBe(45_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(45_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(20_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(20_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(20_000);
     expect(resolveHookConfig({ claudeTimeoutMs: 1234.5 }).claudeTimeoutMs).toBe(1234.5);
   });
 });
@@ -57,7 +57,7 @@ describe('compactSession', () => {
     expect(result.stats).toMatchObject({ byRule: 1, byClaude: 1, claude: 'ran' });
     expect(messages[0]).toBe(input[0]);
     expect(messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
-    expect(summarize(result)).toMatch(/rules 1, claude 1/);
+    expect(summarize(result)).toMatch(/rules 1, claude 1 \(ran \d+\.\ds\)/);
   });
 
   it('is rules-only without a fork', async () => {
@@ -97,7 +97,7 @@ describe('register', () => {
       expect(out.messages).toBeDefined();
       expect(h.nextCalls).toHaveLength(0);
       expect(h.forkCalls).toHaveLength(1);
-      expect(h.toasts.join('\n')).toMatch(/rules 1, claude 0 \(error\)/);
+      expect(h.toasts.join('\n')).toMatch(/rules 1, claude 0 \(error \d+\.\ds\)/);
     });
 
     it('falls back to next(event) on an unexpected error', async () => {
@@ -113,16 +113,16 @@ describe('register', () => {
       expect(h.nextCalls).toHaveLength(0);
       expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
       expect(h.toasts).toHaveLength(1);
-      expect(h.toasts[0]).toMatch(/rules 1, claude 1 \(ran\)/);
+      expect(h.toasts[0]).toMatch(/rules 1, claude 1 \(ran \d+\.\ds\)/);
     });
 
     it('keeps rule verdicts when the fork outlasts claudeTimeoutMs', async () => {
       const h = harness({ fork: () => new Promise(() => {}), sleep: async () => {} });
       const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
       expect(out.messages).toBeDefined();
-      expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout\)/);
+      expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout \d+\.\ds\)/);
       expect(h.sleeps).toHaveLength(1);
-      expect(h.sleeps[0]?.ms).toBe(6000);
+      expect(h.sleeps[0]?.ms).toBe(20000);
     });
 
     it('cancels the pending timeout sleep once a fast fork wins the race', async () => {
@@ -162,6 +162,24 @@ describe('register', () => {
       expect(h.forkCalls).toHaveLength(0);
       expect(h.toasts).toHaveLength(0);
       expect(h.logs).toHaveLength(1);
+    });
+
+    it('logs the effective config to the debug log once per load', async () => {
+      const h = harness({ userConfig: { claudeTimeoutMs: 30000 } });
+      await h.compact(prunable());
+      await h.compact(prunable());
+      await h.turnComplete({ reason: 'answer', answer: 'x', durationMs: 1, isAborted: false, turnId: 'x' });
+      const lines = h.debugLogs.filter((line) => line.startsWith('config '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('"claudeTimeoutMs":30000');
+      expect(lines[0]).toContain('"compactAtPercent":60');
+      expect(h.logs.some((line) => line.startsWith('config '))).toBe(false);
+    });
+
+    it('reports a skipped Claude stage without a duration', async () => {
+      const h = harness();
+      await h.compact({ ...prunable(), agentId: 'a1' });
+      expect(h.toasts[0]).toMatch(/claude 0 \(skipped\)/);
     });
 
     it('prefixes only the toast; the engine already names the plugin on log lines', async () => {
@@ -215,6 +233,13 @@ describe('register', () => {
       expect(h.compactCalls).toBe(0);
     });
 
+    it('logs the context percent against the threshold at debug level', async () => {
+      const h = harness({ percent: 59 });
+      await h.turnComplete(answered);
+      expect(h.debugLogs).toContain('context 59% (compacts at 60%)');
+      expect(h.logs).toHaveLength(0);
+    });
+
     it('compacts once at or above the threshold', async () => {
       const h = harness({ percent: 60 });
       expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
@@ -233,6 +258,19 @@ describe('register', () => {
       expect(h.compactCalls).toBe(1);
       await h.turnComplete(answered);
       expect(h.compactCalls).toBe(2);
+    });
+
+    it('stops asking after $.session.compact rejects (headless), and says so once', async () => {
+      const headless = new Error('$.session.compact: not available in a headless (-p / SDK) session yet');
+      const h = harness({ percent: 90, sessionCompact: async () => { throw headless; } });
+      for (let i = 0; i < 3; i += 1) expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      expect(h.compactCalls).toBe(1);
+      expect(h.usageCalls).toBe(1);
+      expect(h.toasts).toHaveLength(1);
+      expect(h.toasts[0]).toMatch(/auto-compact off for this session/);
+      expect(h.toasts[0]).toMatch(/headless/);
+      expect(h.logs.filter((line) => /auto-compact off/.test(line))).toHaveLength(1);
+      expect(h.nextCalls).toHaveLength(3);
     });
 
     it('ignores subagent turns and turns that did not end in an answer', async () => {

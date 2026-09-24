@@ -20,21 +20,22 @@
     replacing the transcript.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and
   calls `$.session.compact()` once `context.percent` reaches `compactAtPercent`, guarded against
-  overlapping runs.
+  overlapping runs. A rejected `$.session.compact()` (every headless `-p` / SDK session on
+  2.1.281) turns the trigger off for the rest of the session, reported once by toast and log.
 
 ### Engine calls used
 
 | Call | Where | Why |
 | --- | --- | --- |
 | `$.model.fork` | `session.compact`, non-subagent, non-precompute | Stage 2 scoring of the calls rules left undecided |
-| `$.clock.sleep` | `session.compact` | Bounds the fork to `claudeTimeoutMs`; combined with `next.signal` through a local `AbortController` and `AbortSignal.any`, so a fast fork (or an error) cancels the wait as soon as the compaction settles instead of leaving it pending until the timeout elapses or the dispatch ends |
+| `$.clock.sleep` | `session.compact` | Bounds the fork to `claudeTimeoutMs`; combined with `next.signal` through a local `AbortController` and `AbortSignal.any`, so a fast fork (or an error) cancels the wait as soon as the compaction settles instead of leaving it pending until the timeout elapses or the dispatch ends. The sleep does not spend the hook's 10 s budget while the fork is pending (measured on 2.1.281), so the timeout may be longer than the budget |
 | `$.session.usage` | `turn.complete` | Reads `context.percent` to decide whether to request compaction |
 | `$.session.compact` | `turn.complete` | Requests the compaction this module's own `session.compact` hook then handles |
-| `$.ui.log` | both, via `notify` | Always-on record of what happened, including the precompute skip |
-| `$.ui.toast` | `session.compact`, except on `precompute` | User-visible summary; a broken UI can never turn a good compaction into a failed hook |
+| `$.ui.log` | both, via `notify` and `debug` | Always-on record of what happened, including the precompute skip; with `{ to: 'debug' }`, the effective config once per load and each turn's context percent against `compactAtPercent` |
+| `$.ui.toast` | `session.compact`, except on `precompute` | User-visible summary, naming the Claude stage's outcome and wait (`claude 96 (ran 5.2s)`); a broken UI can never turn a good compaction into a failed hook |
 
 The engine API it uses (`session.compact`, `turn.complete`, `$.model.fork`, `$.clock.sleep`,
 `$.session.usage`, `$.session.compact`, `$.ui.log`, `$.ui.toast`, and the hook-global
 `AbortController`/`AbortSignal`) is declared in `types/claude-code.d.ts`, generated from Claude Code
-2.1.274. Function hooks are early access: regenerate and re-check that file after a Claude Code
+2.1.281. Function hooks are early access: regenerate and re-check that file after a Claude Code
 upgrade.
