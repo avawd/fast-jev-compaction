@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  annotateCalls, applyRules, MAX_CONCURRENT_FORKS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -24,8 +24,18 @@ export interface CaseRun {
   result: CompactResult;
   session: SessionRow[];
   prompts: string[];
+  /** Most forks in flight at once (0 for the raw scorer). */
+  maxInFlight: number;
+  /** Ids an acceptable fork reply decided (see FakeFork.decidable); empty for the raw scorer. */
+  decidable: Set<string>;
   setup: CaseSetup;
 }
+
+/**
+ * fuzz-regressions.test.ts 'KNOWN BUG: half retries push concurrent forks past MAX_CONCURRENT_FORKS'.
+ * Set false once it is fixed, so the fuzz holds the real cap again.
+ */
+const KNOWN_BUG_HALVES_EXCEED_CAP = true;
 
 const RULES: RuleName[] = ['stale_read', 'repeated_search', 'failed_then_fixed', 'mcp_write_echo', 'bash_read_superseded', 'readonly_superseded', 'agent_boilerplate', 'stale_age'];
 
@@ -66,10 +76,14 @@ export async function runCase(seed: number, transcript: Transcript = genTranscri
   const input = transcript.messages;
   let scorer: Scorer;
   let prompts: string[] = [];
+  let maxInFlight = () => 0;
+  let decidable = new Set<string>();
   if (setup.scorerKind === 'raw') scorer = rawScorer(seed);
   else {
     const fake = fakeFork(seed, setup.timed);
     prompts = fake.prompts;
+    maxInFlight = fake.maxInFlight;
+    decidable = fake.decidable;
     const instant = chance(r, 0.15);
     const scorerOptions: ScorerOptions = {
       fork: fake.fork,
@@ -90,7 +104,7 @@ export async function runCase(seed: number, transcript: Transcript = genTranscri
   }
   const result = await compact(input, scorer, setup.options);
   const session = toSessionMessages(input as never, result.messages) as unknown as SessionRow[];
-  return { result, session, prompts, setup };
+  return { result, session, prompts, maxInFlight: maxInFlight(), decidable, setup };
 }
 
 /** Furniture removal as README describes it, written independently of rules-mcp.ts. */
@@ -260,6 +274,34 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (byId.get(id)?.pinned) fail(`pinned call ${id} offered to the fork`);
     }
     for (const d of result.decisions) if (d.source === 'claude' && evidence.has(d.id)) fail(`claude verdict on evidence call ${d.id}`);
+    // The concurrency cap: whole-then-half retries included, never more than MAX_CONCURRENT_FORKS at once.
+    // While KNOWN_BUG_HALVES_EXCEED_CAP stands, only the bug's own worst case (every chunk split) is held.
+    const cap = KNOWN_BUG_HALVES_EXCEED_CAP ? 2 * MAX_CONCURRENT_FORKS : MAX_CONCURRENT_FORKS;
+    if (run.maxInFlight > cap) fail(`${run.maxInFlight} forks in flight at once (cap ${cap})`);
+    // A claude cut comes only from an acceptable reply: never from a lazy (under 80%), cut-off,
+    // refused or garbage one. (A pin may still turn it into a keep, never the other way.)
+    for (const d of result.decisions) {
+      if (d.source === 'claude' && d.action !== 'keep' && !run.decidable.has(d.id)) fail(`claude ${d.action} on ${d.id}, which no acceptable reply decided`);
+    }
+    // Retries, where no deadline can cut them short: a refused, api-error, unparseable or empty
+    // first ask is re-asked whole once, a failed whole re-ask of 2+ calls splits into two halves,
+    // and nothing else is re-asked.
+    if (!setup.timed) {
+      const retryable = (st: string) => st === 'refused' || st === 'api-error' || st === 'unparseable' || st === 'empty';
+      const runs = result.stats.forks ?? [];
+      for (let k = 0; k < runs.length; k += 1) {
+        const first = runs[k]!;
+        if (first.retry) continue;
+        const whole = runs[k + 1]?.retry === 'whole' ? runs[k + 1] : undefined;
+        if (retryable(first.status) !== (whole !== undefined)) fail(`fork ${k} (${first.status}) ${whole ? 'was' : 'was not'} re-asked whole`);
+        if (!whole) continue;
+        const halves = runs.slice(k + 2, k + 4).filter((x) => x.retry === 'half');
+        const split = retryable(whole.status) && whole.candidates >= 2;
+        if (split !== (halves.length === 2)) fail(`fork ${k} whole re-ask (${whole.status}, ${whole.candidates}) ${halves.length ? 'was' : 'was not'} split`);
+      }
+    }
+    // Elision: no env-assignment value, header value or heredoc body from a Bash command reaches a fork.
+    for (const p of prompts) for (const secret of transcript.secrets) if (p.includes(secret)) fail(`fork prompt carries secret ${secret}`);
   }
 
   // 9. A fact a result introduced and a later row quotes is still in the context before the quote.
