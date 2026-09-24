@@ -11,6 +11,9 @@
 # --config defaults to $VC_EVAL_RECALL, then the gitignored eval/recall.local.json (copy
 # eval/recall.example.json). Recall configs name private sessions, so they are never tracked.
 #
+# No tools are disallowed (a narrowed tools list breaks the scorer's fork); the recall prompt asks
+# for memory only, and a recall turn that used a tool is scored as FAILED.
+#
 # The globally installed copy is disabled for the run with
 #   --settings '{"enabledPlugins":{"verbatim-compaction@verbatim-compaction":false}}'
 # and live-summary.ts reports which hooks.json actually loaded, so a run that silently used
@@ -28,9 +31,12 @@ SETS=""
 OPTIONS=""
 OUT=""
 CONFIG="${VC_EVAL_RECALL:-$HERE/recall.local.json}"
-DISALLOWED="Bash,Read,Grep,Glob,Agent,WebFetch,WebSearch,Edit,Write,ToolSearch,mcp__claude_ai_Atlassian_Rovo,mcp__plugin_claude-mem_mcp-search"
+# No --disallowedTools: the scorer's fork resends the main thread's request, tools list included, and a
+# narrowed list made forks fail with invalid_request (2/11 with the flag, 0/19 without). Every recall
+# question is prefixed with RECALL_PREFIX instead, and live-summary.ts fails a recall that used a tool.
+RECALL_PREFIX="Answer from memory only; do not use any tools. "
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -82,15 +88,15 @@ SETTINGS="$(node -e '
 ' "$OPTIONS")"
 
 node -e '
-  const [config, sets] = process.argv.slice(1);
+  const [config, sets, prefix] = process.argv.slice(1);
   const c = JSON.parse(require("fs").readFileSync(config, "utf8"));
   const wanted = sets ? sets.split(",") : c.sets.map((s) => s.name);
   const line = (content) => JSON.stringify({ type: "user", message: { role: "user", content } });
   const out = [line("Reply with just: ok"), line("/compact")];
-  for (const s of c.sets) if (wanted.includes(s.name)) out.push(line(s.question));
+  for (const s of c.sets) if (wanted.includes(s.name)) out.push(line(prefix + s.question));
   if (out.length === 2) { console.error(`no recall set matches --sets ${sets}`); process.exit(2); }
   process.stdout.write(out.join("\n") + "\n");
-' "$CONFIG" "$SETS" > "$OUT/input.jsonl"
+' "$CONFIG" "$SETS" "$RECALL_PREFIX" > "$OUT/input.jsonl"
 
 cat > "$OUT/meta.json" <<EOF
 {"pluginDir": "$PLUGIN_DIR", "session": "$SESSION", "cwd": "$CWD", "runs": $N, "sets": "${SETS:-all}", "config": "$CONFIG", "started": "$STAMP", "settings": $SETTINGS}
@@ -105,7 +111,6 @@ for i in $(seq 1 "$N"); do
       --plugin-dir "$PLUGIN_DIR" --settings "$SETTINGS" \
       --input-format stream-json --output-format stream-json --verbose \
       --debug --debug-file "$OUT/run$i.debug.log" \
-      --disallowedTools "$DISALLOWED" \
       < "$OUT/input.jsonl" > "$OUT/run$i.jsonl" 2> "$OUT/run$i.stderr")
   code=$?
   set -e
