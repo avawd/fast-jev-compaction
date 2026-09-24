@@ -21,6 +21,13 @@ describe('wantsTail', () => {
     expect(wantsTail(bash('./run.sh', `${'x'.repeat(3000)}\nexit code 1`))).toBe(true);
   });
 
+  it('keeps a tail for a read of a log or task output that ends with a verdict', () => {
+    const log = `${'x'.repeat(3000)}\n      Tests  312 passed (312)\n`;
+    expect(wantsTail(bash('tail -30 /tmp/p/tasks/b1.output 2>/dev/null || echo "still running"', log))).toBe(true);
+    expect(wantsTail(bash('cat build.log', log))).toBe(true);
+    expect(wantsTail(bash('cat src/a.test.ts', log))).toBe(false);
+  });
+
   it('keeps plain head for file reads, other commands and other tools', () => {
     expect(wantsTail(bash('cat tests/a.test.ts'))).toBe(false);
     expect(wantsTail(bash('ls tests'))).toBe(false);

@@ -98,6 +98,39 @@ describe('analyzeReferences', () => {
   });
 });
 
+describe('analyzeReferences: droppable content', () => {
+  it('does not let an Edit input hide a later quote (the Edit itself can be dropped)', () => {
+    const messages: Message[] = [
+      msg('user', 'go'),
+      use('u1', 'Bash', { command: 'grep -rn Leased lib' }),
+      res('u1', 'lib/a.ts:3: ROUTING_RECORDER_LIVE_FROM = 1'),
+      use('u2', 'Edit', { file_path: 'lib/a.ts', old_string: 'ROUTING_RECORDER_LIVE_FROM = 1', new_string: 'x' }),
+      res('u2', 'ok'),
+      use('u3', 'Bash', { command: 'grep -rn ROUTING_RECORDER_LIVE_FROM lib' }),
+      res('u3', 'none'),
+    ];
+    expect(analyzeReferences(collectToolCalls(messages, 0), messages).get('t1')).toContain('ROUTING_RECORDER_LIVE_FROM');
+  });
+
+  it('finds a path inside a file:// URL', () => {
+    expect(distinctiveTokens('at x (file:///home/me/repo/scripts/a.test.ts:141:12)')).toContain("/home/me/repo/scripts/a.test.ts");
+  });
+
+  it('skips two-segment non-paths and the host part of a URL', () => {
+    const tokens = distinctiveTokens('rate 10/min on Tue/Thu at https://x.example.net/browse/ABC-12 in lib/core');
+    expect(tokens).not.toContain('10/min');
+    expect(tokens).not.toContain('Tue/Thu');
+    expect(tokens).not.toContain('lib/core');
+    expect(tokens).not.toContain('/x.example.net/browse/ABC-12');
+    expect(tokens).toContain('https://x.example.net/browse/ABC-12');
+    expect(distinctiveTokens('see lib/a.ts and src/x/y/z')).toEqual(expect.arrayContaining(['lib/a.ts', 'src/x/y/z']));
+  });
+
+  it('finds dollar amounts', () => {
+    expect(distinctiveTokens('saves $540 a year, $1,234.50 total')).toEqual(expect.arrayContaining(['$540', '$1,234.50']));
+  });
+});
+
 describe('pinnedTail', () => {
   const text = `${'h'.repeat(100)}HEADTOKEN${'m'.repeat(5000)}MIDTOKEN${'m'.repeat(5000)}TAILTOKEN${'t'.repeat(100)}`;
 

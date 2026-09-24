@@ -30,9 +30,11 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    exactly (integers past 2^53) is left alone.
 
    **Referenced-later pin.** A result that introduced a distinctive token (a sha, `#123`, `ABC-123`, a
-   path, a URL, a long number or identifier) which later assistant text or a later tool input quotes
-   (edits excluded) is never dropped, whichever stage decided it: it is truncated only to a head or
-   head+tail window that still holds the token's first occurrence, or kept verbatim.
+   path, a URL, a dollar amount, a long number or identifier) which later assistant text or a later tool
+   input quotes (edits excluded) is never dropped, whichever stage decided it: it is truncated only to a
+   head or head+tail window that still holds the token's first occurrence, or kept verbatim. Only text
+   that is never pruned (user and assistant text, pinned results) counts as already having the token;
+   an edit's input does not, because the edit itself can be dropped.
 2. **Claude** (optional): one tool-less `$.model.fork` of your own session is shown the remaining
    candidates and returns `{"drop":[…],"truncate":[…]}`. It reuses the session's prompt cache and model.
    A cold cache, an error, or a fork slower than `claudeTimeoutMs` falls back to the rules alone. A

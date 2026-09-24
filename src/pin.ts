@@ -11,11 +11,13 @@ import type { Message, ToolCall } from './types.js';
 /** Truncation leaves text this close to head + tail alone; mirrors compact.ts. */
 const TRUNCATION_SLACK = 120;
 
-const TOKEN_PATTERNS: RegExp[] = [
-  /https?:\/\/[^\s"'<>)\]}\\]+/g,
-  // The lookbehind starts a match only at a run's first character; without it a long
-  // slash-free run is rescanned from every position (quadratic).
-  /(?<![\w.@/-])(?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)+/g,
+const URL_PATTERN = /https?:\/\/[^\s"'<>)\]}\\]+/g;
+// The lookbehind starts a match only at a run's first character; without it a long
+// slash-free run is rescanned from every position (quadratic). A `/` may start one
+// after another `/`, so `file:///a/b` yields `/a/b`.
+const PATH_PATTERN = /(?<![\w.@-])(?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)+/g;
+const OTHER_PATTERNS: RegExp[] = [
+  /\$\d[\d,]*(?:\.\d+)?/g,
   /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g,
   /#\d{2,}\b/g,
   /\b[A-Z][A-Z0-9]+-\d+\b/g,
@@ -27,28 +29,36 @@ const YEAR = /^(?:19|20)\d{2}$/;
 const MIN_TOKEN = 4;
 /** Paths shorter than this are too generic to pin on (`a/b`, `./x`). */
 const MIN_PATH = 6;
+/**
+ * What makes a slash-joined word a path rather than `10/min` or `Tue/Thu`:
+ * rooted (`/`, `./`, `../`), a file extension, or at least three segments.
+ */
+const PATH_SHAPE = /^(?:\.{0,2}\/)|\.[A-Za-z0-9]{1,8}$|\/[^/]+\/[^/]+$/;
 /** Bounds work on pathological text; far more than any real result needs. */
 const MAX_MATCHES_PER_PATTERN = 5000;
 
 /** Tools whose input authors content rather than quoting it back. */
 const AUTHORING_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
+function matches(text: string, pattern: RegExp): string[] {
+  const out: string[] = [];
+  pattern.lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (out.length >= MAX_MATCHES_PER_PATTERN) break;
+    const token = match[0].replace(/[.,:;]+$/, '');
+    if (token.length >= MIN_TOKEN && !YEAR.test(token)) out.push(token);
+  }
+  return out;
+}
+
 /** Distinct distinctive tokens of `text`, in first-seen order. */
 export function distinctiveTokens(text: string): string[] {
-  const out = new Set<string>();
-  for (const pattern of TOKEN_PATTERNS) {
-    pattern.lastIndex = 0;
-    let count = 0;
-    for (const match of text.matchAll(pattern)) {
-      count += 1;
-      if (count > MAX_MATCHES_PER_PATTERN) break;
-      const token = match[0].replace(/[.,:;]+$/, '');
-      if (token.length < MIN_TOKEN || YEAR.test(token)) continue;
-      if (token.includes('/') && !token.includes('://') && token.length < MIN_PATH) continue;
-      out.add(token);
-    }
-  }
-  return [...out];
+  const urls = matches(text, URL_PATTERN);
+  const urlText = urls.join('\n');
+  const paths = matches(text, PATH_PATTERN).filter(
+    (p) => p.length >= MIN_PATH && PATH_SHAPE.test(p) && !urlText.includes(p),
+  );
+  return [...new Set([...urls, ...paths, ...OTHER_PATTERNS.flatMap((re) => matches(text, re))])];
 }
 
 function inputText(input: Record<string, unknown>): string {
@@ -87,8 +97,8 @@ export function analyzeReferences(calls: readonly ToolCall[], messages: readonly
     else learn(textTokens);
     for (const tool of message.toolUses) {
       const tokens = distinctiveTokens(inputText(tool.input));
-      if (AUTHORING_TOOLS.has(tool.tool)) learn(tokens);
-      else quote(tokens);
+      // An edit's input is neither a quote nor a safe copy: the edit itself can be dropped.
+      if (!AUTHORING_TOOLS.has(tool.tool)) quote(tokens);
     }
     for (const result of message.toolResults ?? []) {
       const call = byUse.get(result.tool_use_id);

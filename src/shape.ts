@@ -10,17 +10,26 @@ const TAIL_WORD =
 const VERDICT =
   /(\b\d+ (?:passed|failed|skipped|errors?)\b|Tests?:|Test Files|exit(?:ed)? (?:code|status)|✓|✗|×|\bPASS\b|\bFAIL\b|error TS\d+|Build (?:succeeded|failed)|Done in|Ran \d+ tests?)/;
 
+/** Files whose end is a verdict: logs and background-task outputs. */
+const LOG_FILE = /\.(?:log|out|output)$|\/tasks\//;
+
 /** How far from the end a verdict line counts as "near the end". */
 const VERDICT_WINDOW = 400;
 
 /**
  * Whether truncating this call's result should keep a tail as well as the
  * head: a Bash run of a test/build/deploy/lint/install/push command, or any
- * Bash result that ends with a verdict line. File reads never do.
+ * Bash result that ends with a verdict line. Reads of source files never do;
+ * reads of logs and task outputs do when they end with a verdict.
  */
 export function wantsTail(call: ToolCall): boolean {
   const command = bashCommand(call);
-  if (!command || sourceReadPaths(command).length > 0) return false;
+  if (!command) return false;
+  const reads = sourceReadPaths(command);
+  if (reads.length > 0) {
+    // A source file's last lines are nothing special; a log's are where the verdict is.
+    return reads.some((p) => LOG_FILE.test(p)) && VERDICT.test((call.resultText ?? '').slice(-VERDICT_WINDOW));
+  }
   const rest = stripCommandPrefix(command);
   if (!readonlyFamilyKey(rest) && rest.split(/[\s;&|()]+/).some((w) => TAIL_WORD.test(w))) return true;
   return VERDICT.test((call.resultText ?? '').slice(-VERDICT_WINDOW));
