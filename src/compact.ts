@@ -8,7 +8,6 @@ import type {
   Scorer,
   ScoreOutcome,
   ToolCall,
-  ToolUse,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -70,25 +69,10 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    const toolUses = message.toolUses
-      .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => {
-        if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-        );
-        if ((tool.text ?? '') === text) return tool;
-        const copy: ToolUse = {
-          tool_use_id: tool.tool_use_id,
-          tool: tool.tool,
-          input: tool.input,
-          text,
-        };
-        if (tool.isError) copy.isError = true;
-        return copy;
-      });
+    // drop_result shrinks only the user row's tool_result. The assistant row's tool_use is
+    // returned as the engine's own object: rebuilding it would lose its handle (and with it
+    // every block the summary shape does not carry) for no saving the engine would count.
+    const toolUses = message.toolUses.filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call');
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {

@@ -54,6 +54,22 @@ describe('compact', () => {
     expect(reductionRatio(out)).toBeGreaterThan(0.5);
   });
 
+  it('truncates only the tool_result on drop_result; the assistant tool_use row is the input object', async () => {
+    const withOutcome = msg('assistant', '', {
+      toolUses: [{ tool_use_id: 'u1', tool: 'Read', input: { file_path: 'src/a.ts' }, text: big }],
+    });
+    const input = [msg('user', 'go'), withOutcome, res('u1', big), ...transcript().slice(5)];
+    const scorer: Scorer = async () => ({
+      claude: 'ran',
+      verdicts: new Map([['t1', { action: 'drop_result', source: 'claude' }]]),
+    });
+    const out = await compact(input, scorer, { preserveRecentMessages: 6 });
+    expect(out.messages[1]).toBe(withOutcome);
+    expect(out.messages[1]?.toolUses[0]).toBe(withOutcome.toolUses[0]);
+    expect(out.messages[2]).not.toBe(input[2]);
+    expect(out.messages[2]?.toolResults?.[0]?.text.length).toBeLessThan(600);
+  });
+
   it('keeps everything and skips the scorer when there are no unpinned calls', async () => {
     let called = false;
     const scorer: Scorer = async () => {

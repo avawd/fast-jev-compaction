@@ -22,8 +22,9 @@ If the result saves less than `minReductionRatio`, Claude Code's built-in summar
 ### What changes in a pruned message
 
 Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back
-exactly as Claude Code had them. A message that loses or truncates a tool call is rebuilt from its role,
-its text and its tool blocks only: images and documents, thinking blocks and the original order of its
+exactly as Claude Code had them. A message that loses a tool call, and the user message whose tool
+result is truncated, is rebuilt from its role, its text and its tool blocks only (truncation never
+rebuilds the assistant message that made the call): images and documents, thinking blocks and the original order of its
 blocks are not preserved in that message.
 
 ## Install
