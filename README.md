@@ -62,6 +62,9 @@ settings, under the plugin's full id. Project settings are not read for plugin o
 }
 ```
 
+A plugin loaded with `--plugin-dir` reads `verbatim-compaction@inline` instead (Claude Code 2.1.281's
+debug log names the keys it looked for).
+
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested |
