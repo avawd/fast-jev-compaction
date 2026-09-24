@@ -82,6 +82,15 @@ describe('applyRules', () => {
     expect(applyRules(calls).size).toBe(0);
   });
 
+  it('does not count a later PDF page-range read as evidence', () => {
+    fresh();
+    const calls = [
+      c('Read', { file_path: 'doc/spec.pdf' }),
+      c('Read', { file_path: 'doc/spec.pdf', pages: '3-5' }),
+    ];
+    expect(applyRules(calls).size).toBe(0);
+  });
+
   it('makes a ranged read stale after a later full read', () => {
     fresh();
     const calls = [

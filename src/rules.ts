@@ -53,8 +53,9 @@ function pathOf(input: Record<string, unknown>): string | undefined {
   return typeof p === 'string' && p.length > 0 ? normalizePath(p) : undefined;
 }
 
+/** `offset`/`limit` bound a text read; `pages` bounds a PDF read the same way. */
 function isRanged(input: Record<string, unknown>): boolean {
-  return (input['offset'] ?? null) !== null || (input['limit'] ?? null) !== null;
+  return ['offset', 'limit', 'pages'].some((key) => (input[key] ?? null) !== null);
 }
 
 /**
