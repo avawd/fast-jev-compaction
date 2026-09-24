@@ -95,6 +95,12 @@ describe('buildJevPrompt', () => {
     expect(prompt).toMatch(/drop.*one-line note/);
   });
 
+  it('asks for bare-number ids and no deliberation: output tokens are what a fork waits on', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).toMatch(/each id as its number alone \(t12 is 12\)/);
+    expect(prompt).toMatch(/without deliberating/);
+  });
+
   it('tells the fork not to call tools and to reply with the JSON only', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).toContain('Do not call any tool');
@@ -132,7 +138,16 @@ describe('parseJevReply', () => {
     expect(parseJevReply('{"result_needed":["t1"],"call_matters":["t2"', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":["t1","t2","t3","t4"]}', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":"t1","call_matters":[]}', ids)).toBeUndefined();
-    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[1]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[true]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[1.5]}', ids)).toBeUndefined();
+  });
+
+  it('reads bare numbers as ids (12 is t12): half the output tokens of a quoted id', () => {
+    const out = parseJevReply('{"result_needed":[1],"call_matters":[2,9],"unsure":["t3"],"drop":[4,5]}', ids);
+    expect(out && [...out.resultNeeded]).toEqual(['t1']);
+    expect(out && [...out.callMatters]).toEqual(['t2']);
+    expect(out && [...out.unsure]).toEqual(['t3']);
+    expect(out && [...out.drop]).toEqual(['t4', 't5']);
   });
 });
 

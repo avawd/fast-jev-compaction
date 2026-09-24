@@ -137,6 +137,7 @@ debug log names the keys it looked for).
 | `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets most slow but healthy forks count (they measured up to about 31 s end to end, so the slowest can still miss it and fall back to the rules alone), and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
+| `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
 
 ### Precompute
 
