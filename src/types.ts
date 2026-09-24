@@ -34,6 +34,8 @@ export interface ToolCall {
   callIndex: number;
   resultIndex: number;
   resultChars: number;
+  /** The first characters of the result, for the scorer's preview. */
+  resultHead?: string;
   isError: boolean;
   /** In the first or the newest preserved messages; never a target. */
   pinned: boolean;
