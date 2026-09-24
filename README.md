@@ -54,6 +54,13 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    candidates passed at 10, 30 and 60 when the reply was JSON lists. So `keepThreshold` is not a
    probability cut here. It only decides what `unsure` becomes.
 
+   Those rejections are the model's safeguards refusing (`stop_reason: "refusal"`), which Claude Code
+   2.1.281 turns into an error frame (`invalid_request`, no status) and a fork reports as `api-error`.
+   How often they fire depends on the whole request, and long tool inputs set them off most: in a
+   security-heavy session, candidate lines carrying Bash commands of up to 400 characters were refused
+   on 3 of 4 first tries, while the same lines cut to 200 characters passed 8 of 8. So a call's input is
+   shown up to 200 characters. A chunk that is still refused is re-asked once as two halves.
+
 If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
 thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
 runs instead. So does

@@ -18,8 +18,15 @@ import type { ToolCall } from './types.js';
  * the forks lives in claude-scorer.ts.
  */
 
-/** Most characters of a call's input shown on its candidate line. */
-export const INPUT_CHARS = 400;
+/**
+ * Most characters of a call's input shown on its candidate line. 400 drew safeguard refusals:
+ * on 2.1.281 a refused fork surfaces as `api-error` / `invalid_request` with no status (the
+ * engine's lQe() turns `stop_reason: "refusal"` into an error frame), and the session's long Bash
+ * commands (env loading, heredocs, credentialed curl) past ~200 chars were what set it off. Live,
+ * the pipeline's own chunk prompts: inputs as they were 0/4 answered, 120 and 200 chars 16/16,
+ * previews included.
+ */
+export const INPUT_CHARS = 200;
 /** Most characters of a result's head shown on its candidate line. */
 export const PREVIEW_CHARS = 80;
 /** Most candidates asked about in one fork; more are split over concurrent forks. */

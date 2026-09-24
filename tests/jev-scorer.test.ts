@@ -36,14 +36,14 @@ describe('jevCandidateLine', () => {
     );
   });
 
-  it('shows a Bash command in full, cd prefix stripped, up to 400 chars', () => {
+  it('shows a Bash command, cd prefix stripped, up to 200 chars (longer ones drew safeguard refusals live)', () => {
     const short = jevCandidateLine(c('t1', 'Bash', { command: 'cd /repo && npm test', description: 'run' }), ctx);
     expect(short).toContain(' npm test');
     expect(short).not.toContain('cd /repo');
     expect(short).not.toContain('description');
     const long = jevCandidateLine(c('t2', 'Bash', { command: `echo ${'x'.repeat(1000)}` }), ctx);
     const input = long.slice(long.indexOf('echo'), long.indexOf(' → '));
-    expect(input.length).toBe(400);
+    expect(input.length).toBe(200);
     expect(input.endsWith('…')).toBe(true);
   });
 
@@ -171,8 +171,8 @@ describe('well-formed prompts', () => {
     for (let pad = 0; pad < 12; pad += 1) {
       const long = (n: number) => `${'x'.repeat(n - 6 + pad)}${EMOJI.repeat(8)}`;
       const calls = [
-        c('t1', 'Bash', { command: long(400) }, { resultHead: long(80) }),
-        c('t2', 'Read', { file_path: long(400) }, { resultHead: long(200) }),
+        c('t1', 'Bash', { command: long(200) }, { resultHead: long(80) }),
+        c('t2', 'Read', { file_path: long(200) }, { resultHead: long(200) }),
         c('t3', 'Grep', { pattern: EMOJI }, { resultHead: `${'y'.repeat(pad)}${EMOJI}` }),
       ];
       expect(wellFormed(buildJevPrompt(calls, { messageCount: 9 }))).toBe(true);
