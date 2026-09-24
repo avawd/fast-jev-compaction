@@ -105,8 +105,8 @@ export interface ForkRun {
   candidates: number;
   ms: number;
   status: ClaudeStatus;
-  /** One half of a chunk whose first fork the API rejected. */
-  retry?: true;
+  /** A re-ask after the chunk's first fork failed: `whole` once, then its two `half`s. */
+  retry?: 'whole' | 'half';
 }
 
 export interface ScoreOutcome {

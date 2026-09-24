@@ -184,14 +184,14 @@ function claudeStage(stats: CompactResult['stats']): string {
 export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
-    `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated, ${s.callsDropped} dropped`;
+    `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */
 export function describeForks(result: CompactResult): string | undefined {
   const s = result.stats;
   if (!s.forks || s.forks.length === 0) return undefined;
-  const runs = s.forks.map((f) => `${f.retry ? 'retry ' : ''}${f.candidates} calls ${f.ms}ms ${f.status}`).join(', ');
+  const runs = s.forks.map((f) => `${f.retry ? `retry-${f.retry} ` : ''}${f.candidates} calls ${f.ms}ms ${f.status}`).join(', ');
   const plural = s.forks.length === 1 ? 'fork' : 'forks';
   return `scorer: wait ${s.wait ?? 'race'}; ${s.forks.length} ${plural} [${runs}]; claude ${s.claudeMs ?? 0}ms; total ${s.ms}ms`;
 }
@@ -256,11 +256,27 @@ async function requestCompaction($: EngineInterface): Promise<boolean> {
     await $.session.compact();
     return true;
   } catch (error) {
-    notify($, `auto-compact off for this session: $.session.compact() was refused (${message(error)}). ` +
+    const text = message(error);
+    // Only the headless refusal is final: 2.1.281 also rejects while a turn runs, which the
+    // next turn can get past.
+    if (!HEADLESS_REFUSAL.test(text)) {
+      notify($, `auto-compact not requested this turn (${text}); will try again next turn`, false);
+      return true;
+    }
+    notify($, `auto-compact off for this session: $.session.compact() was refused (${text}). ` +
       'In a headless (-p / SDK) session send /compact yourself.');
     return false;
   }
 }
+
+/** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
+const HEADLESS_REFUSAL = /not available in a headless/;
+
+/**
+ * Transcripts this long go straight to the built-in compaction: the engine may cap what a hook
+ * can hand back, and nothing here has been measured at that size.
+ */
+const MAX_MESSAGES = 4096;
 
 /**
  * `$.session.cwd()`, or undefined when the engine lacks it or refuses: the rules then fall
@@ -288,13 +304,24 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
     // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
     const cancelSleep = new AbortController();
-    const signal = AbortSignal.any([next.signal, cancelSleep.signal]);
+    // Once next() has been called the compaction is core's: a throw from it is rethrown, never
+    // answered with a second next().
+    let handedOff = false;
+    const handOff = () => {
+      handedOff = true;
+      return next(event);
+    };
     try {
+      const signal = next.signal ? AbortSignal.any([next.signal, cancelSleep.signal]) : cancelSleep.signal;
       if (event.messages.length === 0) {
         notify($, EMPTY_SKIP_REASON, false);
         return { skip: EMPTY_SKIP_REASON };
       }
-      if (wantsSummary(event)) return next(event);
+      if (event.messages.length >= MAX_MESSAGES) {
+        notify($, `${event.messages.length} messages: handed to the built-in compaction untouched`, false);
+        return handOff();
+      }
+      if (wantsSummary(event)) return handOff();
       // A precompute runs in the background ahead of the threshold; what it returns is kept and
       // installed by the compaction that comes, so it runs the real pipeline, gives the forks the
       // ceiling, and reports in the log only (nobody is looking at a toast for it).
@@ -307,13 +334,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (forks) debug($, forks);
       if (gateRatio(result) < config.minReductionRatio) {
         notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
-        return next(event);
+        return handOff();
       }
       notify($, `${prefix}kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, !background);
       return { messages };
     } catch (error) {
+      if (handedOff) throw error;
       notify($, `fallback to built-in summary (${message(error)})`, event.trigger !== 'precompute');
-      return next(event);
+      return handOff();
     } finally {
       cancelSleep.abort();
     }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compactSession, resolveHookConfig, summarize, toSessionMessages } from '../hooks/verbatim.ts';
 import type { Message } from '../src/index.js';
-import { DROP_ALL, harness, NEXT_RESULT } from './harness.ts';
+import { dropAll, harness, NEXT_RESULT } from './harness.ts';
 
 type SessionMessage = Message & { handle?: string };
 const big = 'y'.repeat(3000);
@@ -61,8 +61,8 @@ describe('resolveHookConfig', () => {
 describe('compactSession', () => {
   it('prunes by rules and Claude and keeps untouched engine objects', async () => {
     const input = transcript();
-    const { result, messages } = await compactSession(input, resolveHookConfig({}), async () => ({
-      text: DROP_ALL,
+    const { result, messages } = await compactSession(input, resolveHookConfig({}), async ({ prompt }) => ({
+      text: dropAll(prompt),
     }));
     expect(result.stats).toMatchObject({ byRule: 1, byClaude: 1, claude: 'ran' });
     expect(messages[0]).toBe(input[0]);
@@ -118,7 +118,7 @@ describe('register', () => {
     });
 
     it('returns the pruned messages and toasts on success', async () => {
-      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      const h = harness({ fork: async ({ prompt }) => ({ text: dropAll(prompt) }) });
       const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
       expect(h.nextCalls).toHaveLength(0);
       expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
@@ -138,7 +138,7 @@ describe('register', () => {
     it('cancels the pending timeout sleep once a fast fork wins the race', async () => {
       let sleepSignal: AbortSignal | undefined;
       const h = harness({
-        fork: async () => ({ text: DROP_ALL }),
+        fork: async ({ prompt }) => ({ text: dropAll(prompt) }),
         sleep: (_ms, opts) => { sleepSignal = opts?.signal; return new Promise(() => {}); },
       });
       await h.compact(prunable());
@@ -165,7 +165,7 @@ describe('register', () => {
     });
 
     it('answers precompute with the real pipeline: pruned messages, fork run, log but no toast', async () => {
-      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      const h = harness({ fork: async ({ prompt }) => ({ text: dropAll(prompt) }) });
       const out = (await h.compact({ ...prunable(), trigger: 'precompute' })) as { messages: SessionMessage[] };
       expect(out.messages).toBeDefined();
       expect(out.messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
@@ -199,7 +199,7 @@ describe('register', () => {
     });
 
     it('logs per-fork timings and the wait mode to the debug log', async () => {
-      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      const h = harness({ fork: async ({ prompt }) => ({ text: dropAll(prompt) }) });
       await h.compact(prunable());
       expect(h.debugLogs.join('\n')).toMatch(/scorer: wait race; 1 fork \[1 calls \d+ms ran\]; claude \d+ms; total \d+ms/);
     });
@@ -230,10 +230,48 @@ describe('register', () => {
     });
 
     it('prefixes only the toast; the engine already names the plugin on log lines', async () => {
-      const h = harness({ fork: async () => ({ text: DROP_ALL }) });
+      const h = harness({ fork: async ({ prompt }) => ({ text: dropAll(prompt) }) });
       await h.compact(prunable());
       expect(h.toasts[0]).toMatch(/^verbatim-compaction: /);
       expect(h.logs.every((line) => !line.startsWith('verbatim-compaction'))).toBe(true);
+    });
+
+    it('never calls next() twice: a throw from the handed-off next() is rethrown, not retried', async () => {
+      for (const extra of [{ nextThrows: new Error('core compaction failed') }, { nextThrowsSync: new Error('bad argument') }]) {
+        const h = harness(extra);
+        await expect(h.compact({ trigger: 'auto', messages: claudeOnly() })).rejects.toThrow();
+        expect(h.nextCalls).toHaveLength(1);
+      }
+    });
+
+    it('still falls back to next() once when the pipeline itself throws', async () => {
+      const h = harness();
+      const event = { trigger: 'auto', get messages(): never { throw new Error('bad transcript'); } };
+      expect(await h.compact(event)).toBe(NEXT_RESULT);
+      expect(h.nextCalls).toHaveLength(1);
+    });
+
+    it('works when next() carries no signal', async () => {
+      const h = harness({ noSignal: true, fork: async ({ prompt }) => ({ text: dropAll(prompt) }) });
+      const out = (await h.compact(prunable())) as { messages: SessionMessage[] };
+      expect(out.messages).toBeDefined();
+    });
+
+    it('hands a transcript of 4096 messages or more straight to next(), with a log line', async () => {
+      const h = harness();
+      const many = Array.from({ length: 4096 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `m${i}`));
+      const event = { trigger: 'auto', messages: many };
+      expect(await h.compact(event)).toBe(NEXT_RESULT);
+      expect(h.nextCalls).toEqual([event]);
+      expect(h.forkCalls).toHaveLength(0);
+      expect(h.logs.join('\n')).toMatch(/4096 messages/);
+    });
+
+    it('leaves "0 dropped" out of the summary', async () => {
+      const h = harness();
+      await h.compact(prunable());
+      expect(h.toasts[0]).toMatch(/1 truncated/);
+      expect(h.toasts[0]).not.toMatch(/dropped/);
     });
 
     it('skips an empty transcript itself instead of passing empty messages to next', async () => {
@@ -318,6 +356,16 @@ describe('register', () => {
       expect(h.toasts[0]).toMatch(/headless/);
       expect(h.logs.filter((line) => /auto-compact off/.test(line))).toHaveLength(1);
       expect(h.nextCalls).toHaveLength(3);
+    });
+
+    it('keeps asking after a rejection that is not the headless one (e.g. a turn is running)', async () => {
+      let calls = 0;
+      const busy = new Error('$.session.compact: rejected while a turn runs');
+      const h = harness({ percent: 90, sessionCompact: async () => { calls += 1; throw busy; } });
+      for (let i = 0; i < 3; i += 1) expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      expect(calls).toBe(3);
+      expect(h.toasts.some((t) => /auto-compact off/.test(t))).toBe(false);
+      expect(h.logs.filter((line) => /rejected while a turn runs/.test(line))).toHaveLength(3);
     });
 
     it('ignores subagent turns and turns that did not end in an answer', async () => {

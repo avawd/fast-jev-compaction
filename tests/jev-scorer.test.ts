@@ -73,54 +73,82 @@ describe('jevCandidateLine', () => {
 });
 
 describe('buildJevPrompt', () => {
-  it('asks Jev\'s two questions with the policy text and the JSON reply shape', () => {
+  it('asks Jev\'s two questions with the policy text and the four-list JSON shape', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).toContain('Keep the call when its input still matters.');
     expect(prompt).toContain('Keep the result verbatim only when its exact text is still needed and re-running would not do.');
     expect(prompt).toContain('Prefer truncate over drop unless a later call superseded it.');
-    expect(prompt).toContain('{"result_needed":[],"call_matters":[],"unsure":[]}');
+    expect(prompt).toContain('{"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}');
     expect(prompt).toMatch(/^t1 Read msg 16\/5/m);
   });
 
-  it('asks for lists, never a per-call line or number: the API rejects that shape (probed live, 2.1.281)', () => {
+  it('asks for lists, never a per-call line or number: the API refused that shape (probed live, 2.1.281)', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).not.toMatch(/one line per call|digit|0-9|END/);
+  });
+
+  it('says what each list does truthfully: nothing is "removed with its output", an unlisted call is kept', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).not.toMatch(/removed with its output/);
+    expect(prompt).toContain('Put every call in exactly one list');
+    expect(prompt).toContain('A call left out of every list is kept whole');
+    expect(prompt).toMatch(/drop.*one-line note/);
+  });
+
+  it('tells the fork not to call tools and to reply with the JSON only', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).toContain('Do not call any tool');
+    expect(prompt).toContain('Reply with the JSON object only');
   });
 });
 
 describe('parseJevReply', () => {
-  const ids = new Set(['t1', 't2', 't3', 't4']);
+  const ids = new Set(['t1', 't2', 't3', 't4', 't5']);
+  const all = '"result_needed":["t1"],"call_matters":["t2","t9"],"unsure":["t3"],"drop":["t4","t5"]';
 
-  it('reads the three lists, ignoring unknown ids and prose around the object', () => {
-    const out = parseJevReply('Here:\n{"result_needed":["t1"],"call_matters":["t2","t9"],"unsure":["t3"]}\nok', ids);
+  it('reads the four lists, ignoring unknown ids and prose around the object', () => {
+    const out = parseJevReply(`Here:\n{${all}}\nok`, ids);
     expect(out && [...out.resultNeeded]).toEqual(['t1']);
     expect(out && [...out.callMatters]).toEqual(['t2']);
     expect(out && [...out.unsure]).toEqual(['t3']);
+    expect(out && [...out.drop]).toEqual(['t4', 't5']);
   });
 
-  it('treats a missing unsure list as empty', () => {
-    expect(parseJevReply('{"result_needed":[],"call_matters":["t1"]}', ids)?.unsure.size).toBe(0);
+  it('treats missing unsure and drop lists as empty', () => {
+    const out = parseJevReply('{"result_needed":["t1","t2"],"call_matters":["t3","t4","t5"]}', ids);
+    expect(out?.unsure.size).toBe(0);
+    expect(out?.drop.size).toBe(0);
+  });
+
+  it('rejects a lazy reply that sorts under 80% of the ids asked about (it would otherwise decide nothing for most)', () => {
+    expect(parseJevReply('{"result_needed":[],"call_matters":[],"unsure":[],"drop":["t1","t2","t3"]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":["t1"],"call_matters":[],"unsure":[],"drop":["t2","t3","t4"]}', ids)).toBeDefined();
+    const forty = new Set(Array.from({ length: 40 }, (_, i) => `t${i + 1}`));
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3"],"unsure":[],"drop":[]}', forty)).toBeUndefined();
   });
 
   it('rejects anything that is not the full object: no JSON, a cut-off reply, a missing or mistyped list', () => {
     expect(parseJevReply('nope', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":["t1"],"call_matters":["t2"', ids)).toBeUndefined();
-    expect(parseJevReply('{"result_needed":["t1"]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":["t1","t2","t3","t4"]}', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":"t1","call_matters":[]}', ids)).toBeUndefined();
-    expect(parseJevReply('{"result_needed":[],"call_matters":[],"unsure":[1]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[1]}', ids)).toBeUndefined();
   });
 });
 
 describe('decide', () => {
   const answer = {
-    resultNeeded: new Set(['t1', 't4']), callMatters: new Set(['t2', 't4']), unsure: new Set(['t3', 't4']),
+    resultNeeded: new Set(['t1', 't4']), callMatters: new Set(['t2', 't4', 't5']), unsure: new Set(['t3', 't4']),
+    drop: new Set(['t5', 't6']),
   };
 
-  it('result_needed keeps, call_matters truncates, neither drops; the safer list wins an overlap', () => {
+  it('result_needed keeps, call_matters truncates, drop drops, absent keeps; the list that keeps more wins an overlap', () => {
     expect(decide('t1', answer, 0.5)).toBe('keep');
     expect(decide('t2', answer, 0.5)).toBe('drop_result');
     expect(decide('t4', answer, 0.5)).toBe('keep');
-    expect(decide('t9', answer, 0.5)).toBe('drop_call');
+    expect(decide('t5', answer, 0.5)).toBe('drop_result');
+    expect(decide('t6', answer, 0.5)).toBe('drop_call');
+    expect(decide('t9', answer, 0.5)).toBe('keep');
   });
 
   it('maps unsure through keepThreshold: below 0.5 keep, up to 0.75 truncate, above drop', () => {

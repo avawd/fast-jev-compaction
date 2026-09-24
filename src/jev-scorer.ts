@@ -37,12 +37,20 @@ export interface JevContext {
   messageCount: number;
 }
 
-/** The fork's answer: which calls fall in each list. A call in none of them is dropped. */
+/** The fork's answer: which calls fall in each list. A call in none of them is kept. */
 export interface JevAnswer {
   resultNeeded: Set<string>;
   callMatters: Set<string>;
   unsure: Set<string>;
+  drop: Set<string>;
 }
+
+/**
+ * Least share of a chunk's ids the four lists together must cover. A reply that sorts fewer
+ * (a lazy "these 3 of 40 can go") is read as unparseable, so the chunk is retried and its calls
+ * are kept, rather than treated as a complete answer.
+ */
+export const MIN_COVERAGE = 0.8;
 
 export type JevAction = 'keep' | 'drop_result' | 'drop_call';
 
@@ -111,12 +119,12 @@ export function toWellFormed(text: string): string {
  */
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
   return toWellFormed([
-    'Context maintenance request. Do not continue the task and do not call tools.',
+    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request.',
     'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
     'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
-    'Reply with JSON only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[]}',
-    'A call in result_needed is kept whole; one only in call_matters or in unsure keeps the call but its output is truncated; one in none of them is removed with its output.',
+    'Put every call in exactly one list: result_needed keeps it whole; call_matters and unsure keep the call and cut its output to its start; drop cuts its output to a one-line note. A call left out of every list is kept whole.',
+    'Reply with the JSON object only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}',
     '',
     ...calls.map((call) => jevCandidateLine(call, ctx)),
   ].join('\n'));
@@ -128,10 +136,10 @@ function idList(value: unknown, ids: ReadonlySet<string>): Set<string> | undefin
 }
 
 /**
- * Parses the reply's JSON object (first `{` to last `}`). `result_needed` and
- * `call_matters` must both be string arrays and `unsure` one when present;
- * anything else, a cut-off reply included, is undefined and decides nothing,
- * since an absent id means "drop". Unknown ids are ignored.
+ * Parses the reply's JSON object (first `{` to last `}`). `result_needed` and `call_matters`
+ * must be string arrays, and `unsure` and `drop` too when present. Anything else, a cut-off reply
+ * included, is undefined and decides nothing, as is a reply whose lists cover fewer than
+ * MIN_COVERAGE of `ids`. Unknown ids are ignored.
  */
 export function parseJevReply(text: string, ids: ReadonlySet<string>): JevAnswer | undefined {
   const start = text.indexOf('{');
@@ -145,11 +153,15 @@ export function parseJevReply(text: string, ids: ReadonlySet<string>): JevAnswer
   }
   if (parsed === null || typeof parsed !== 'object') return undefined;
   const record = parsed as Record<string, unknown>;
+  const optional = (key: string) => (record[key] === undefined ? new Set<string>() : idList(record[key], ids));
   const resultNeeded = idList(record['result_needed'], ids);
   const callMatters = idList(record['call_matters'], ids);
-  const unsure = record['unsure'] === undefined ? new Set<string>() : idList(record['unsure'], ids);
-  if (!resultNeeded || !callMatters || !unsure) return undefined;
-  return { resultNeeded, callMatters, unsure };
+  const unsure = optional('unsure');
+  const drop = optional('drop');
+  if (!resultNeeded || !callMatters || !unsure || !drop) return undefined;
+  const covered = new Set([...resultNeeded, ...callMatters, ...unsure, ...drop]);
+  if (covered.size < MIN_COVERAGE * ids.size) return undefined;
+  return { resultNeeded, callMatters, unsure, drop };
 }
 
 /**
@@ -162,9 +174,15 @@ export function unsureAction(keepThreshold: number): JevAction {
   return keepThreshold <= 0.75 ? 'drop_result' : 'drop_call';
 }
 
-/** Jev's decision per call; when lists overlap the one that keeps more wins. */
+/**
+ * Jev's decision per call: result_needed keeps, call_matters truncates, unsure follows
+ * keepThreshold, drop drops, and a call in no list is kept. When lists overlap the one that
+ * keeps more wins.
+ */
 export function decide(id: string, answer: JevAnswer, keepThreshold: number): JevAction {
   if (answer.resultNeeded.has(id)) return 'keep';
+  const listed = answer.callMatters.has(id) || answer.unsure.has(id) || answer.drop.has(id);
+  if (!listed) return 'keep';
   const unsure = answer.unsure.has(id) ? unsureAction(keepThreshold) : 'drop_call';
   if (unsure === 'keep') return 'keep';
   return answer.callMatters.has(id) ? 'drop_result' : unsure;

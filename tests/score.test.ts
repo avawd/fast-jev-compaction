@@ -17,7 +17,8 @@ describe('makeScorer', () => {
     let prompt = '';
     const fork: ForkFn = async (req) => {
       prompt = req.prompt;
-      return { text: '{"result_needed":[],"call_matters":[],"unsure":[]}' };
+      const ids = [...req.prompt.matchAll(/^(t\d+) /gm)].map((m) => m[1]);
+      return { text: JSON.stringify({ result_needed: [], call_matters: [], unsure: [], drop: ids }) };
     };
     const out = await makeScorer({ fork, useClaudeScorer: true, maxCandidates: 400 })(calls);
     expect(prompt).toMatch(/^t2 Bash/m);
@@ -77,10 +78,11 @@ describe('makeScorer', () => {
 });
 
 describe('evidence protection', () => {
-  // The fork replies as if it wanted every listed call gone: in none of the lists means drop.
+  // The fork replies as if it wanted every listed call gone.
   const greedy = (seen: string[]): ForkFn => async (req) => {
     seen.push(req.prompt);
-    return { isAnswered: true, text: JSON.stringify({ result_needed: [], call_matters: [], unsure: [] }) };
+    const ids = [...req.prompt.matchAll(/^(t\d+) /gm)].map((m) => m[1]);
+    return { isAnswered: true, text: JSON.stringify({ result_needed: [], call_matters: [], unsure: [], drop: ids }) };
   };
 
   it('never offers the later Grep that justified dropping an identical earlier one', async () => {

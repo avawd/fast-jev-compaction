@@ -37,12 +37,16 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    an edit's input does not, because the edit itself can be dropped.
 2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
    about each remaining call: must its **result** stay verbatim, and does the **call** itself still
-   matter? The answer is three id lists, `{"result_needed":[…],"call_matters":[…],"unsure":[…]}`:
-   result needed keeps the call whole, call matters truncates its output, `unsure` follows
-   `keepThreshold`, and a call in no list is removed. Candidates are split into chunks of
-   `forkChunkSize` (60), one fork per chunk, all concurrent; each reuses the session's prompt cache,
-   so three forks take about as long as one (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose
-   fork fails or whose reply does not parse decides nothing, and its calls are kept.
+   matter? The answer is four id lists,
+   `{"result_needed":[…],"call_matters":[…],"unsure":[…],"drop":[…]}`: result needed keeps the call
+   whole, call matters truncates its output, `unsure` follows `keepThreshold`, `drop` cuts the output to
+   a one-line note (the call row stays: Claude Code hands each block over as its own message), and a
+   call in no list is kept. A reply whose lists cover under 80% of the chunk's calls counts as
+   unparseable, so a lazy "these three can go" never decides for the other 37. Candidates are split into
+   chunks of `forkChunkSize` (60), one fork per chunk, all concurrent but never more than 8 (past that,
+   chunks grow); each reuses the session's prompt cache, so three forks take about as long as one
+   (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose fork fails or whose reply does not parse is
+   re-asked whole once, then as two halves; whatever still fails decides nothing, and its calls are kept.
    The forks race the short `claudeTimeoutMs` only when the rules alone already clear
    `minReductionRatio`; otherwise they are the only way to clear it, so they may take up to 45 s.
    A subagent's own compaction uses the rules only (the fork can only fork the main session).
@@ -59,7 +63,7 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    How often they fire depends on the whole request, and long tool inputs set them off most: in a
    security-heavy session, candidate lines carrying Bash commands of up to 400 characters were refused
    on 3 of 4 first tries, while the same lines cut to 200 characters passed 8 of 8. So a call's input is
-   shown up to 200 characters. A chunk that is still refused is re-asked once as two halves.
+   shown up to 200 characters. A chunk that is still refused is re-asked whole once, then as two halves.
 
 If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
 thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
@@ -69,8 +73,9 @@ runs instead. So does
 
 **Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
 refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
-as a `/compact` prompt). After the first refusal the plugin stops asking for the rest of the session and
-says so once (a toast and a log line). Send `/compact` yourself, or rely on Claude Code's own
+as a `/compact` prompt). After that refusal (its message says "not available in a headless … session")
+the plugin stops asking for the rest of the session and says so once (a toast and a log line). Any other
+rejection, such as one while a turn is running, is logged and the request is tried again next turn. Send `/compact` yourself, or rely on Claude Code's own
 auto-compaction, which this plugin's `session.compact` hook still handles.
 
 ### What changes in a pruned message
