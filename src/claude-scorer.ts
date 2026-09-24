@@ -1,3 +1,4 @@
+import { sliceWhole } from './text.js';
 import type { ClaudeStatus, ToolCall, Verdict } from './types.js';
 
 /**
@@ -28,7 +29,7 @@ const TIMED_OUT = Symbol('timeout');
 const INPUT_CHARS = 120;
 
 function clip(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+  return text.length <= limit ? text : `${sliceWhole(text, limit - 1)}…`;
 }
 
 export function candidateLine(call: ToolCall): string {

@@ -1,4 +1,5 @@
 import { collectToolCalls } from './calls.js';
+import { sliceWhole } from './text.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -36,8 +37,9 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - headChars} chars of this tool result${
+  const kept = sliceWhole(text, headChars);
+  const head = kept.length > 0 ? `${kept}\n` : '';
+  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }

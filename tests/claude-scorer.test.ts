@@ -22,6 +22,15 @@ describe('candidate list', () => {
     expect(line.length).toBeLessThan(160);
   });
 
+  it('never clips an input between the two halves of a surrogate pair', () => {
+    // {"command":" is 12 characters, so the clip at 119 lands on the emoji's high half.
+    const line = candidateLine(c('t3', 'Bash', { command: `${'x'.repeat(106)}\u{1F600}${'y'.repeat(50)}` }));
+    const input = line.slice(line.indexOf('{'), line.indexOf('…'));
+    const last = input.charCodeAt(input.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(input.endsWith('x')).toBe(true);
+  });
+
   it('caps by largest results and keeps transcript order', () => {
     const many = [c('t1', 'A', {}, 5), c('t2', 'B', {}, 50), c('t3', 'C', {}, 500)];
     expect(selectCandidates(many, 2).map((x) => x.id)).toEqual(['t2', 't3']);

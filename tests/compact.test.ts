@@ -118,6 +118,30 @@ describe('compact', () => {
   });
 });
 
+describe('surrogate pairs', () => {
+  const isLoneHigh = (text: string, at: number) => {
+    const code = text.charCodeAt(at);
+    return code >= 0xd800 && code <= 0xdbff && !(text.charCodeAt(at + 1) >= 0xdc00 && text.charCodeAt(at + 1) <= 0xdfff);
+  };
+
+  it('never cuts a truncated result between the two halves of a surrogate pair', async () => {
+    // With truncateHeadChars 300, a naive cut keeps index 299: the high half of the emoji.
+    const text = `${'a'.repeat(299)}\u{1F600}${'b'.repeat(4000)}`;
+    const input = [
+      msg('user', 'go'), msg('assistant', 'Reading.', { toolUses: [{ tool_use_id: 'u1', tool: 'Read', input: {} }] }),
+      res('u1', text), ...transcript().slice(5),
+    ];
+    const scorer: Scorer = async () => ({ claude: 'ran', verdicts: new Map([['t1', { action: 'drop_result', source: 'claude' }]]) });
+    const out = await compact(input, scorer, { preserveRecentMessages: 6, truncateHeadChars: 300 });
+    const kept = out.messages[2]?.toolResults?.[0]?.text ?? '';
+    expect(kept).not.toBe(text);
+    const head = kept.slice(0, kept.indexOf('\n'));
+    expect(isLoneHigh(head, head.length - 1)).toBe(false);
+    expect(head).toBe('a'.repeat(299));
+    expect(kept).toContain('truncated 4002 chars');
+  });
+});
+
 describe('resolveOptions', () => {
   it('uses defaults for missing, NaN and infinite values', () => {
     expect(resolveOptions()).toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300 });

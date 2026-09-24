@@ -4,3 +4,4 @@ export * from './compact.js';
 export * from './rules.js';
 export * from './claude-scorer.js';
 export * from './score.js';
+export * from './text.js';
