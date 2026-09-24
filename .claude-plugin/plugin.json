@@ -10,6 +10,6 @@
     "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },
     "maxCandidates": { "type": "number", "title": "Maximum Claude candidates", "description": "Most tool calls listed for the Claude fork, largest outputs first.", "default": 400 },
     "useClaudeScorer": { "type": "boolean", "title": "Use Claude scorer", "description": "Ask one tool-less fork of the session about calls the rules leave undecided. Off: rules only, no model call.", "default": true },
-    "claudeTimeoutMs": { "type": "number", "title": "Claude scorer timeout (ms)", "description": "How long the fork may take; past it the rules alone decide. Clamped to [500, 9000] ms, under the ten seconds the engine's test kit allows (not declared for live hooks).", "default": 6000 }
+    "claudeTimeoutMs": { "type": "number", "title": "Claude scorer timeout (ms)", "description": "How long the fork may take; past it the rules alone decide. Clamped to [500, 45000] ms. Waiting on the fork does not use up the hook's ten-second budget (measured on 2.1.281).", "default": 20000 }
   }
 }

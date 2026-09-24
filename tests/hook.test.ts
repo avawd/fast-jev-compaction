@@ -25,7 +25,7 @@ describe('resolveHookConfig', () => {
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
-      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 6000,
+      truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 20000,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({
@@ -33,16 +33,16 @@ describe('resolveHookConfig', () => {
     });
   });
 
-  it('clamps claudeTimeoutMs to [500, 9000]', () => {
+  it('clamps claudeTimeoutMs to [500, 45000]', () => {
     expect(resolveHookConfig({ claudeTimeoutMs: -5 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 0 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 499 }).claudeTimeoutMs).toBe(500);
     expect(resolveHookConfig({ claudeTimeoutMs: 500 }).claudeTimeoutMs).toBe(500);
-    expect(resolveHookConfig({ claudeTimeoutMs: 9000 }).claudeTimeoutMs).toBe(9000);
-    expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(9000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(6000);
-    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(6000);
-    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(6000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 45_000 }).claudeTimeoutMs).toBe(45_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: 50_000 }).claudeTimeoutMs).toBe(45_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Number.NaN }).claudeTimeoutMs).toBe(20_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: Infinity }).claudeTimeoutMs).toBe(20_000);
+    expect(resolveHookConfig({ claudeTimeoutMs: '3000' as unknown as number }).claudeTimeoutMs).toBe(20_000);
     expect(resolveHookConfig({ claudeTimeoutMs: 1234.5 }).claudeTimeoutMs).toBe(1234.5);
   });
 });
@@ -121,7 +121,7 @@ describe('register', () => {
       expect(out.messages).toBeDefined();
       expect(h.toasts[0]).toMatch(/rules 1, claude 0 \(timeout\)/);
       expect(h.sleeps).toHaveLength(1);
-      expect(h.sleeps[0]?.ms).toBe(6000);
+      expect(h.sleeps[0]?.ms).toBe(20000);
     });
 
     it('cancels the pending timeout sleep once a fast fork wins the race', async () => {

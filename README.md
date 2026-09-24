@@ -46,7 +46,7 @@ claude plugin install verbatim-compaction@verbatim-compaction
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
 | `useClaudeScorer` | true | `false` = rules only, no model call |
-| `claudeTimeoutMs` | 6000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–9000 ms, well under the hook's time budget (ten seconds in the engine's test kit; not declared for live hooks) |
+| `claudeTimeoutMs` | 20000 | Longest wait for the fork; past it the rules alone decide. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 
 ## Cost
 

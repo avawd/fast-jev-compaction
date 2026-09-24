@@ -27,7 +27,7 @@
 | Call | Where | Why |
 | --- | --- | --- |
 | `$.model.fork` | `session.compact`, non-subagent, non-precompute | Stage 2 scoring of the calls rules left undecided |
-| `$.clock.sleep` | `session.compact` | Bounds the fork to `claudeTimeoutMs`; combined with `next.signal` through a local `AbortController` and `AbortSignal.any`, so a fast fork (or an error) cancels the wait as soon as the compaction settles instead of leaving it pending until the timeout elapses or the dispatch ends |
+| `$.clock.sleep` | `session.compact` | Bounds the fork to `claudeTimeoutMs`; combined with `next.signal` through a local `AbortController` and `AbortSignal.any`, so a fast fork (or an error) cancels the wait as soon as the compaction settles instead of leaving it pending until the timeout elapses or the dispatch ends. The sleep does not spend the hook's 10 s budget while the fork is pending (measured on 2.1.281), so the timeout may be longer than the budget |
 | `$.session.usage` | `turn.complete` | Reads `context.percent` to decide whether to request compaction |
 | `$.session.compact` | `turn.complete` | Requests the compaction this module's own `session.compact` hook then handles |
 | `$.ui.log` | both, via `notify` | Always-on record of what happened, including the precompute skip |

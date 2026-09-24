@@ -17,15 +17,22 @@ export type HookConfig = {
   useClaudeScorer: boolean;
   /**
    * Past this the fork is abandoned and rules alone decide. Clamped to
-   * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS]; the only declared budget
-   * figure is the ten seconds the engine's test kit allows (not declared for
-   * live hooks).
+   * [MIN_CLAUDE_TIMEOUT_MS, MAX_CLAUDE_TIMEOUT_MS].
    */
   claudeTimeoutMs: number;
 };
 
+/**
+ * The hook's 10 s budget (HookBudget.ms) counts only its own time: it stops while any `$` call
+ * is in flight. The declaration excepts a `$.clock` wait, so a live probe settled whether
+ * racing `$.clock.sleep` against the fork restarts it. On 2.1.281 a turn.complete hook that
+ * raced a fork against `$.clock.sleep(30000)` ran 30,007 ms of wall time, was not cut, and read
+ * `next.budget.remainingMs` 9999 both before and after: the in-flight fork holds the clock.
+ * So the timeout may exceed ten seconds. The ceiling stays under the 60 s a headless session
+ * waits on turn events before ending the turn without them.
+ */
 const MIN_CLAUDE_TIMEOUT_MS = 500;
-const MAX_CLAUDE_TIMEOUT_MS = 9000;
+const MAX_CLAUDE_TIMEOUT_MS = 45_000;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
@@ -34,7 +41,7 @@ const DEFAULTS: HookConfig = {
   truncateHeadChars: 300,
   maxCandidates: 400,
   useClaudeScorer: true,
-  claudeTimeoutMs: 6000,
+  claudeTimeoutMs: 20_000,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
