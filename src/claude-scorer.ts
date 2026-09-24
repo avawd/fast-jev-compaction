@@ -210,6 +210,10 @@ export async function scoreWithClaude(
   let expired = false;
   if (options.timeout) {
     const expiry = options.timeout.sleep(options.timeout.timeoutMs).then(() => { expired = true; });
+    // Only a fork's race subscribes to this, and forkWithin calls fork() before it subscribes: if every
+    // fork throws synchronously nothing ever watches it, and the engine's sleep rejecting on the hook's
+    // abort becomes an unhandled rejection. This handler watches it for them; the races still see it.
+    expiry.catch(() => {});
     shared = { timeoutMs: options.timeout.timeoutMs, sleep: () => expiry };
   }
   const results = await Promise.all(

@@ -30,7 +30,7 @@ describe('fuzz regressions', () => {
   // (claude-scorer.ts:208) is only ever observed through forkWithin's race (:73), and forkWithin
   // calls fork() (:71) before it subscribes; when every fork throws synchronously nobody
   // observes the deadline, and its rejection is unhandled.
-  it.fails('KNOWN BUG: a clock rejection is unhandled when every fork throws synchronously', async () => {
+  it('a clock rejection stays handled when every fork throws synchronously', async () => {
     const fork = (() => { throw new Error('no fork'); }) as unknown as ForkFn;
     const leaked = await unhandledDuring(async () => {
       const controller = new AbortController();

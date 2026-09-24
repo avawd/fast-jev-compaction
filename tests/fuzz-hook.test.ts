@@ -21,7 +21,7 @@ const SETTLE_MS = 3000;
  * synchronously'. While it stands, forks here never throw synchronously (no absent `$.model.fork`,
  * no sync-throw reply); set false once it is fixed, so the fuzz covers that path again.
  */
-const KNOWN_BUG_SYNC_FORK_THROW = true;
+const KNOWN_BUG_SYNC_FORK_THROW = false;
 
 const unhandled: unknown[] = [];
 const trap = (reason: unknown) => { unhandled.push(reason); };
