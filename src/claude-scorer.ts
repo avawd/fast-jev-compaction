@@ -133,6 +133,24 @@ function forkWithin(
   return Promise.race([reply, expiry]);
 }
 
+/**
+ * Runs one fork and reduces every outcome to its text or the status naming why there is none:
+ * a throw is `error`, the timeout `timeout`, an unanswered reply its engine reason.
+ */
+export async function runFork(
+  fork: ForkFn,
+  prompt: string,
+  timeout?: ForkTimeout,
+): Promise<{ text: string } | { status: ClaudeStatus }> {
+  let reply: ForkReply | typeof TIMED_OUT;
+  try {
+    reply = await forkWithin(fork, prompt, timeout);
+  } catch {
+    return { status: 'error' };
+  }
+  return reply === TIMED_OUT ? { status: 'timeout' } : replyText(reply);
+}
+
 export async function scoreWithClaude(
   fork: ForkFn,
   calls: readonly ToolCall[],
@@ -141,14 +159,7 @@ export async function scoreWithClaude(
 ): Promise<{ verdicts: Map<string, Verdict>; status: ClaudeStatus }> {
   const candidates = selectCandidates(calls, maxCandidates);
   if (candidates.length === 0) return { verdicts: new Map(), status: 'skipped' };
-  let reply: ForkReply | typeof TIMED_OUT;
-  try {
-    reply = await forkWithin(fork, buildPrompt(candidates), timeout);
-  } catch {
-    return { verdicts: new Map(), status: 'error' };
-  }
-  if (reply === TIMED_OUT) return { verdicts: new Map(), status: 'timeout' };
-  const answer = replyText(reply);
+  const answer = await runFork(fork, buildPrompt(candidates), timeout);
   if ('status' in answer) return { verdicts: new Map(), status: answer.status };
   const verdicts = parseReply(answer.text, new Set(candidates.map((x) => x.id)));
   return verdicts ? { verdicts, status: 'ran' } : { verdicts: new Map(), status: 'unparseable' };

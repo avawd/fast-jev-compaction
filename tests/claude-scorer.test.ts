@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildPrompt, candidateLine, parseReply, scoreWithClaude, selectCandidates,
+  buildPrompt, candidateLine, parseReply, runFork, scoreWithClaude, selectCandidates,
   type ForkFn, type ToolCall,
 } from '../src/index.js';
 
@@ -125,5 +125,15 @@ describe('scoreWithClaude', () => {
     const out = await scoreWithClaude(bad, calls, 400);
     expect(out.status).toBe('empty');
     expect(out.verdicts.size).toBe(0);
+  });
+});
+
+describe('runFork', () => {
+  it('reduces every outcome to text or a status', async () => {
+    expect(await runFork(async () => ({ isAnswered: true, text: 'hi' }), 'p')).toEqual({ text: 'hi' });
+    expect(await runFork(async () => ({ text: 'old' }), 'p')).toEqual({ text: 'old' });
+    expect(await runFork(async () => ({ isAnswered: false, reason: 'api-error', status: 500 }), 'p')).toEqual({ status: 'api-error 500' });
+    expect(await runFork(async () => { throw new Error('x'); }, 'p')).toEqual({ status: 'error' });
+    expect(await runFork(() => new Promise(() => {}), 'p', { timeoutMs: 5, sleep: async () => {} })).toEqual({ status: 'timeout' });
   });
 });
