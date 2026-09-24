@@ -68,6 +68,9 @@ describe('compactSession', () => {
     expect(messages[0]).toBe(input[0]);
     expect(messages.some((x) => x.toolUses.some((t) => t.tool_use_id === 'u3'))).toBe(false);
     expect(summarize(result)).toMatch(/rules 1, claude 1 \(ran \d+\.\ds\)/);
+    // "kept 10/10 messages … kept 0" read as "nothing changed": the per-call figure is named for what it is.
+    expect(summarize(result)).toMatch(/untouched \d+, pinned \d+/);
+    expect(summarize(result)).not.toMatch(/kept \d+, pinned/);
   });
 
   it('is rules-only without a fork', async () => {
@@ -341,8 +344,26 @@ describe('register', () => {
       await Promise.all([first, second]);
       expect(h.usageCalls).toBe(1);
       expect(h.compactCalls).toBe(1);
+    });
+
+    it('does not compact again until usage has dropped back under the threshold (hysteresis)', async () => {
+      // A verbatim prune can leave context above the threshold; compacting again on the very next turn
+      // finds little left to prune and falls back to a full summary (seen live, interactive run i2).
+      let percent = 90;
+      const h = harness({ percent: async () => percent });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      await h.turnComplete(answered);
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      expect(h.debugLogs.some((line) => /waiting for context to drop under 60%/.test(line))).toBe(true);
+      percent = 30;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      percent = 75;
       await h.turnComplete(answered);
       expect(h.compactCalls).toBe(2);
+      expect(h.nextCalls).toHaveLength(5);
     });
 
     it('stops asking after $.session.compact rejects (headless), and says so once', async () => {

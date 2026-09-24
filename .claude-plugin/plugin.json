@@ -1,6 +1,6 @@
 {
   "name": "verbatim-compaction",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
   "license": "MIT",
   "userConfig": {

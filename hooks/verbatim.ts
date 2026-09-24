@@ -186,7 +186,7 @@ function claudeStage(stats: CompactResult['stats']): string {
 export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
-    `kept ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}`;
+    `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */
@@ -253,21 +253,25 @@ const EMPTY_SKIP_REASON = 'nothing to compact yet';
  * takes as final for the session: asking again every turn would only repeat the same failure.
  * Top-level because the engine follows `$` only into functions declared at the top of the file.
  */
-async function requestCompaction($: EngineInterface): Promise<boolean> {
+/**
+ * `compacted` when the engine ran the compaction, `retry` when it refused for now (a turn is running),
+ * `off` when it refused for good (a headless session).
+ */
+async function requestCompaction($: EngineInterface): Promise<'compacted' | 'retry' | 'off'> {
   try {
     await $.session.compact();
-    return true;
+    return 'compacted';
   } catch (error) {
     const text = message(error);
     // Only the headless refusal is final: 2.1.281 also rejects while a turn runs, which the
     // next turn can get past.
     if (!HEADLESS_REFUSAL.test(text)) {
       notify($, `auto-compact not requested this turn (${text}); will try again next turn`, false);
-      return true;
+      return 'retry';
     }
     notify($, `auto-compact off for this session: $.session.compact() was refused (${text}). ` +
       'In a headless (-p / SDK) session send /compact yourself.');
-    return false;
+    return 'off';
   }
 }
 
@@ -298,6 +302,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   let compacting = false;
   let autoCompactOff = false;
+  // Set once this plugin's own request compacted; cleared when usage reads under the threshold again.
+  // Without it a prune that leaves context above the threshold is followed by another compaction on
+  // the very next turn, which has little left to prune and falls back to a full built-in summary.
+  let awaitingDrop = false;
   // register() has no `$`, so the effective config is logged by the first hook that runs.
   let configLogged = false;
 
@@ -355,8 +363,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
     compacting = true;
     try {
       const { context } = await $.session.usage();
-      debug($, `context ${context.percent ?? 0}% (compacts at ${config.compactAtPercent}%)`);
-      if ((context.percent ?? 0) >= config.compactAtPercent) autoCompactOff = !(await requestCompaction($));
+      const percent = context.percent ?? 0;
+      debug($, `context ${percent}% (compacts at ${config.compactAtPercent}%)`);
+      if (percent < config.compactAtPercent) awaitingDrop = false;
+      else if (awaitingDrop) debug($, `waiting for context to drop under ${config.compactAtPercent}% before compacting again`);
+      else {
+        const outcome = await requestCompaction($);
+        autoCompactOff = outcome === 'off';
+        awaitingDrop = outcome === 'compacted';
+      }
     } catch (error) {
       notify($, `auto-compact skipped (${message(error)})`, false);
     } finally {
