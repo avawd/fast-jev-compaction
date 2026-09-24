@@ -113,7 +113,7 @@ debug log names the keys it looked for).
 | `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
 | `truncateTailChars` | 1000 | Characters also kept from the end of a log-like result, or to hold a pinned token |
-| `staleAfterMessages` | 60 | Read and Bash file-read results older than this many messages are truncated |
+| `staleAfterMessages` | 100 | Read and Bash file-read results older than this many messages are truncated. Counted in the same units as `preserveRecentMessages` (one per content block); 100 is about 60 merged user/assistant messages |
 | `pinReferenced` | true | Never drop a result whose introduced tokens are quoted later |
 | `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
 | `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |

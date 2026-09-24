@@ -8,7 +8,7 @@ const m = (role: Message['role'], text: string, extra: Partial<Message> = {}): M
 describe('resolveHookConfig (Stage 2a options)', () => {
   it('defaults the rule options and reads them from userConfig', () => {
     expect(resolveHookConfig({})).toMatchObject({
-      truncateTailChars: 1000, staleAfterMessages: 60, pinReferenced: true, stripMcpFurniture: true,
+      truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
     });
     expect(resolveHookConfig({ truncateTailChars: 500, staleAfterMessages: 30, pinReferenced: false, stripMcpFurniture: false }))
       .toMatchObject({ truncateTailChars: 500, staleAfterMessages: 30, pinReferenced: false, stripMcpFurniture: false });

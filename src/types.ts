@@ -141,7 +141,7 @@ export interface CompactOptions {
   truncateHeadChars?: number;
   /** Extra characters kept from the end of a log-like result (test/build/deploy...). Default 1000. */
   truncateTailChars?: number;
-  /** Read and Bash file-read results older than this many messages are truncated. Default 60. */
+  /** Read and Bash file-read results older than this many messages (one per content block) are truncated. Default 100. */
   staleAfterMessages?: number;
   /** Never drop a result whose introduced tokens are quoted later. Default true. */
   pinReferenced?: boolean;
