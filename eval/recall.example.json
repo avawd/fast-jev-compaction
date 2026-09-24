@@ -1,0 +1,21 @@
+{
+  "description": "Template. Copy to eval/recall.local.json (gitignored) or pass --config / VC_EVAL_RECALL. 'basic' = facts the assistant echoed in its own text (a summary can keep them); 'hard' = facts that appeared ONLY in a tool result (pick them with `npm run eval:offline -- --facts <session.jsonl>` and confirm they are absent from every assistant text) - only verbatim retention answers those. Tokens match case-insensitively as substrings of the answer.",
+  "session": "<session-id to fork>",
+  "cwd": "/absolute/path/the/session/ran/in",
+  "sets": [
+    {
+      "name": "basic",
+      "question": "Without using any tools, answer from this conversation only, one short line each: (1) ... Say 'unknown' for anything you cannot recall.",
+      "expected": [
+        "<token>"
+      ]
+    },
+    {
+      "name": "hard",
+      "question": "Without using any tools, answer from this conversation only, one short line each: (1) in the <command> output near the start, which <value> ...? Say 'unknown' for anything you cannot recall.",
+      "expected": [
+        "<token only in a tool result>"
+      ]
+    }
+  ]
+}

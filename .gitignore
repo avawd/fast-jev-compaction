@@ -7,3 +7,5 @@ dist
 *.p12
 .claude/settings.local.json
 .npmrc
+eval/out
+eval/*.local.json
