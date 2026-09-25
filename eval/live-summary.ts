@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { strataLines } from './diagnose.ts';
 import { contextBlob } from './facts.ts';
 import { liveFactRows, type LiveFactRow } from './live-facts.ts';
-import { carriedPrefix, loadSegments } from './parse.ts';
+import { compactedContext, loadSegments } from './parse.ts';
 import type { RecallFact } from './recall-gen.ts';
 
 interface RecallSet {
@@ -188,12 +188,12 @@ async function retention(transcript: string, tokens: string[]): Promise<Retentio
   const pre = segs[lastBoundary]!.messages;
   const next = segs[lastBoundary + 1]!;
   // After a summary fallback the context is the summary message; after a verbatim compaction, the carried rows.
-  const carried = next.startsWithSummary ? next.messages.slice(0, 1) : carriedPrefix(pre, next.messages);
+  const { summary, context } = compactedContext(pre, next.messages, next.startsWithSummary);
   const before = contextBlob(pre);
-  const after = contextBlob(carried);
+  const after = contextBlob(context);
   const byToken: Retention['byToken'] = {};
   for (const t of tokens) byToken[t] = { before: before.includes(t), after: after.includes(t) };
-  return { preMessages: pre.length, carried: carried.length, summary: next.startsWithSummary, byToken };
+  return { preMessages: pre.length, carried: context.length, summary, byToken };
 }
 
 async function main(): Promise<void> {

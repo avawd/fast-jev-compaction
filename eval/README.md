@@ -222,6 +222,24 @@ A hit is a case-insensitive substring of the joined answers, as for the hand-wri
 turn that used a tool still scores 0. `live.sh --no-plugin` loads neither plugin copy, so `/compact`
 runs the built-in summary. Any enabled load of the plugin is then reported as `WRONG COPY`.
 
+**Two hazards measured on the first large run (2026-09-24):**
+
+- **A session larger than the resume window measures a different path.** A resumed `claude -p` had an
+  effective window of 680k tokens. Two sessions, whose last segments had lived in a larger window,
+  resumed at 965k and 980k tokens. The engine auto-compacted them before any main-thread turn. The forks
+  cannot run then (`no main-thread response to fork yet`), so the rules pruned alone. The run's `/compact`
+  was then a second compaction with ~1–2% left to prune, and it fell back to the built-in summary. Pick
+  sessions whose `pre_tokens` on a trial run are under `compactAtPercent` of that window, or treat the run
+  as a measurement of the fallback path.
+- **A live session can compact between runs.** A set generated from a session that is still in use
+  describes the segment as it was. Once that session compacts, a later `--resume` forks the new segment,
+  and `ctx before` drops towards 0. Compare arms only on runs whose `ctx before` is complete.
+
+`carriedPrefix` matches rows **in order**. As a set match, an empty thinking row after the carried rows
+matched any empty row and extended the prefix by one. `compactedContext` separates a summary fallback
+from a verbatim compaction that carried an older summary row first. `startsWithSummary` alone called
+both a summary.
+
 ## Baselines (2026-09-24)
 
 `laterRef lost` uses the definition above; earlier tables in this file's history over-counted it.

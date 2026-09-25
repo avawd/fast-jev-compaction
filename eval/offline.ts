@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { contextBlob, factSets, resultsById, survival, type FactSets, type Survival } from './facts.ts';
-import { carriedPrefix, loadSegments, type Segment } from './parse.ts';
+import { compactedContext, loadSegments, type Segment } from './parse.ts';
 import { ARMS, loadPlugin, runArm, type Arm, type PluginApi } from './plugin.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -115,11 +115,12 @@ function loadCorpus(path: string): CorpusEntry[] {
 function nextReport(segs: Segment[], seg: Segment, facts: FactSets): SegmentReport['next'] {
   const next = segs[seg.index + 1];
   if (!next) return undefined;
-  if (next.startsWithSummary) {
-    const s = survival(facts, next.messages.slice(0, 1), seg.messages);
+  const { summary, context } = compactedContext(seg.messages, next.messages, next.startsWithSummary);
+  if (summary) {
+    const s = survival(facts, context, seg.messages);
     return { kind: 'summary', neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) } };
   }
-  const s = survival(facts, carriedPrefix(seg.messages, next.messages), seg.messages);
+  const s = survival(facts, context, seg.messages);
   return {
     kind: 'verbatim',
     neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) },

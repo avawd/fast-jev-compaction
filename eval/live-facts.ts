@@ -6,7 +6,7 @@
  * a live run's decisions are not logged (attributeLive).
  */
 import { attributeLive, factFate, liveVerdict, type How } from './diagnose.ts';
-import { carriedPrefix, loadSegments } from './parse.ts';
+import { compactedContext, loadSegments } from './parse.ts';
 import { loadPlugin, runArm } from './plugin.ts';
 import type { RecallFact } from './recall-gen.ts';
 
@@ -42,8 +42,7 @@ export async function liveFactRows(
   if (lastBoundary < 0 || !segs[lastBoundary + 1]) return undefined;
   const pre = segs[lastBoundary]!;
   const next = segs[lastBoundary + 1]!;
-  const summary = next.startsWithSummary;
-  const context = summary ? next.messages.slice(0, 1) : carriedPrefix(pre.messages, next.messages);
+  const { summary, context } = compactedContext(pre.messages, next.messages, next.startsWithSummary);
   const results = new Map<string, string>();
   for (const m of pre.messages) for (const r of m.toolResults ?? []) results.set(r.tool_use_id, r.text);
 

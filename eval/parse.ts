@@ -182,26 +182,56 @@ export async function loadSegments(file: string): Promise<Segment[]> {
   return segments;
 }
 
+/** A row's identity for matching across segments: its tool ids, or its role and text when it has none. */
+function rowKey(m: EvalMessage): string {
+  const tools = [...m.toolUses.map((u) => `u:${u.tool_use_id}`), ...(m.toolResults ?? []).map((r) => `r:${r.tool_use_id}`)];
+  return tools.length > 0 ? `tools\u0000${tools.join(',')}` : `${m.role}\u0000${m.text}`;
+}
+
 /**
  * The part of the next segment that a verbatim compaction carried over: its
- * prefix of rows that also exist in the previous segment (same tool ids, or
- * same role and text). It stops at the first new row (the `/compact` command
- * row, a recall question...), which could re-introduce a token.
+ * prefix of rows that match the previous segment's rows IN ORDER (same tool
+ * ids, or same role and text). Compaction keeps order and never re-adds a row,
+ * so matching is a forward walk; a row that matches nothing at or after the
+ * walk's position (the `/compact` command row, a recall question, an empty
+ * thinking row after the carried ones) ends the prefix. A rebuilt row keeps
+ * its tool ids, so a truncated result still matches.
  */
 export function carriedPrefix(prev: readonly EvalMessage[], next: readonly EvalMessage[]): EvalMessage[] {
-  const ids = new Set<string>();
-  const texts = new Set<string>();
-  for (const m of prev) {
-    for (const u of m.toolUses) ids.add(u.tool_use_id);
-    for (const r of m.toolResults ?? []) ids.add(r.tool_use_id);
-    texts.add(`${m.role}\u0000${m.text}`);
-  }
+  const prevKeys = prev.map(rowKey);
   const out: EvalMessage[] = [];
+  let j = 0;
   for (const m of next) {
+    const key = rowKey(m);
     const tools = [...m.toolUses.map((u) => u.tool_use_id), ...(m.toolResults ?? []).map((r) => r.tool_use_id)];
-    const carried = tools.length > 0 ? tools.every((id) => ids.has(id)) : texts.has(`${m.role}\u0000${m.text}`);
-    if (!carried) break;
+    let found = -1;
+    for (let k = j; k < prevKeys.length; k += 1) {
+      // A rebuilt row may have lost a dropped sibling's id; any shared id places it.
+      const hit = tools.length > 0 ? tools.some((id) => prevKeys[k]!.includes(id)) : prevKeys[k] === key;
+      if (hit) {
+        found = k;
+        break;
+      }
+    }
+    if (found < 0) break;
     out.push(m);
+    j = found + 1;
   }
   return out;
+}
+
+/**
+ * What the model sees after the compaction that ended `prev`: the carried rows of a verbatim
+ * compaction, or the summary message of a summary one. `nextStartsWithSummary` alone cannot tell
+ * them apart: a verbatim compaction of a segment that itself began with an older summary carries
+ * that summary row first. A summary compaction's first row is new, so it carries nothing.
+ */
+export function compactedContext(
+  prev: readonly EvalMessage[],
+  next: readonly EvalMessage[],
+  nextStartsWithSummary: boolean,
+): { summary: boolean; context: EvalMessage[] } {
+  const carried = carriedPrefix(prev, next);
+  if (nextStartsWithSummary && carried.length === 0) return { summary: true, context: next.slice(0, 1) };
+  return { summary: false, context: carried };
 }

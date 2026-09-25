@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { carriedPrefix, loadSegments } from './parse.ts';
+import { carriedPrefix, compactedContext, loadSegments, type EvalMessage } from './parse.ts';
 
 function fixture(rows: unknown[]): string {
   const dir = mkdtempSync(join(tmpdir(), 'vc-eval-'));
@@ -114,5 +114,27 @@ describe('segment cwd', () => {
     ]);
     const segs = await loadSegments(file);
     expect(segs.map((s) => s.cwd)).toEqual(['/repo', '/repo/sub']);
+  });
+});
+
+describe('carriedPrefix / compactedContext', () => {
+  const u = (text: string): EvalMessage => ({ role: 'user', text, toolUses: [] });
+  const a = (text: string): EvalMessage => ({ role: 'assistant', text, toolUses: [] });
+  const pre = [u('old summary'), a(''), a('did things')];
+
+  it('matches in order and stops at the end of the previous segment (an empty row after it is new)', () => {
+    expect(carriedPrefix(pre, [u('old summary'), a(''), a('did things'), a(''), a('answer')])).toHaveLength(3);
+  });
+
+  it('a verbatim compaction that carried an older summary row is not a summary fallback', () => {
+    const ctx = compactedContext(pre, [u('old summary'), a(''), a('did things'), u('q')], true);
+    expect(ctx.summary).toBe(false);
+    expect(ctx.context).toHaveLength(3);
+  });
+
+  it('a new summary row is a summary fallback', () => {
+    const ctx = compactedContext(pre, [u('new summary'), u('q')], true);
+    expect(ctx.summary).toBe(true);
+    expect(ctx.context.map((m) => m.text)).toEqual(['new summary']);
   });
 });
