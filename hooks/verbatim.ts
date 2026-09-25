@@ -221,7 +221,7 @@ export async function compactSession(
     claudeAwaitMs: Math.max(config.claudeTimeoutMs, CLAUDE_AWAIT_MS),
     rulesClearGate: background
       ? () => false
-      : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio, resolveOptions(config)),
+      : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio, resolveOptions(config), new Set(protectedRows)),
   });
   // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
   const options = { ...config, escalateBelow: config.minReductionRatio, protectedResultIds, protectedRows };
@@ -442,12 +442,15 @@ export async function riderIds(
   $: { session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> } },
   messages: readonly SessionMessage[],
   agentId?: string,
-): Promise<{ ids: string[]; rows: SessionMessage[] } | string> {
+): Promise<{ ids: string[]; rows: SessionMessage[]; unattributed: number; unseenResults: number; stringContent: number } | string> {
   try {
     const api = await $.session.messages(agentId === undefined ? { as: 'api' } : { as: 'api', agentId });
     if (!Array.isArray(api)) return `no API view (${JSON.stringify(api).slice(0, 120)})`;
     const found = riderProtected(api as ApiLike[], messages);
-    return { ids: [...found.callIds], rows: messages.filter((m) => found.rows.has(m)) };
+    return {
+      ids: [...found.callIds], rows: messages.filter((m) => found.rows.has(m)),
+      unattributed: found.unattributed, unseenResults: found.unseenResults, stringContent: found.stringContent,
+    };
   } catch (error) {
     return message(error);
   }
@@ -516,6 +519,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       else {
         debug($, `${riders.ids.length} result${riders.ids.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them; API view read in ${ridersMs} ms`);
         if (riders.rows.length > 0) debug($, `${riders.rows.length} message${riders.rows.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+        if (riders.unattributed + riders.unseenResults + riders.stringContent > 0) {
+          debug($, `riders not judged: ${riders.unattributed} unattributed, ${riders.unseenResults} results outside the API view (newest 4096 messages), ${riders.stringContent} string contents skipped`);
+        }
       }
       const { result, messages } = await compactSession(
         event.messages, config, fork, sleep, background, await sessionCwd($),

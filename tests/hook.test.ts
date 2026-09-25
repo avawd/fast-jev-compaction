@@ -163,6 +163,12 @@ describe('riders', () => {
     expect(h.debugLogs.join('\n')).toMatch(/2 messages kept whole: riders/);
   });
 
+  it('logs what the rider check could not judge', async () => {
+    const h = harness({ userConfig: { useClaudeScorer: false }, apiMessages: async () => [{ role: 'user', content: 'plain string' }] });
+    await h.compact({ trigger: 'manual', messages: transcript() });
+    expect(h.debugLogs.join('\n')).toMatch(/riders not judged: 0 unattributed, 3 results outside the API view \(newest 4096 messages\), 1 string contents skipped/);
+  });
+
   it('still truncates it when only an ephemeral reminder rides on it', async () => {
     const h = harness({ userConfig: { useClaudeScorer: false }, apiMessages: api('<total_tokens>5 tokens left</total_tokens>') });
     const input = transcript();

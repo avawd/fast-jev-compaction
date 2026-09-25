@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compact, compactUserRows, protectRows, resolveOptions, riderProtected, riderProtectedIds, type ApiLike, type Message, type Scorer } from '../src/index.js';
+import { compact, compactUserRows, rulesGate, protectRows, resolveOptions, riderProtected, riderProtectedIds, type ApiLike, type Message, type Scorer } from '../src/index.js';
 
 const reminder = (inner: string) => ({ type: 'text', text: `<system-reminder>\n${inner}\n</system-reminder>` });
 const result = (id: string, content = 'out') => ({ type: 'tool_result', tool_use_id: id, content });
@@ -100,6 +100,48 @@ describe('riderProtected: user text rows', () => {
     const o = resolveOptions({ preserveRecentMessages: 2, staleAfterMessages: 2 });
     expect(compactUserRows(input, o).messages[1]).not.toBe(old);
     expect(compactUserRows(input, o, new Set([old])).messages[1]).toBe(old);
+  });
+});
+
+describe('riderProtected: review of 0.7.0', () => {
+  const tmRow: Message = { role: 'user', text: 'Another Claude session sent a message:\n<teammate-message teammate_id="a1">\nhi\n</teammate-message>', toolUses: [] };
+  const taskRow: Message = { role: 'user', text: '<task-notification>\n<task-id>t1</task-id>\n</task-notification>', toolUses: [] };
+
+  it('a rider after merged user rows protects every row contained in the merged text', () => {
+    const api = [user({ type: 'text', text: `${tmRow.text}\n\n${taskRow.text}` }, { type: 'text', text: 'The user typed: stop everything' })];
+    const out = riderProtected(api, [tmRow, taskRow]);
+    expect(new Set(out.rows)).toEqual(new Set([tmRow, taskRow]));
+    expect(out.unattributed).toBe(0);
+  });
+
+  it('counts a rider it can attribute to nothing', () => {
+    const api = [user({ type: 'text', text: 'The user typed: stop' })];
+    expect(riderProtected(api, [tmRow]).unattributed).toBe(1);
+  });
+
+  it('an image queued into a result protects it', () => {
+    const rows: Message[] = [{ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'a', text: 'out' }] }];
+    const api = [asst('a'), user(result('a', [{ type: 'text', text: 'out' }, { type: 'image', source: {} }] as never))];
+    expect([...riderProtectedIds(api, rows)]).toEqual(['a']);
+  });
+
+  it('counts results outside the API view and string contents it skipped', () => {
+    const rows: Message[] = [{ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'gone', text: 'x' }, { tool_use_id: 'a', text: 'out' }] }];
+    const api: ApiLike[] = [asst('a'), user(result('a')), { role: 'user', content: 'plain' as never }];
+    const out = riderProtected(api, rows);
+    expect(out.unseenResults).toBe(1);
+    expect(out.stringContent).toBe(1);
+  });
+});
+
+describe('rulesGate and protected rows', () => {
+  it('does not count a teammate cut on a protected row', () => {
+    const body = Array.from({ length: 80 }, (_, i) => `- line ${i} of a long stale report, long enough to cut`).join('\n');
+    const row: Message = { role: 'user', text: `Another Claude session sent a message:\n<teammate-message teammate_id="a1">\n${body}\n</teammate-message>`, toolUses: [] };
+    const input = [{ role: 'user', text: 'Start.', toolUses: [] } as Message, row, ...Array.from({ length: 30 }, (_, i): Message => ({ role: i % 2 ? 'user' : 'assistant', text: `f${i}`, toolUses: [] }))];
+    const o = resolveOptions({ preserveRecentMessages: 2, staleAfterMessages: 2 });
+    expect(rulesGate(input, 300, 0.25, o)([], new Map())).toBe(true);
+    expect(rulesGate(input, 300, 0.25, o, new Set([row]))([], new Map())).toBe(false);
   });
 });
 

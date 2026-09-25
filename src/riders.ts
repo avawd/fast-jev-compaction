@@ -71,7 +71,9 @@ function resultContent(block: Record<string, unknown>): { text: string; other: b
  * line up (a different join), only the reminders the row's text lacks are judged.
  */
 function foldedRider(block: Record<string, unknown>, rowText: string | undefined): boolean {
-  const { text } = resultContent(block);
+  const { text, other } = resultContent(block);
+  // An image or document in the content: a row's text cannot account for it (one queued mid-tool).
+  if (other) return true;
   // The fold trims the result's text: a row text ending in whitespace is found without it.
   const own = rowText?.trimEnd();
   if (own !== undefined && text.includes(own)) return !ephemeralText(text.replace(own, ''));
@@ -89,7 +91,8 @@ function foldedRider(block: Record<string, unknown>, rowText: string | undefined
  * - A rider folded into a result's content protects that result.
  * - A sibling block protects every result of its message (the normalizer hoists results to the
  *   front, so position does not say which one it rode on), unless it follows a user row's own
- *   text: then it rides on that row. Texts are compared trimmed (a merge appends a newline).
+ *   text: then it rides on that row. Texts are compared trimmed (a merge appends a newline); a
+ *   block holding several rows' texts (merged) makes the rider ride on all of them.
  * - Rows with identical text are all protected when one is.
  *
  * The view holds at most 4096 messages; a result outside it is judged unprotected.
@@ -97,7 +100,7 @@ function foldedRider(block: Record<string, unknown>, rowText: string | undefined
 export function riderProtected(
   api: readonly ApiLike[],
   rows: readonly Message[],
-): { callIds: Set<string>; rows: Set<Message> } {
+): RiderScan {
   const byText = new Map<string, Message[]>();
   const resultText = new Map<string, string>();
   for (const m of rows) {
@@ -106,32 +109,64 @@ export function riderProtected(
     const key = m.text.trim();
     byText.set(key, [...(byText.get(key) ?? []), m]);
   }
+  // The rows a text block is: one row's text exactly (trimmed; a merge appends a newline), or,
+  // when the normalizer merged several rows into one block, every row whose text it holds.
+  const rowsIn = (text: string): Message[] | undefined => {
+    const exact = byText.get(text.trim());
+    if (exact) return exact;
+    const merged = [...byText].filter(([key]) => text.includes(key)).flatMap(([, ms]) => ms);
+    return merged.length > 0 ? merged : undefined;
+  };
   const callIds = new Set<string>();
   const protectedRows = new Set<Message>();
+  const seen = new Set<string>();
+  let unattributed = 0;
+  let stringContent = 0;
   for (const message of api) {
-    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    if (message.role !== 'user') continue;
+    if (!Array.isArray(message.content)) {
+      stringContent += 1;
+      continue;
+    }
     const results: string[] = [];
     let current: Message[] | undefined;
     for (const block of message.content) {
       if (block['type'] === 'tool_result') {
         const id = typeof block['tool_use_id'] === 'string' ? block['tool_use_id'] : undefined;
         if (id === undefined) continue;
+        seen.add(id);
         results.push(id);
         if (foldedRider(block, resultText.get(id))) callIds.add(id);
         current = undefined;
         continue;
       }
-      const own = block['type'] === 'text' && typeof block['text'] === 'string' ? byText.get(block['text'].trim()) : undefined;
+      const text = block['type'] === 'text' && typeof block['text'] === 'string' ? block['text'] : undefined;
+      if (isEphemeral(block)) continue;
+      const own = text !== undefined ? rowsIn(text) : undefined;
       if (own) {
         current = own;
         continue;
       }
-      if (isEphemeral(block)) continue;
       if (current) for (const m of current) protectedRows.add(m);
-      else for (const id of results) callIds.add(id);
+      else if (results.length > 0) for (const id of results) callIds.add(id);
+      else unattributed += 1;
     }
   }
-  return { callIds, rows: protectedRows };
+  const unseenResults = [...resultText.keys()].filter((id) => !seen.has(id)).length;
+  return { callIds, rows: protectedRows, unattributed, unseenResults, stringContent };
+}
+
+/**
+ * What riderProtected found, and what it could not judge: `unattributed` riders it could hang on
+ * nothing, results outside the view (it holds the newest 4096 messages), and user messages whose
+ * content was a bare string (not scanned).
+ */
+export interface RiderScan {
+  callIds: Set<string>;
+  rows: Set<Message>;
+  unattributed: number;
+  unseenResults: number;
+  stringContent: number;
 }
 
 /** tool_use_ids whose results carry a non-ephemeral rider (see riderProtected). */

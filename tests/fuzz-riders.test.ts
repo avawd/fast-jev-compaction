@@ -58,7 +58,11 @@ function viewCase(seed: number) {
         const rd = rider(r);
         if (rd.real) truthCalls.add(id);
         const shown = out.trimEnd();
-        if (chance(r, 0.6)) content = chance(r, 0.5) ? `${shown}\n${rd.text}` : [{ type: 'text', text: shown }, { type: 'text', text: rd.text }];
+        if (chance(r, 0.1)) {
+          // An image queued mid-tool, folded into the result's content.
+          content = [{ type: 'text', text: shown }, { type: 'image', source: {} }];
+          truthCalls.add(id);
+        } else if (chance(r, 0.6)) content = chance(r, 0.5) ? `${shown}\n${rd.text}` : [{ type: 'text', text: shown }, { type: 'text', text: rd.text }];
         else {
           siblings.push({ type: 'text', text: rd.text });
           siblingReal ||= rd.real;
@@ -68,6 +72,16 @@ function viewCase(seed: number) {
     }
     if (siblingReal) for (const id of ids) ambiguous.add(id);
     const blocks = [...results, ...siblings];
+    // Two user rows (a teammate message and a task notification) merged into ONE text block, a rider after.
+    if (chance(r, 0.15)) {
+      const a: Message = { role: 'user', text: `Another Claude session sent a message:\n<teammate-message teammate_id="t${turn}">\nreport ${turn}\n</teammate-message>`, toolUses: [] };
+      const b: Message = { role: 'user', text: `<task-notification>\n<task-id>k${turn}</task-id>\n</task-notification>`, toolUses: [] };
+      rows.push(a, b);
+      blocks.push({ type: 'text', text: `${a.text}\n\n${b.text}` });
+      const rd = rider(r);
+      if (rd.real) { truthRows.add(a); truthRows.add(b); }
+      blocks.push({ type: 'text', text: rd.text });
+    }
     // A typed prompt merged into the same API message, maybe with its own rider after it.
     if (chance(r, 0.3)) {
       const typed: Message = { role: 'user', text: `typed prompt ${turn}`, toolUses: [] };

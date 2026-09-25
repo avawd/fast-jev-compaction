@@ -54,9 +54,11 @@ export function rulesGate(
   minRatio: number,
   /** The compact options, so the teammate-row pass counts as it will (user-rows.ts); absent: tool output only. */
   options?: ResolvedCompactOptions,
+  /** Rows carrying riders (riders.ts): compact() never rebuilds them, so their cut is not counted. */
+  protectedRows: ReadonlySet<Message> = new Set(),
 ): GateFn {
   // The teammate-row pass does not depend on the verdicts: run it once, not per evaluation.
-  const users = options ? compactUserRows(messages, options) : undefined;
+  const users = options ? compactUserRows(messages, options, protectedRows) : undefined;
   const userSaved = users?.stats.charsSaved ?? 0;
   // Nor, to within a dropped call's row, does the old-input shrink (shrink.ts): it needs the
   // annotated calls, so it runs on the first evaluation.
