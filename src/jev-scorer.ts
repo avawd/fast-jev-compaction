@@ -87,56 +87,88 @@ const SUBCOMMANDS: Record<string, number> = { gh: 2, docker: 1, git: 1, npm: 1, 
 /** Words kept wherever they stand: the interpreter an inline script ran under. */
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'node', 'python', 'python3']);
 const HOST = /@|^\d{1,3}(?:\.\d{1,3}){3}(?::|$)/;
-const PATH_LIKE = /^(?:\/|\.{1,2}\/|~)|\/|\.[A-Za-z]\w{0,4}$/;
+/** A dotted name before `:`, `/` or the end (`api.corp.test/v1`, `box.corp.test:/srv`), or `box:/srv`. */
+const DOTTED_HOST = /^[\w-]+(?:\.[\w-]+)+(?=[:/]|$)|^[\w.-]+:/;
+/** A path that says it is one: absolute, `./`, `../` or `~`. */
+const EXPLICIT_PATH = /^(?:\/|\.{1,2}\/|~)/;
+const PATH_LIKE = /\/|\.[A-Za-z]\w{0,4}$/;
+
+interface SkeletonState {
+  first: boolean;
+  /** Subcommand words still to keep. */
+  sub: number;
+  program: string;
+  subcommands: string[];
+  /** A flag was seen in this segment: every positional after it is a value, unless an explicit path. */
+  flagged: boolean;
+  /** `gh api`'s endpoint was shown (as `<path>`). */
+  pathShown: boolean;
+}
+
+/** A flag's name alone: `-uadmin:pw` is `-u`, `--user=admin` is `--user`, `+a` stays. */
+function flagName(word: string): string {
+  return word.startsWith('--') ? word.split('=')[0]! : word.slice(0, 2);
+}
 
 /** One word of a risky command as shown, or undefined to leave it out. */
-function skeletonWord(word: string, position: { first: boolean; sub: number; program: string }): string | undefined {
+function skeletonWord(word: string, state: SkeletonState): string | undefined {
   if (word.includes('://')) return '<url>';
   if (word.startsWith("'") || word.startsWith('"')) return "'…'";
-  if (HOST.test(word)) return '<host>';
-  if (position.first) {
-    position.first = false;
-    position.program = word;
-    position.sub = Object.hasOwn(SUBCOMMANDS, word) ? SUBCOMMANDS[word]! : 0;
+  if (!state.first && /^[-+]/.test(word)) {
+    state.sub = 0;
+    state.flagged = true;
+    return flagName(word);
+  }
+  if (HOST.test(word) || (!EXPLICIT_PATH.test(word) && DOTTED_HOST.test(word))) return '<host>';
+  if (state.first) {
+    state.first = false;
+    state.program = word;
+    state.sub = Object.hasOwn(SUBCOMMANDS, word) ? SUBCOMMANDS[word]! : 0;
     return word;
   }
-  if (/^[-+]/.test(word)) {
-    position.sub = 0;
-    return word.split('=')[0];
-  }
-  // ssh's positionals are a host (`box`, `box.example.test`) and an unquoted remote command; only a flag's absolute path is shown.
-  if (position.program === 'ssh' && !word.startsWith('/')) return undefined;
-  if (position.sub > 0 && /^[a-z][a-z-]*$/.test(word)) {
-    position.sub -= 1;
+  if (state.sub > 0 && !state.flagged && /^[a-z][a-z-]*$/.test(word)) {
+    state.sub -= 1;
+    state.subcommands.push(word);
     return word;
   }
-  position.sub = 0;
+  state.sub = 0;
   if (INTERPRETERS.has(word)) return word;
+  // `gh api repos/org/repo/...` names a private org and repository.
+  if (state.program === 'gh' && state.subcommands[0] === 'api' && !state.pathShown && word.includes('/')) {
+    state.pathShown = true;
+    return '<path>';
+  }
+  if (EXPLICIT_PATH.test(word)) return word.split('?')[0];
+  // ssh's positionals are a host and an unquoted remote command; after a flag, a positional is its value.
+  if (state.program === 'ssh' || state.flagged) return undefined;
   return PATH_LIKE.test(word) && !/['"]/.test(word) ? word.split('?')[0] : undefined;
 }
 
 /**
  * A refusal-prone command (see RISKY) cut to its program, subcommand, flag names and file paths:
- * quoted strings become `'…'`, URLs `<url>`, hosts `<host>`, and every other argument value goes.
+ * quoted strings become `'…'`, URLs `<url>`, hosts (dotted names too) `<host>`, a `gh api` path
+ * `<path>`; a flag keeps only its name, and every positional after a flag goes unless it is an
+ * explicit path (`/`, `./`, `../`, `~`).
  * `ssh -F /dev/null me@10.1.2.3 'docker exec …'` becomes `ssh -F /dev/null <host> '…'`. Any
  * other command is returned unchanged.
  */
 export function skeletonCommand(command: string): string {
   if (!RISKY.test(command)) return command;
-  const position = { first: true, sub: 0, program: '' };
+  const fresh = (): SkeletonState => ({ first: true, sub: 0, program: '', subcommands: [], flagged: false, pathShown: false });
+  let state = fresh();
   let out = '';
   for (const [word] of command.matchAll(TOKEN)) {
     if (word === ';') {
       out += ';';
-      position.first = true;
+      state = fresh();
       continue;
     }
     if (word === '&&' || word === '||' || word === '|') {
       out += ` ${word}`;
-      position.first = true;
+      state = fresh();
       continue;
     }
-    const shown = skeletonWord(word, position);
+    const shown = skeletonWord(word, state);
     if (shown !== undefined) out += `${out ? ' ' : ''}${shown}`;
   }
   return out.trim();

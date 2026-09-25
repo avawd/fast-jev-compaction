@@ -365,6 +365,24 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (typeof command === 'string' && /(^|[\s;&|(])(ssh|scp|curl|wget|docker)(\s|$)/.test(command) && /:\/\/|@|\b\d{1,3}(\.\d{1,3}){3}\b/.test(m[2]!)) {
         fail(`${m[1]} shows a host, address or URL of a remote command: ${m[2]}`);
       }
+      // ...nor a flag's value (attached, `=`-joined or the next word, unless an explicit path) or a dotted host name.
+      if (typeof command === 'string' && /(^|[\s;&|(])(ssh|scp|curl|wget|docker)(\s|$)|\bgh\s+(api|pr\s+merge)\b/.test(command)) {
+        const shown = new Set(m[2]!.split(/\s+/));
+        const raw = command.split(/\s+/).filter((w) => !/['";&|]/.test(w));
+        const explicitPath = (w: string) => /^(\/|\.{1,2}\/|~)/.test(w);
+        raw.forEach((w, k) => {
+          if (/^-[^-]./.test(w) || (w.startsWith('--') && w.includes('='))) {
+            if (shown.has(w)) fail(`${m[1]} shows the flag value in ${w}`);
+          }
+          const next = raw[k + 1];
+          if (/^-/.test(w) && next !== undefined && !next.startsWith('-') && !explicitPath(next) && command.includes(`${w} ${next}`) && shown.has(next)) {
+            fail(`${m[1]} shows ${next}, the value after ${w}`);
+          }
+        });
+        for (const word of shown) {
+          if (!explicitPath(word) && /^[\w-]+(\.[\w-]+)+([:/]|$)/.test(word)) fail(`${m[1]} shows the host-like word ${word}`);
+        }
+      }
     }
     // Every candidate belongs to exactly one chunk: a prompt either opens a chunk with ids no
     // earlier prompt had, or re-asks a subset of exactly one earlier chunk (whole or half).
