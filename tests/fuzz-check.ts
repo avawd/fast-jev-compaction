@@ -260,23 +260,34 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4. Text is never edited except an old long assistant reply shortened (shrink.ts), and rows
-  //    without tool blocks are never removed; one is rebuilt only for that shortening.
-  const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
-  // A drop_call on a row holding text and tool_uses leaves its text as a plain row: not one of these.
+  // 4. Text is never edited or dropped, except an old reply leading into a call: that one may be
+  //    folded, shortened, into the rebuilt row holding the call (shrink.ts). Rows without tool
+  //    blocks are otherwise never removed, and never rebuilt on their own.
   const toolRowTexts = new Set(input.filter((m) => m.toolUses.length > 0 && m.text.trim()).map((m) => m.text));
-  const plainOut = session.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0 && (inputSet.has(m) || !toolRowTexts.has(m.text)));
-  if (plainIn.length !== plainOut.length) fail('a plain text row was removed or added');
-  else plainIn.forEach((m, i) => {
-    const out = plainOut[i]!;
-    if (out === m) return;
-    const bad = shortenedBadly(m.text, out.text, MIN_SHRINK_TEXT_CHARS);
-    if (m.role !== 'assistant' || out.role !== 'assistant' || bad) fail(`plain row ${i} rebuilt: ${bad ?? 'not an assistant reply'}`);
-  });
-  const inText = input.map((m) => m.text).filter((t) => t.trim());
-  const outText = session.map((m) => m.text).filter((t) => t.trim());
-  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i] && shortenedBadly(t, outText[i]!, MIN_SHRINK_TEXT_CHARS))) {
-    fail('user/assistant text changed or dropped');
+  const rebuiltTools = session.filter((m) => !inputSet.has(m) && m.toolUses.length > 0);
+  const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
+  const outSet = new Set<Message>(session);
+  const keptPlain = plainIn.filter((m) => outSet.has(m));
+  const keptOrder = session.filter((m) => keptPlain.includes(m));
+  if (keptOrder.some((m, i) => m !== keptPlain[i])) fail('plain rows reordered');
+  let foldedNotes = 0;
+  for (const m of plainIn) {
+    if (outSet.has(m)) continue;
+    const host = rebuiltTools.find((h) => h.text.includes(m.text) || (m.text.length >= MIN_SHRINK_TEXT_CHARS && h.text.includes(m.text.slice(0, 200))));
+    if (m.role !== 'assistant' || !m.text.trim() || !host) fail(`plain row "${m.text.slice(0, 30)}" removed`);
+    else if (!host.text.includes(m.text)) foldedNotes += 1;
+  }
+  for (const h of rebuiltTools) foldedNotes -= Math.max(0, h.text.split(SHRINK_NOTE_PREFIX).length - 1);
+  if (foldedNotes > 0) fail('a folded reply was cut without a note');
+  for (const m of session) {
+    if (inputSet.has(m) || m.toolUses.length > 0 || (m.toolResults ?? []).length > 0) continue;
+    if (!toolRowTexts.has(m.text)) fail(`plain row rebuilt on its own: "${m.text.slice(0, 30)}"`);
+  }
+  for (const h of rebuiltTools) {
+    const pieces = h.text.split('\n\n');
+    for (const piece of h.text.includes(SHRINK_NOTE_PREFIX) ? [] : pieces) {
+      if (piece.trim() && !input.some((m) => m.text.includes(piece))) fail(`rebuilt row text invented: "${piece.slice(0, 30)}"`);
+    }
   }
 
   // 10. A tool input is only ever shortened (shrink.ts): same id, same keys, each changed string a
@@ -293,26 +304,34 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
     if (bad) fail(`tool_use ${u.tool_use_id} input: ${bad}`);
   }
 
-  // 11. The API pairing Claude Code checks: rows of one reply (a run of the input's assistant rows)
-  //     form one message, a rebuilt row is a message of its own, consecutive user rows merge. Every
-  //     message's tool_uses must have their results in the very next message.
-  const replyOf = new Map<Message, number>();
-  input.forEach((m, k) => { if (m.role === 'assistant') replyOf.set(m, k > 0 && input[k - 1]!.role === 'assistant' ? replyOf.get(input[k - 1]!)! : k); });
-  const api: Array<{ role: string; key: unknown; uses: string[]; results: Set<string> }> = [];
+  // 11. The API pairing Claude Code checks. Every row of one reply (one message id; the generator
+  //     says which) is merged into its FIRST row's place, however far apart; a rebuilt row is a
+  //     reply of its own; user rows that end up adjacent merge. Every message's tool_uses must have
+  //     their results in the very next message.
+  type ApiMsg = { role: string; uses: string[]; results: Set<string> };
+  const api: ApiMsg[] = [];
+  const byReply = new Map<string, ApiMsg>();
   session.forEach((m, k) => {
-    const key = m.role === 'assistant' ? (replyOf.get(m) ?? `rebuilt${k}`) : 'user';
+    const uses = m.toolUses.map((u) => u.tool_use_id);
+    const results = (m.toolResults ?? []).map((x) => x.tool_use_id);
     const last = api[api.length - 1];
-    const msgUses = m.toolUses.map((u) => u.tool_use_id);
-    const msgResults = (m.toolResults ?? []).map((x) => x.tool_use_id);
-    if (last && last.role === m.role && last.key === key) {
-      last.uses.push(...msgUses);
-      for (const id of msgResults) last.results.add(id);
-    } else api.push({ role: m.role, key, uses: msgUses, results: new Set(msgResults) });
+    if (m.role === 'assistant') {
+      const reply = transcript.replies.get(m as never) ?? `rebuilt${k}`;
+      const earlier = byReply.get(reply);
+      if (earlier) earlier.uses.push(...uses);
+      else {
+        const made: ApiMsg = { role: 'assistant', uses: [...uses], results: new Set() };
+        byReply.set(reply, made);
+        api.push(made);
+      }
+    } else if (last && last.role === 'user') for (const id of results) last.results.add(id);
+    else api.push({ role: 'user', uses: [], results: new Set(results) });
   });
   api.forEach((a, k) => {
-    const answered = a.uses.filter((id) => resultPos.has(id));
     const next = api[k + 1];
-    for (const id of answered) if (!next || next.role !== 'user' || !next.results.has(id)) fail(`tool_use ${id}'s result is not in the next API message`);
+    for (const id of a.uses.filter((u) => resultPos.has(u))) {
+      if (!next || next.role !== 'user' || !next.results.has(id)) fail(`tool_use ${id}'s result is not in the next API message`);
+    }
   });
 
   // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.
@@ -498,7 +517,9 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   // 9. A fact a result introduced and a later row quotes is still in the context before the quote.
   if (resolved.pinReferenced) {
     for (const q of transcript.quotes) {
-      const at = q.kind === 'text' ? session.indexOf(q.row as SessionRow) : usePos.get(q.useId) ?? -1;
+      // A quoting reply may have been folded into the rebuilt row that follows it (shrink.ts).
+      const host = (row: Message) => session.findIndex((m) => !inputSet.has(m) && m.toolUses.length > 0 && m.text.includes(row.text));
+      const at = q.kind === 'text' ? (session.includes(q.row as SessionRow) ? session.indexOf(q.row as SessionRow) : host(q.row)) : usePos.get(q.useId) ?? -1;
       if (at < 0) {
         if (q.kind === 'text') fail(`quoting row for ${q.token} vanished`);
         continue; // The quoting call itself was dropped: nothing quotes the token any more.

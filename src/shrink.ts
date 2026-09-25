@@ -103,9 +103,15 @@ function clipLine(line: string, tokens: readonly string[]): string | undefined {
  */
 export function shrinkText(text: string, spec: ShrinkSpec, mustKeep: readonly string[]): string {
   if (isShrunk(text) || text.length < spec.head + MIN_SAVING) return text;
-  let head = sliceWhole(text, spec.head);
-  const eol = text.indexOf('\n', head.length);
-  if (eol >= 0 && eol - head.length <= HEAD_LINE_REACH) head = text.slice(0, eol);
+  let cut = sliceWhole(text, spec.head).length;
+  // A must-keep token the cut would split is kept whole in the head: split, it is in neither part.
+  for (const t of mustKeep) {
+    for (let at = text.indexOf(t); at >= 0 && at < cut; at = text.indexOf(t, at + 1)) {
+      if (at + t.length > cut) cut = at + t.length;
+    }
+  }
+  const eol = text.indexOf('\n', cut);
+  let head = text.slice(0, eol >= 0 && eol - cut <= HEAD_LINE_REACH ? eol : cut);
   const rest = text.slice(head.length);
   const missing = new Set(mustKeep.filter((t) => t.length > 0 && !head.includes(t) && rest.includes(t)));
   const kept: string[] = [];
@@ -181,12 +187,13 @@ function shrinkValue(value: unknown, spec: ShrinkSpec, keep: (text: string) => s
   return changed ? out : value;
 }
 
-function inputText(input: Record<string, unknown>): string {
-  try {
-    return JSON.stringify(input) ?? '';
-  } catch {
-    return '';
+/** Every string in an input, raw: JSON escapes glue `\n` to the next word (`ls\nsrc/a.ts` → `nsrc/a.ts`). */
+function stringLeaves(value: unknown, out: string[] = [], depth = 0): string[] {
+  if (typeof value === 'string') out.push(value);
+  else if (value !== null && typeof value === 'object' && depth < 8) {
+    for (const v of Object.values(value as Record<string, unknown>)) stringLeaves(v, out, depth + 1);
   }
+  return out;
 }
 
 /** For each distinctive token, the index of the last message whose text or tool input quotes it. */
@@ -194,7 +201,7 @@ function lastQuotes(messages: readonly Message[]): Map<string, number> {
   const last = new Map<string, number>();
   messages.forEach((m, i) => {
     for (const t of distinctiveTokens(m.text)) last.set(t, i);
-    for (const u of m.toolUses) for (const t of distinctiveTokens(inputText(u.input))) last.set(t, i);
+    for (const u of m.toolUses) for (const leaf of stringLeaves(u.input)) for (const t of distinctiveTokens(leaf)) last.set(t, i);
   });
   return last;
 }
@@ -228,57 +235,107 @@ export function shrinkOld(
   };
   const rowIndex = (m: Message) => indexOf.get(m) ?? (m.toolUses.length > 0 ? callIndex.get(m.toolUses[0]!.tool_use_id) : undefined);
 
-  let inputs = 0;
-  let texts = 0;
   const shrinkUse = (tool: ToolUse): ToolUse => {
     if (!options.shrinkOldInputs || !eligible.has(tool.tool_use_id)) return tool;
     const at = callIndex.get(tool.tool_use_id)!;
     const spec = specFor(tool.tool);
     const head = quotedResult.has(tool.tool_use_id) ? { ...spec, head: spec.head * 2 } : spec;
     const input = shrinkValue(tool.input, head, mustKeep(at), 0) as Record<string, unknown>;
-    if (input === tool.input) return tool;
-    inputs += 1;
-    return { ...tool, input };
+    return input === tool.input ? tool : { ...tool, input };
+  };
+  const textSpec: ShrinkSpec = { head: TEXT_HEAD_CHARS, what: 'this old reply', hint: 'what it concluded carried on in the work that followed' };
+  const shrinkReply = (m: Message): string => {
+    const at = indexOf.get(m);
+    if (!options.shrinkOldText || !oldEnough(at) || m.text.length < MIN_SHRINK_TEXT_CHARS) return m.text;
+    return shrinkText(m.text, textSpec, mustKeep(at)(m.text));
   };
 
-  const runOut = (run: readonly Message[]): Message[] => {
+  /**
+   * What rebuilding a run would give, or undefined when it may not be rebuilt. Only the block
+   * that ends the run is ever rebuilt, as ONE row: its tool_use rows, plus the reply text rows
+   * right before them when one of those is shortened. The run's other rows (thinking) keep their
+   * message id and stay before it. A run with no tool_use is never rebuilt: its last row carries
+   * the turn-end riders (stop-hook feedback quotes the user's goal), and a middle row rebuilt
+   * would be moved after its siblings when Claude Code merges them by message id.
+   */
+  type Plan = { start: number; row: Message; inputs: number; texts: number };
+  const planRun = (run: readonly Message[]): Plan | undefined => {
     const firstTool = run.findIndex((m) => m.toolUses.length > 0);
-    const out = run.map((m, k) => {
-      // A text row after a tool row shares that reply's message; rebuilt, it would split it.
-      if (!options.shrinkOldText || m.toolUses.length > 0 || (firstTool >= 0 && k > firstTool)) return m;
-      const at = indexOf.get(m);
-      if (!oldEnough(at) || m.text.length < MIN_SHRINK_TEXT_CHARS) return m;
-      const text = shrinkText(m.text, { head: TEXT_HEAD_CHARS, what: 'this old reply', hint: 'what it concluded carried on in the work that followed' }, mustKeep(at)(m.text));
-      if (text === m.text) return m;
-      texts += 1;
-      return { role: m.role, text, toolUses: [] };
-    });
-    if (firstTool < 0 || !options.shrinkOldInputs) return out;
-    const tools = out.slice(firstTool);
+    if (firstTool < 0) return undefined;
+    const tools = run.slice(firstTool);
     // The tool rows must end the run and all be old: then only their results follow them.
-    if (!tools.every((m) => m.toolUses.length > 0 && oldEnough(rowIndex(m)))) return out;
-    if (tools.length > 1 && tools.some((m) => m.text.length > 0)) return out;
-    const before = inputs;
-    const uses = tools.map((m) => m.toolUses.map(shrinkUse));
-    if (inputs === before) return out;
-    const rebuilt: Message =
-      tools.length === 1
-        ? { role: 'assistant', text: tools[0]!.text, toolUses: uses[0]! }
-        : { role: 'assistant', text: '', toolUses: uses.flat() };
-    return [...out.slice(0, firstTool), rebuilt];
+    if (!tools.every((m) => m.toolUses.length > 0 && oldEnough(rowIndex(m)))) return undefined;
+    if (tools.length > 1 && tools.some((m) => m.text.length > 0)) return undefined;
+    let start = firstTool;
+    while (start > 0 && run[start - 1]!.toolUses.length === 0 && run[start - 1]!.text.length > 0 && oldEnough(indexOf.get(run[start - 1]!))) start -= 1;
+    let replies = run.slice(start, firstTool).map(shrinkReply);
+    // Fold from the first shortened reply on: the rows before it stay as they are.
+    const firstCut = replies.findIndex((t, k) => t !== run[start + k]!.text);
+    replies = firstCut < 0 ? [] : replies.slice(firstCut);
+    start = firstCut < 0 ? firstTool : start + firstCut;
+    const texts = replies.filter((t, k) => t !== run[start + k]!.text).length;
+    const originals = tools.flatMap((m) => m.toolUses);
+    const uses = originals.map(shrinkUse);
+    const inputs = uses.filter((u, k) => u !== originals[k]).length;
+    const text = [...replies, ...(tools.length === 1 ? [tools[0]!.text] : [])].filter((t) => t.length > 0).join('\n\n');
+    return { start, row: { role: 'assistant', text, toolUses: uses }, inputs, texts };
   };
 
-  const messages: Message[] = [];
+  // Runs, and whether each opens on a tool_use right after nothing but tool results: then it may
+  // continue the reply before it. Claude Code writes a streamed parallel reply as use A, result A,
+  // use B, result B under one message id, and merges every row of an id into its FIRST row's
+  // place (probed live: a rebuilt use A left before the reply's own use B lost both B's and C's
+  // results to the pairing repair). So in such a chain a run is rebuilt only if every later run of
+  // the chain is rebuilt too: then no row of the reply is left after a rebuilt one.
+  const runs: Array<{ rows: Message[]; afterResults: boolean }> = [];
+  const pieces: Array<Message | number> = [];
+  let gap: Message[] = [];
   for (let i = 0; i < kept.length; ) {
-    if (kept[i]!.role !== 'assistant') {
-      messages.push(kept[i]!);
+    const m = kept[i]!;
+    if (m.role !== 'assistant') {
+      pieces.push(m);
+      gap.push(m);
       i += 1;
       continue;
     }
     let j = i;
     while (j < kept.length && kept[j]!.role === 'assistant') j += 1;
-    messages.push(...runOut(kept.slice(i, j)));
+    const rows = kept.slice(i, j);
+    const onlyResults = gap.length > 0 && gap.every((g) => (g.toolResults ?? []).length > 0 && g.text.trim().length === 0);
+    runs.push({ rows, afterResults: runs.length > 0 && onlyResults && rows[0]!.toolUses.length > 0 });
+    pieces.push(runs.length - 1);
+    gap = [];
     i = j;
+  }
+  const rebuilt = new Map<number, Plan>();
+  for (let c = 0; c < runs.length; ) {
+    let end = c + 1;
+    while (end < runs.length && runs[end]!.afterResults) end += 1;
+    const plans = runs.slice(c, end).map((r) => planRun(r.rows));
+    // From the first changed run of the chain's rebuildable tail to the chain's end, all rebuilt.
+    let tail = plans.length;
+    while (tail > 0 && plans[tail - 1] !== undefined) tail -= 1;
+    const first = plans.findIndex((p, k) => k >= tail && p !== undefined && p.inputs + p.texts > 0);
+    if (first >= 0) for (let k = first; k < plans.length; k += 1) rebuilt.set(c + k, plans[k]!);
+    c = end;
+  }
+  let inputs = 0;
+  let texts = 0;
+  const messages: Message[] = [];
+  for (const piece of pieces) {
+    if (typeof piece !== 'number') {
+      messages.push(piece);
+      continue;
+    }
+    const rows = runs[piece]!.rows;
+    const plan = rebuilt.get(piece);
+    if (!plan) {
+      messages.push(...rows);
+      continue;
+    }
+    inputs += plan.inputs;
+    texts += plan.texts;
+    messages.push(...rows.slice(0, plan.start), plan.row);
   }
   return { messages, inputs, texts };
 }

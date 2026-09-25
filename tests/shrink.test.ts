@@ -82,6 +82,7 @@ describe('shrinkOld', () => {
       msg('user', 'go'),
       use('w1', 'Write', { file_path: '/repo/src/values.ts', content: fileBody }),
       res('w1', 'File created'),
+      msg('assistant', ''), // a new reply opens on its thinking row
       use('e1', 'Edit', { file_path: '/repo/src/values.ts', old_string: fileBody.slice(0, 2000), new_string: fileBody.slice(2000, 5000) }),
       res('e1', 'File updated'),
       ...filler(30),
@@ -90,8 +91,8 @@ describe('shrinkOld', () => {
     expect(inputs).toBe(2);
     expect(out[1]!.toolUses[0]!.input['file_path']).toBe('/repo/src/values.ts');
     expect((out[1]!.toolUses[0]!.input['content'] as string).length).toBeLessThan(1000);
-    expect((out[3]!.toolUses[0]!.input['new_string'] as string)).toContain(SHRINK_NOTE_PREFIX);
-    expect((out[3]!.toolUses[0]!.input['old_string'] as string)).toContain(SHRINK_NOTE_PREFIX);
+    expect((out[4]!.toolUses[0]!.input['new_string'] as string)).toContain(SHRINK_NOTE_PREFIX);
+    expect((out[4]!.toolUses[0]!.input['old_string'] as string)).toContain(SHRINK_NOTE_PREFIX);
   });
 
   it('leaves recent calls, the preserved tail and the first row alone', () => {
@@ -180,19 +181,81 @@ describe('shrinkOld', () => {
     expect(shrinkOf(messages).inputs).toBe(0);
   });
 
-  it('shortens a long old assistant text row but keeps its salient lines', () => {
-    const reply = [...Array.from({ length: 60 }, (_, i) => `Paragraph ${i} explains the plan in some detail and at some length.`), 'Merged as #4567 at sha 9f8e7d6c5b.', ...Array.from({ length: 20 }, () => 'More prose.')].join('\n');
-    const messages = [msg('user', 'go'), msg('assistant', reply), ...filler(30)];
+  const reply = [...Array.from({ length: 60 }, (_, i) => `Paragraph ${i} explains the plan in some detail and at some length.`), 'Merged as #4567 at sha 9f8e7d6c5b.', ...Array.from({ length: 20 }, () => 'More prose.')].join('\n');
+
+  it('folds a long old reply that leads into a call into one rebuilt row, keeping its salient lines', () => {
+    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), use('b1', 'Bash', { command: 'echo hi' }), res('b1', 'hi'), ...filler(30)];
+    const { messages: out, texts, inputs } = shrinkOf(messages);
+    expect([texts, inputs]).toEqual([1, 0]);
+    expect(out).toHaveLength(messages.length - 1);
+    expect(out[1]).toBe(messages[1]);
+    const row = out[2]!;
+    expect(row.toolUses.map((u) => u.tool_use_id)).toEqual(['b1']);
+    expect(row.text.length).toBeLessThan(reply.length / 2);
+    expect(row.text).toContain('#4567');
+    expect(row.text).toContain(SHRINK_NOTE_PREFIX);
+    expect(out[3]).toBe(messages[4]);
+  });
+
+  it('leaves a reply with no call alone: its last row carries the turn-end riders (stop-hook feedback)', () => {
+    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), msg('assistant', reply), ...filler(30)];
     const { messages: out, texts } = shrinkOf(messages);
-    expect(texts).toBe(1);
-    expect(out[1]!.text.length).toBeLessThan(reply.length / 2);
-    expect(out[1]!.text).toContain('#4567');
-    expect(out[1]!.text).toContain(SHRINK_NOTE_PREFIX);
+    expect(texts).toBe(0);
+    out.forEach((m, i) => expect(m).toBe(messages[i]));
+  });
+
+  it('rebuilds an interleaved parallel reply only whole: no row of it is left after a rebuilt one', () => {
+    // Claude Code writes a streamed parallel reply as use A, result A, use B, result B (one message
+    // id) and merges an id's rows into its first row's place: a rebuilt A before an own B splits it.
+    const chain = (b: Record<string, unknown>) => [
+      msg('user', 'go'), msg('assistant', ''),
+      use('a', 'Bash', { command: heredoc }), res('a', 'one'),
+      use('b', 'Bash', b), res('b', 'two'),
+      ...filler(30),
+    ];
+    const both = chain({ command: heredoc });
+    const out = shrinkOf(both);
+    expect(out.inputs).toBe(2);
+    expect(out.messages[1]).toBe(both[1]);
+    expect([out.messages[2], out.messages[4]].every((m, k) => m !== both[2 + 2 * k])).toBe(true);
+    // B not shortened: it is rebuilt anyway (unchanged) so that A may be.
+    const shortB = chain({ command: 'echo b' });
+    const out2 = shrinkOf(shortB);
+    expect(out2.inputs).toBe(1);
+    expect(out2.messages[4]).not.toBe(shortB[4]);
+    expect(out2.messages[4]!.toolUses[0]!.input).toEqual({ command: 'echo b' });
+    // B not rebuildable (a row after its tool_use): A stays too.
+    const stuck = [msg('user', 'go'), msg('assistant', ''), use('a', 'Bash', { command: heredoc }), res('a', 'one'), use('b', 'Bash', { command: heredoc }), msg('assistant', 'and more'), res('b', 'two'), ...filler(30)];
+    const out3 = shrinkOf(stuck, { shrinkOldText: false });
+    expect(out3.inputs).toBe(0);
+    out3.messages.forEach((m, i) => expect(m).toBe(stuck[i]));
+  });
+
+  it('keeps a quoted token the head cut would split', () => {
+    const text = `${'a'.repeat(290)} PLANTED_TOKEN_7_1234 ${'b'.repeat(2000)}\n${'c'.repeat(500)}`;
+    const out = shrinkText(text, { head: 300, what: 'x', hint: 'y' }, ['PLANTED_TOKEN_7_1234']);
+    expect(out).not.toBe(text);
+    expect(out).toContain('PLANTED_TOKEN_7_1234');
+  });
+
+  it('sees a quote at the start of a line of a later multi-line command', () => {
+    const body = fileBody.replace('export const value200 = 200;', 'src/deep/quotedfilename.ts');
+    const messages = [
+      msg('user', 'go'),
+      use('w1', 'Write', { file_path: '/repo/x.ts', content: body }), res('w1', 'ok'),
+      msg('assistant', ''),
+      use('b2', 'Bash', { command: 'ls\nsrc/deep/quotedfilename.ts' }), res('b2', 'ok'),
+      ...filler(30),
+    ];
+    const content = shrinkOf(messages).messages[1]!.toolUses[0]!.input['content'] as string;
+    expect(content).toContain(SHRINK_NOTE_PREFIX);
+    expect(content).toContain('src/deep/quotedfilename.ts');
   });
 
   it('is idempotent: a second pass over its output changes nothing and nests no note', () => {
-    const messages = [msg('user', 'go'), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), msg('assistant', fileBody), ...filler(30)];
+    const messages = [msg('user', 'go'), msg('assistant', reply), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), ...filler(30)];
     const once = shrinkOf(messages).messages;
+    expect(once[1]!.text).toContain(SHRINK_NOTE_PREFIX);
     const twice = shrinkOf(once);
     expect(twice.inputs + twice.texts).toBe(0);
     twice.messages.forEach((m, i) => expect(m).toBe(once[i]));

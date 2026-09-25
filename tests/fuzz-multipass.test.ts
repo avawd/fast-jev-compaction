@@ -115,7 +115,7 @@ function blobOf(messages: readonly Message[]): string {
   return messages.map((m) => [m.text, ...m.toolUses.map((u) => JSON.stringify(u.input)), ...(m.toolResults ?? []).map((r) => r.text)].join('\n')).join('\n');
 }
 
-/** Shrink notes (shrink.ts) in every text and input string: never more than one in any. */
+/** Shrink notes (shrink.ts): never more than one in an input string, never nested in a text. */
 function shrinkNotesNest(seed: number, messages: readonly Message[]): string[] {
   const fail: string[] = [];
   const visit = (value: unknown, where: string): void => {
@@ -125,7 +125,10 @@ function shrinkNotesNest(seed: number, messages: readonly Message[]): string[] {
     } else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) visit(v, `${where}.${k}`);
   };
   messages.forEach((m, k) => {
-    visit(m.text, `row ${k} text`);
+    // A row may hold several folded replies (shrink.ts joins them with a blank line), each with
+    // its own note; a nested note would sit in another's head, with no blank line between them.
+    const notes = m.text.split(SHRINK_NOTE_PREFIX).slice(1, -1);
+    if (notes.some((between) => !between.includes('\n\n'))) fail.push(`seed ${seed}: nested shrink notes in row ${k} text`);
     for (const u of m.toolUses) visit(u.input, `${u.tool_use_id} input`);
   });
   return fail;

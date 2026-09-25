@@ -46,6 +46,11 @@ export interface Transcript {
   exoticMcp: Set<string>;
   /** Env-assignment, header and heredoc values planted in Bash commands; no fork prompt may carry one. */
   secrets: string[];
+  /**
+   * Which reply (one API message id) each assistant row belongs to. Claude Code merges every row
+   * of a reply into its first row's place, however far apart they were written.
+   */
+  replies: Map<Row, string>;
 }
 
 const EMOJI = ['😀', '🎉', '𝔘', '🚀', '𠜎'];
@@ -235,15 +240,20 @@ function inputFor(r: Rng, tool: string, i: number, secrets: string[]): Record<st
 
 /** Lines of filler, some salient, one maybe carrying a token a later row quotes, an astral char near a cut. */
 function longLines(r: Rng, i: number, quotesOut: string[], prefix: string): string[] {
-  const lines = Array.from({ length: int(r, 20, 140) }, (_, k) => {
+  const lines: string[] = Array.from({ length: int(r, 20, 140) }, (_, k) => {
     const salient = chance(r, 0.05) ? ` ref #${1000 + k} at ${(0xabc0000 + k * 7 + i).toString(16)}` : '';
     const astral = chance(r, 0.05) ? pick(r, EMOJI) : '';
     return `${prefix} ${i}.${k} ${'w'.repeat(int(r, 5, 190))}${astral}${salient}`;
   });
   if (chance(r, 0.5)) {
     const token = `PLANTED_TOKEN_${i}_${int(r, 0, 9999)}`;
-    const at = int(r, 0, lines.length - 1);
-    lines[at] = `${chance(r, 0.2) ? 'z'.repeat(int(r, 100, 500)) : ''}${lines[at]} ${token}`;
+    if (chance(r, 0.25)) {
+      // Straddling a head cut (Write 300, Bash 300 after a ~27-char first line, prompts and replies 600).
+      lines[0] = `${'z'.repeat(pick(r, [int(r, 262, 299), int(r, 575, 599)]))} ${token} ${'y'.repeat(400)}`;
+    } else {
+      const at = int(r, 0, lines.length - 1);
+      lines[at] = `${chance(r, 0.2) ? 'z'.repeat(int(r, 100, 500)) : ''}${lines[at]} ${token}`;
+    }
     quotesOut.push(token);
   }
   return lines;
@@ -285,7 +295,12 @@ export interface GenOptions {
 export function genTranscript(seed: number, options: GenOptions = {}): Transcript {
   const r = rng(seed);
   let handle = 0;
-  const row = (m: Message): Row => ({ ...m, handle: `h${handle++}` });
+  const replies = new Map<Row, string>();
+  const row = (m: Message, reply?: string): Row => {
+    const made: Row = { ...m, handle: `h${handle++}` };
+    if (m.role === 'assistant') replies.set(made, reply ?? `own${handle}`);
+    return made;
+  };
   const messages: Row[] = [row({ role: 'user', text: 'Start the task.', toolUses: [] })];
   const quotes: Quote[] = [];
   const exoticMcp = new Set<string>();
@@ -313,14 +328,21 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       messages.push(row({ role: 'assistant', text: longReply(rl, i, planted), toolUses: [] }));
       pendingQuotes.push(...planted.map((token) => ({ token })));
     }
-    if (chance(r, 0.4)) messages.push(row({ role: 'assistant', text: '', toolUses: [] })); // thinking
+    const reply = `r${i}`;
+    if (chance(r, 0.4)) messages.push(row({ role: 'assistant', text: '', toolUses: [] }, reply)); // thinking
     const text = chance(r, 0.5) ? `Now step ${i}.` : '';
-    if (merged && chance(r, 0.5)) {
-      messages.push(row({ role: 'assistant', text: text || `Step ${i}.`, toolUses: uses }));
+    const mergedRow = merged && chance(r, 0.5);
+    const useRows: Row[] = [];
+    if (mergedRow) {
+      messages.push(row({ role: 'assistant', text: text || `Step ${i}.`, toolUses: uses }, reply));
     } else {
-      if (text) messages.push(row({ role: 'assistant', text, toolUses: [] }));
-      for (const u of uses) messages.push(row({ role: 'assistant', text: '', toolUses: [u] }));
+      // Sometimes a long reply leads straight into the call (shrink.ts folds it into the rebuilt row).
+      if (text) messages.push(row({ role: 'assistant', text: chance(rl, 0.15) ? longReply(rl, i, []) : text, toolUses: [] }, reply));
+      for (const u of uses) useRows.push(row({ role: 'assistant', text: '', toolUses: [u] }, reply));
     }
+    // A streamed parallel reply as Claude Code writes it: use A, result A, use B, result B.
+    const interleave = useRows.length > 1 && chance(rl, 0.4);
+    if (!interleave) messages.push(...useRows);
     const results: ToolResult[] = uses.map((u) => {
       const f = chance(r, 0.6) ? fact(r, n++) : undefined;
       const built = resultFor(r, u, i, f);
@@ -332,7 +354,9 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       if (f && built.text.includes(f)) introduced.push(f);
       return result;
     });
-    if (merged && chance(r, 0.5)) messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: results }));
+    if (interleave) {
+      useRows.forEach((u, k) => messages.push(u, row({ role: 'user', text: '', toolUses: [], toolResults: [results[k]!] })));
+    } else if (merged && chance(r, 0.5)) messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: results }));
     else for (const res of results) messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: [res] }));
 
     if (introduced.length > 0 && chance(r, 0.5)) {
@@ -360,9 +384,17 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
     // A token a long input or reply planted, quoted later: it must survive their shortening.
     if (pendingQuotes.length > 0 && chance(rl, 0.3)) {
       const { token, carrier } = pendingQuotes.splice(int(rl, 0, pendingQuotes.length - 1), 1)[0]!;
-      const q = row({ role: 'assistant', text: `Using ${token} from earlier.`, toolUses: [] });
-      messages.push(q);
-      quotes.push({ token, kind: 'text', row: q, ...(carrier ? { carrier } : {}) });
+      if (chance(rl, 0.4)) {
+        // Quoted at the start of a line of a multi-line command (JSON would glue it to `\n`).
+        const useId = `lq${i}`;
+        messages.push(row({ role: 'assistant', text: '', toolUses: [{ tool_use_id: useId, tool: 'Bash', input: { command: `cd /repo\n${token} --check` } }] }));
+        messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: useId, text: 'checked', isError: false }] }));
+        quotes.push({ token, kind: 'tool', useId, ...(carrier ? { carrier } : {}) });
+      } else {
+        const q = row({ role: 'assistant', text: `Using ${token} from earlier.`, toolUses: [] });
+        messages.push(q);
+        quotes.push({ token, kind: 'text', row: q, ...(carrier ? { carrier } : {}) });
+      }
     }
     if (chance(r, 0.15)) messages.push(row({ role: 'user', text: `user says ${i} ${chance(r, 0.3) ? pick(r, EMOJI) : ''}`, toolUses: [] }));
   }
@@ -370,7 +402,7 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   if (chance(r, 0.1)) messages.push(row({ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'inflight', tool: 'Bash', input: { command: 'npm test' } }] }));
   else messages.push(row({ role: 'user', text: 'Carry on.', toolUses: [] }));
   const cwd = chance(r, 0.5) ? '/repo' : undefined;
-  return { messages, quotes, exoticMcp, secrets, ...(cwd ? { cwd } : {}) };
+  return { messages, quotes, exoticMcp, secrets, replies, ...(cwd ? { cwd } : {}) };
 }
 
 /** Ids listed in a scorer prompt's candidate lines. */
