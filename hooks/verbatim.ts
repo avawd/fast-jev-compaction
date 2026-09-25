@@ -476,9 +476,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (wantsSummary(event)) return await handOff();
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
+      const ridersStarted = Date.now();
       const riders = await riderIds($, event.messages, event.agentId);
+      const ridersMs = Date.now() - ridersStarted;
       if (typeof riders === 'string') debug($, `riders unknown (${riders}); pruning without that guard`);
-      else if (riders.length > 0) debug($, `${riders.length} result${riders.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+      else debug($, `${riders.length} result${riders.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them; API view read in ${ridersMs} ms`);
       const { result, messages } = await compactSession(
         event.messages, config, fork, sleep, background, await sessionCwd($), typeof riders === 'string' ? [] : riders,
       );
