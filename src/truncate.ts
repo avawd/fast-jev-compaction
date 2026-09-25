@@ -2,7 +2,8 @@ import { sliceWhole, sliceWholeEnd } from './text.js';
 
 export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
-const NOTE_RE = /\[verbatim-compaction truncated (\d+) chars of this tool result( \(error\))?; re-run the tool if needed\]/g;
+/** Not global: a shared /g regex carries `lastIndex` from one call into the next (`matchAll` copies it). */
+const NOTE_RE = /\[verbatim-compaction truncated (\d+) chars of this tool result( \(error\))?; re-run the tool if needed\]/;
 
 function note(removed: number, isError: boolean): string {
   return `${TRUNCATION_NOTE_PREFIX} ${removed} chars of this tool result${isError ? ' (error)' : ''}; re-run the tool if needed]`;
@@ -18,7 +19,7 @@ export function shrinks(resultChars: number, headChars: number, tailChars = 0): 
 }
 
 /** An earlier pass's truncation: the kept head and tail around its one note, and its count. */
-interface Truncated {
+export interface Truncated {
   head: string;
   tail: string;
   removed: number;
@@ -27,8 +28,19 @@ interface Truncated {
   end: number;
 }
 
+/** Whether an earlier compaction already truncated this result (it carries at least one note). */
+export function isTruncated(text: string): boolean {
+  return NOTE_RE.test(text);
+}
+
+/** The earlier truncation this result carries, if it carries exactly one note. */
+export function priorTruncation(text: string): Truncated | undefined {
+  const found = earlierTruncation(text);
+  return found === 'nested' ? undefined : found;
+}
+
 function earlierTruncation(text: string): Truncated | 'nested' | undefined {
-  const found = [...text.matchAll(NOTE_RE)];
+  const found = [...text.matchAll(new RegExp(NOTE_RE.source, 'g'))];
   if (found.length === 0) return undefined;
   if (found.length > 1) return 'nested';
   const m = found[0]!;

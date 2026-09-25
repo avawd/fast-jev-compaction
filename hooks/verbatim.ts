@@ -4,7 +4,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
-import { gateRatio } from '../src/gate.js';
+import { gateOutcome, gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
@@ -174,7 +174,9 @@ export async function compactSession(
       ? () => false
       : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
   });
-  const result = await compact(messages, scorer, cwd ? { ...config, cwd } : config);
+  // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
+  const options = { ...config, escalateBelow: config.minReductionRatio };
+  const result = await compact(messages, scorer, cwd ? { ...options, cwd } : options);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -186,7 +188,8 @@ function claudeStage(stats: CompactResult['stats']): string {
 export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
-    `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}`;
+    `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
+    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */
@@ -342,7 +345,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
       const forks = describeForks(result);
       if (forks) debug($, forks);
-      if (gateRatio(result) < config.minReductionRatio) {
+      const outcome = gateOutcome(gateRatio(result), config.minReductionRatio, event.trigger);
+      if (outcome === 'skip') {
+        // The plugin's own early request: nothing needs the room yet, and a summary would lose every
+        // verbatim fact. Wait for context to drop (Claude Code's own compaction still runs at its threshold).
+        awaitingDrop = true;
+        const reason = `pruning would free only ${Math.round(gateRatio(result) * 100)}% of tool output ` +
+          `(under ${Math.round(config.minReductionRatio * 100)}%); left as is until Claude Code's own compaction`;
+        notify($, `skipped: ${reason} (${summarize(result)})`, false);
+        return { skip: reason };
+      }
+      if (outcome === 'summary') {
         notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
         return handOff();
       }

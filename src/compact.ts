@@ -1,6 +1,7 @@
 import { annotateCalls } from './annotate.js';
 import { collectToolCalls } from './calls.js';
-import { resultChars } from './gate.js';
+import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
+import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
 import { truncatedResultText } from './truncate.js';
@@ -13,6 +14,7 @@ import type {
   Scorer,
   ScoreOutcome,
   ToolCall,
+  Verdict,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -185,15 +187,33 @@ export async function compact(
   const started = Date.now();
   const resolved = resolveOptions(options);
   const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages), messages, resolved);
-  const charsBefore = messages.reduce((sum, m) => sum + messageChars(m), 0);
   const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
   const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
     ? await scorer(calls)
     : { verdicts: new Map(), claude: 'skipped' };
+  const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started);
+  const gate = options.escalateBelow;
+  if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
+  const strict = tier2Options(resolved);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
+  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
+  if (!(gateRatio(second) > gateRatio(first))) return first;
+  return { ...second, stats: { ...second.stats, tier: 2 } };
+}
 
+/** Decisions from verdicts, shaped (pins, tails), applied; the stats of what happened. */
+function build(
+  messages: readonly Message[],
+  source: readonly Message[],
+  calls: readonly ToolCall[],
+  verdicts: ReadonlyMap<string, Verdict>,
+  resolved: ResolvedCompactOptions,
+  outcome: ScoreOutcome,
+  started: number,
+): CompactResult {
   const scored: CallDecision[] = calls.map((call) => {
     if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
-    const verdict = outcome.verdicts.get(call.id);
+    const verdict = verdicts.get(call.id);
     if (!verdict) return { id: call.id, tool: call.tool, action: 'keep', source: 'default' };
     const decision: CallDecision = {
       id: call.id,
@@ -216,7 +236,7 @@ export async function compact(
   const stats: CompactResult['stats'] = {
     messagesBefore: messages.length,
     messagesAfter: kept.length,
-    charsBefore,
+    charsBefore: messages.reduce((sum, m) => sum + messageChars(m), 0),
     resultCharsBefore: resultChars(messages),
     charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
     calls: calls.length,

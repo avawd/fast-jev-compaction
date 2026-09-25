@@ -69,6 +69,7 @@ function check(seed: number, original: Map<string, string>, first: Map<string, s
       }
     }
     if (wasN === 1 && text.length > was.length) fail.push(`${id}: grew on the second pass`);
+
   }
   return fail.map((f) => `seed ${seed}: ${f}`);
 }
@@ -95,6 +96,7 @@ function pinsHeld(seed: number, first: readonly Message[], second: readonly Mess
 describe('fuzz: a second compaction over the first one\'s output', () => {
   it(`never nests notes, keeps counts exact, and keeps pins over ${SEEDS} seeds`, async () => {
     const failures: string[] = [];
+    let escalated = 0;
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const transcript = genTranscript(seed);
       const run = await runCase(seed, transcript);
@@ -105,13 +107,17 @@ describe('fuzz: a second compaction over the first one\'s output', () => {
         truncateHeadChars: pick(r, [0, 50, 100, 300]),
         truncateTailChars: pick(r, [0, 200, 1000]),
         staleAfterMessages: int(r, 2, 60),
+        // Tier 2 (src/escalate.ts) too: it re-cuts old truncations, so it must keep every invariant.
+        ...(chance(r, 0.6) ? { escalateBelow: pick(r, [0.25, 0.9]) } : {}),
       };
       const second = await compact(run.result.messages, secondScorer(seed), options);
+      if (second.stats.tier === 2) escalated += 1;
       failures.push(...check(seed, results(transcript.messages), results(run.result.messages), results(second.messages)));
       // Text quotes only: a tool-input quote can go with its call, and then nothing refers to the token.
       const quotes = transcript.quotes.flatMap((q) => (q.kind === 'text' ? [{ token: q.token, row: q.row as Message }] : []));
       failures.push(...pinsHeld(seed, run.result.messages, second.messages, quotes));
     }
     expect({ failures: failures.slice(0, 25), total: failures.length }).toEqual({ failures: [], total: 0 });
+    expect(escalated).toBeGreaterThan(SEEDS / 20);
   }, Math.max(60_000, SEEDS * 100));
 });

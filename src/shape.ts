@@ -1,5 +1,6 @@
 import { pinnedWindow } from './pin.js';
 import { bashCommand, readonlyFamilyKey, sourceReadPaths, stripCommandPrefix } from './rules-bash.js';
+import { priorTruncation } from './truncate.js';
 import type { CallDecision, ResolvedCompactOptions, ToolCall } from './types.js';
 
 /** A command word that marks a run whose verdict is printed last. */
@@ -64,14 +65,16 @@ export function planShapes(
   const planned = decisions.map((decision): CallDecision => {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') return decision;
-    // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either.
-    const preferred = decision.headChars !== 0 && wantsTail(call) ? options.truncateTailChars : 0;
+    const text = texts.get(call.tool_use_id) ?? call.resultText ?? '';
+    // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either. Nor
+    // does a result an earlier pass cut to its head: its end is already gone.
+    const headOnly = priorTruncation(text)?.tail === '';
+    const preferred = decision.headChars !== 0 && !headOnly && wantsTail(call) ? options.truncateTailChars : 0;
     const tokens = options.pinReferenced ? (call.refTokens ?? []) : [];
     if (tokens.length === 0) {
       if (decision.action === 'drop_result' && preferred > 0) tails.set(call.tool_use_id, preferred);
       return decision;
     }
-    const text = texts.get(call.tool_use_id) ?? call.resultText ?? '';
     const head = decision.headChars ?? options.truncateHeadChars;
     const window = pinnedWindow(text, tokens, {
       head,
