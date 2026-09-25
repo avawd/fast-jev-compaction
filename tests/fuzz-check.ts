@@ -70,6 +70,8 @@ function setupFor(seed: number, transcript: Transcript): CaseSetup {
   if (chance(r, 0.4)) {
     const ids = transcript.messages.flatMap((m) => m.toolUses.map((u) => u.tool_use_id));
     options.protectedResultIds = ids.filter(() => chance(r, 0.2));
+    // ...and user text rows (a teammate row a typed prompt rides on).
+    options.protectedRows = transcript.messages.filter((m) => m.role === 'user' && m.text.trim() && !(m.toolResults ?? []).length && chance(r, 0.3));
   }
   return { options, scorerKind: chance(r, 0.7) ? 'claude' : 'raw', timed: chance(r, 0.75) };
 }
@@ -381,6 +383,10 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       const holds = m.toolUses.some((u) => u.tool_use_id === id) || (m.toolResults ?? []).some((x) => x.tool_use_id === id);
       if (holds && !session.includes(m as SessionRow)) fail(`protected call ${id}: its row ${m.handle} was rebuilt or dropped`);
     }
+  }
+
+  for (const m of setup.options.protectedRows ?? []) {
+    if (!session.includes(m as SessionRow)) fail(`protected row ${(m as SessionRow).handle} was rebuilt or dropped`);
   }
 
   // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.

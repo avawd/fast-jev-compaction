@@ -118,6 +118,24 @@ describe('riders', () => {
     expect(h.debugLogs.join('\n')).toMatch(/1 result kept whole: riders/);
   });
 
+  it('keeps a stale teammate row whole when a typed prompt rides on it', async () => {
+    const body = Array.from({ length: 80 }, (_, i) => `- line ${i} of a long stale report, long enough to cut`).join('\n');
+    const tm = `Another Claude session sent a message:\n<teammate-message teammate_id="a1" color="blue">\n${body}\n</teammate-message>`;
+    const input = [
+      m('user', 'Start.', { handle: 'h0' }),
+      m('user', tm, { handle: 'h1' }),
+      ...Array.from({ length: 120 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`, { handle: `r${i}` })),
+    ];
+    const typed = async () => [{ role: 'user', content: [{ type: 'text', text: 'Start.' }, { type: 'text', text: tm }, { type: 'text', text: '<system-reminder>\nThe user sent a new message while you were working:\nTYPED\n</system-reminder>' }] }];
+    const guarded = harness({ userConfig: { useClaudeScorer: false, minReductionRatio: 0.01 }, apiMessages: typed });
+    const out = (await guarded.compact({ trigger: 'manual', messages: input })) as { messages?: SessionMessage[] };
+    expect(out.messages === undefined || out.messages[1] === input[1]).toBe(true);
+    expect(guarded.debugLogs.join('\n')).toMatch(/1 message kept whole: riders/);
+    const bare = harness({ userConfig: { useClaudeScorer: false, minReductionRatio: 0.01 }, apiMessages: async () => [] });
+    const cut = (await bare.compact({ trigger: 'manual', messages: input })) as { messages: SessionMessage[] };
+    expect(cut.messages[1]).not.toBe(input[1]);
+  });
+
   it('still truncates it when only an ephemeral reminder rides on it', async () => {
     const h = harness({ userConfig: { useClaudeScorer: false }, apiMessages: api('<total_tokens>5 tokens left</total_tokens>') });
     const input = transcript();

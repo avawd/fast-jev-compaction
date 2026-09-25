@@ -211,12 +211,15 @@ export function teammateChars(messages: readonly Message[]): number {
 export function compactUserRows(
   messages: readonly Message[],
   options: ResolvedCompactOptions,
+  /** Rows carrying riders (riders.ts): never rebuilt. */
+  protectedRows: ReadonlySet<Message> = new Set(),
 ): { messages: Message[]; stats: UserRowStats } {
   const stats: UserRowStats = { teammateChars: teammateChars(messages), rows: 0, charsSaved: 0, restated: 0, repeated: 0, stale: 0, notices: 0 };
   const { dedupeTeammates, trimStaleTeammates, dedupePeerNotice } = options;
   if (!dedupeTeammates && !trimStaleTeammates && !dedupePeerNotice) return { messages: [...messages], stats };
   const total = messages.length;
   const guarded = guardedRows(messages, options);
+  messages.forEach((m, row) => { if (protectedRows.has(m)) guarded.add(row); });
   const quotes = quoteIndex(messages);
   const blocks = messages.flatMap((m, row) => (isTeammateRow(m) ? blocksOf(m.text, row) : []));
   const edits = new Map<Block, string>();

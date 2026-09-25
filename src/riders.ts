@@ -41,30 +41,46 @@ function isEphemeral(block: Record<string, unknown>): boolean {
 }
 
 /**
- * tool_use_ids whose results carry a non-ephemeral rider. `rows` gives the user text messages the
- * hook sees: a text block equal to one is that message, not a rider, and ends the scan (what
- * follows it hangs on that message).
+ * What carries a non-ephemeral rider: calls (by tool_use_id, from the result it follows) and user
+ * text rows (by object, from the text block that is that row). `rows` are the messages the hook
+ * sees; a user row's text starts that row, and whatever follows it before the next result or row
+ * hangs on it. Rows with identical text are all protected when one is (the view cannot tell them apart).
  */
-export function riderProtectedIds(api: readonly ApiLike[], rows: readonly Message[]): Set<string> {
-  const userTexts = new Set(rows.filter((m) => m.role === 'user' && m.text.trim()).map((m) => m.text));
-  const protectedIds = new Set<string>();
+export function riderProtected(
+  api: readonly ApiLike[],
+  rows: readonly Message[],
+): { callIds: Set<string>; rows: Set<Message> } {
+  const byText = new Map<string, Message[]>();
+  for (const m of rows) {
+    if (m.role !== 'user' || !m.text.trim() || (m.toolResults ?? []).length > 0) continue;
+    byText.set(m.text, [...(byText.get(m.text) ?? []), m]);
+  }
+  const callIds = new Set<string>();
+  const protectedRows = new Set<Message>();
   for (const message of api) {
     if (message.role !== 'user' || !Array.isArray(message.content)) continue;
-    let current: string | undefined;
+    let current: { id: string } | { rows: Message[] } | undefined;
     for (const block of message.content) {
       if (block['type'] === 'tool_result') {
-        current = typeof block['tool_use_id'] === 'string' ? block['tool_use_id'] : undefined;
+        current = typeof block['tool_use_id'] === 'string' ? { id: block['tool_use_id'] } : undefined;
         continue;
       }
-      if (current === undefined) continue;
-      if (block['type'] === 'text' && typeof block['text'] === 'string' && userTexts.has(block['text'])) {
-        current = undefined;
+      const own = block['type'] === 'text' && typeof block['text'] === 'string' ? byText.get(block['text']) : undefined;
+      if (own) {
+        current = { rows: own };
         continue;
       }
-      if (!isEphemeral(block)) protectedIds.add(current);
+      if (current === undefined || isEphemeral(block)) continue;
+      if ('id' in current) callIds.add(current.id);
+      else for (const m of current.rows) protectedRows.add(m);
     }
   }
-  return protectedIds;
+  return { callIds, rows: protectedRows };
+}
+
+/** tool_use_ids whose results carry a non-ephemeral rider (see riderProtected). */
+export function riderProtectedIds(api: readonly ApiLike[], rows: readonly Message[]): Set<string> {
+  return riderProtected(api, rows).callIds;
 }
 
 /**

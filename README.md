@@ -145,7 +145,10 @@ sees, more than its tool output. Typed prompts are never changed; teammate messa
 The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
 A cut must save 30% of its block. A block holding a note is never cut again. The gate
 (`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
-compaction clear the gate, never make it harder than tool output alone would. This pass never rewrites: the first
+compaction clear the gate, never make it harder than tool output alone would. A prompt you type that pastes a whole teammate message, header and all, and nothing else, looks exactly
+like one and may be cut like one; a paste with any text of your own around it is never touched.
+A teammate message a prompt rides on (typed right after it arrived) is kept whole (see Riders).
+This pass never rewrites: the first
 message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
 and the first user message after a summary (it carries the re-sent instructions, see above).
 

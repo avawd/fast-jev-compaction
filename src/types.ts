@@ -187,6 +187,8 @@ export interface CompactOptions {
    * (see riders.ts). Default none.
    */
   protectedResultIds?: readonly string[];
+  /** Input rows (user text rows) carrying riders (riders.ts): every pass returns them unchanged. */
+  protectedRows?: readonly Message[];
 }
 
 export interface ResolvedCompactOptions {

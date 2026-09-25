@@ -6,7 +6,7 @@ import type {
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
 import { gateOutcome, gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
-import { riderProtectedIds, type ApiLike } from '../src/riders.js';
+import { riderProtected, type ApiLike } from '../src/riders.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
 
@@ -201,6 +201,8 @@ export async function compactSession(
   cwd?: string,
   /** Calls whose rows carry riders a rebuild would lose (src/riders.ts): kept whole. */
   protectedResultIds: readonly string[] = [],
+  /** User text rows carrying riders (src/riders.ts): returned unchanged. */
+  protectedRows: readonly SessionMessage[] = [],
 ): Promise<{ result: CompactResult; messages: SessionMessage[] }> {
   const scorer = makeScorer({
     fork,
@@ -218,7 +220,7 @@ export async function compactSession(
       : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio, resolveOptions(config)),
   });
   // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
-  const options = { ...config, escalateBelow: config.minReductionRatio, protectedResultIds };
+  const options = { ...config, escalateBelow: config.minReductionRatio, protectedResultIds, protectedRows };
   const result = await compact(messages, scorer, cwd ? { ...options, cwd } : options);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
@@ -436,11 +438,12 @@ export async function riderIds(
   $: { session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> } },
   messages: readonly SessionMessage[],
   agentId?: string,
-): Promise<string[] | string> {
+): Promise<{ ids: string[]; rows: SessionMessage[] } | string> {
   try {
     const api = await $.session.messages(agentId === undefined ? { as: 'api' } : { as: 'api', agentId });
     if (!Array.isArray(api)) return `no API view (${JSON.stringify(api).slice(0, 120)})`;
-    return [...riderProtectedIds(api as ApiLike[], messages)];
+    const found = riderProtected(api as ApiLike[], messages);
+    return { ids: [...found.callIds], rows: messages.filter((m) => found.rows.has(m)) };
   } catch (error) {
     return message(error);
   }
@@ -504,9 +507,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const riders = await riderIds($, event.messages, event.agentId);
       if (typeof riders === 'string') debug($, `riders unknown (${riders}); pruning without that guard`);
-      else if (riders.length > 0) debug($, `${riders.length} result${riders.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+      else {
+        if (riders.ids.length > 0) debug($, `${riders.ids.length} result${riders.ids.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+        if (riders.rows.length > 0) debug($, `${riders.rows.length} message${riders.rows.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+      }
       const { result, messages } = await compactSession(
-        event.messages, config, fork, sleep, background, await sessionCwd($), typeof riders === 'string' ? [] : riders,
+        event.messages, config, fork, sleep, background, await sessionCwd($),
+        typeof riders === 'string' ? [] : riders.ids, typeof riders === 'string' ? [] : riders.rows,
       );
       const forks = describeForks(result);
       if (forks) debug($, forks);

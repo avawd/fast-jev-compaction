@@ -225,6 +225,9 @@ export function shrinkOld(
   // A result the work went on to quote is read with its call: its input keeps twice the head.
   const quotedResult = new Set(calls.filter((c) => (c.refLater ?? 0) > 0 && !AUTHORING_TOOLS.has(c.tool)).map((c) => c.tool_use_id));
   const callIndex = new Map(calls.map((c) => [c.tool_use_id, c.callIndex]));
+  // A pinned call's row is never rebuilt, not even as part of a merged run: its riders (riders.ts)
+  // ride on the row object, and a rebuilt row loses them.
+  const pinned = new Set(calls.filter((c) => c.pinned).map((c) => c.tool_use_id));
   let quotes: Map<string, number> | undefined;
   const mustKeep = (at: number) => (text: string) => {
     quotes ??= lastQuotes(original);
@@ -253,6 +256,7 @@ export function shrinkOld(
     const tools = run.slice(firstTool);
     // The tool rows must end the run and all be old: then only their results follow them.
     if (!tools.every((m) => m.toolUses.length > 0 && oldEnough(rowIndex(m)))) return undefined;
+    if (tools.some((m) => m.toolUses.some((u) => pinned.has(u.tool_use_id)))) return undefined;
     if (tools.length > 1 && tools.some((m) => m.text.length > 0)) return undefined;
     const originals = tools.flatMap((m) => m.toolUses);
     const uses = originals.map(shrinkUse);
