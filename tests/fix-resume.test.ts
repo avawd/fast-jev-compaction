@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, linkSync, renameSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -209,6 +209,35 @@ describe('fix-resume file handling', () => {
     expect(readFileSync(file, 'utf8')).toBe(toText(rows) + row);
     expect(backups(file)).toEqual([]);
     expect(readdirSync(join(file, '..'))).toEqual([NAME]);
+  });
+
+  it('aborts when the file is replaced by another inode of the same size and mtime', () => {
+    const file = tmp(rows);
+    const { mtime } = statSync(file);
+    const swap = () => {
+      const other = `${file}.other`;
+      writeFileSync(other, readFileSync(file));
+      utimesSync(other, mtime, mtime);
+      renameSync(other, file);
+    };
+    expect(() => fixFile(file, { write: true, configDir: noSessions(), beforeRename: swap })).toThrow(/changed/);
+    expect(readFileSync(file, 'utf8')).toBe(toText(rows));
+    expect(backups(file)).toEqual([]);
+  });
+
+  it('aborts when only the inode change time moved (e.g. a chmod or a same-size rewrite)', () => {
+    const file = tmp(rows);
+    const touch = () => chmodSync(file, 0o640);
+    expect(() => fixFile(file, { write: true, configDir: noSessions(), beforeRename: touch })).toThrow(/changed/);
+    expect(backups(file)).toEqual([]);
+  });
+
+  it('refuses a file with more than one hard link unless forced, and says why', () => {
+    const file = tmp(rows);
+    linkSync(file, `${file}.hardlink`);
+    expect(() => fixFile(file, { write: true, configDir: noSessions() })).toThrow(/hard link/);
+    const report = fixFile(file, { write: true, force: true, configDir: noSessions() });
+    expect(report.written).toBe(true);
   });
 
   it('refuses a file written in the last two minutes unless forced', () => {

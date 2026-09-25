@@ -26,7 +26,7 @@ import {
   realpathSync, renameSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SCOPE_SUFFIX = /_vc\d+$/;
@@ -155,12 +155,25 @@ function copyToBackup(path, date, mode) {
   }
 }
 
-const unchanged = (a, b) => a.size === b.size && a.mtimeMs === b.mtimeMs;
+/** Makes the rename durable. Some filesystems cannot fsync a directory; the rename has happened either way. */
+function syncDirectory(dir) {
+  let fd;
+  try {
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } catch {
+    // unsupported here (EISDIR/EINVAL/EPERM on some platforms)
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+const unchanged = (a, b) => a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 
 /**
  * Plans (and with `write`, applies) the repair of one transcript. With `write` it throws, leaving the
  * file as it was, when: a live process has the session open; the file was written in the last two
- * minutes (unless `force`); it is not a `<session-id>.jsonl` (a subagent's transcript, a renamed
+ * minutes (unless `force`); it has more than one hard link (unless `force`); it is not a `<session-id>.jsonl` (a subagent's transcript, a renamed
  * copy); or it changed between the read and the rename. A symlink is followed and the real file is
  * rewritten. `beforeRename` is a test seam: it runs after the new content is on disk.
  */
@@ -200,6 +213,11 @@ export function fixFile(file, { write = false, force = false, configDir = defaul
     throw new Error(`${name} is not a session transcript (<session-id>.jsonl); subagent transcripts are not supported`);
   }
   if (pid !== undefined) throw new Error(`session ${sessionId} is running (pid ${pid}); exit it first`);
+  if (before.nlink > 1 && !force) {
+    throw new Error(
+      `${name} has ${before.nlink} hard links; the rewrite replaces this name only, so the other names would keep the unfixed rows. Pass --force to rewrite it anyway`,
+    );
+  }
   if (recentlyModified && !force) {
     throw new Error(`${name} was written in the last two minutes; make sure its session has exited, then pass --force`);
   }
@@ -224,6 +242,7 @@ export function fixFile(file, { write = false, force = false, configDir = defaul
       throw new Error(`${path} changed while it was being fixed (is its session running?); nothing was written`);
     }
     renameSync(temp, path);
+    syncDirectory(dirname(path));
   } catch (error) {
     if (existsSync(temp)) unlinkSync(temp);
     if (backup !== undefined && existsSync(backup)) unlinkSync(backup);

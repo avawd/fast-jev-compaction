@@ -220,21 +220,27 @@ node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl --wr
 - **Safety.** It is a dry run unless you pass `--write`. `--write` refuses in these cases:
   - a live Claude Code process has the session open (`~/.claude/sessions/<pid>.json` with a live pid);
   - the file was written in the last two minutes, unless you also pass `--force`;
+  - the file has more than one hard link, unless you pass `--force` (the rewrite replaces this name
+    only, and the other names keep the unfixed rows);
   - the file is not a `<session-id>.jsonl`, such as a subagent's transcript under `subagents/`, which
     is not supported.
 
   Otherwise it copies the file to `<file>.<UTC timestamp to the ms>.bak` with the same mode. It writes
   the new content to a temp file with the original mode and fsyncs it. Just before the rename it checks
-  the file again, and aborts (removing the temp and the backup) if anything appended to it since the
-  read. It follows a symlink and rewrites the real file. A second run changes nothing, and a transcript
+  the file again (inode, size, mtime and ctime). If anything changed since the read, it aborts and
+  removes the temp and the backup. After the rename it fsyncs the directory where the filesystem
+  supports that. It follows a symlink and rewrites the real file. A second run changes nothing, and a transcript
   with no hook compaction is left untouched.
 - **Cost trackers.** A tool that totals usage per `message.id` (and `requestId`) sees each scoped id as
   a new message. This does not inflate totals: the engine already writes the kept copies with all
   usage counters at 0 (all 285 kept copies in the measured session), and the script leaves `usage` and
   `requestId` as they are. A tracker that counts messages rather than tokens will count those rows
   once more.
-- **Scope.** Run it only on a session that has exited. The next compaction writes new rows the same
-  way, so run it again after that compaction, before the next resume.
+- **Scope.** Run it only on a session that is closed. The checks catch a registered Claude Code
+  process and any change before the rename. A writer that is not registered but still holds the file
+  open can append after the rename, and those rows go to the old, unlinked file and are lost. The next
+  compaction writes new rows the same way, so run it again after that compaction, before the next
+  resume.
 
 ## Cost
 
