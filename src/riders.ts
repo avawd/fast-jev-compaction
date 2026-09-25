@@ -32,47 +32,102 @@ const EPHEMERAL = [
   /^The TodoWrite tool hasn't been used recently/,
 ];
 
-const REMINDER = /^\s*<system-reminder>\s*([\s\S]*?)\s*<\/system-reminder>\s*$/;
+const REMINDER = /<system-reminder>([\s\S]*?)<\/system-reminder>/g;
+
+/**
+ * Whether `text` holds nothing but ephemeral reminders: every `<system-reminder>` in it is one, and
+ * nothing but whitespace lies outside them. An empty text is ephemeral.
+ */
+function ephemeralText(text: string): boolean {
+  const outside = text.replace(REMINDER, '');
+  if (outside.trim() !== '') return false;
+  for (const m of text.matchAll(REMINDER)) {
+    const inner = m[1]!.trim();
+    if (!EPHEMERAL.some((re) => re.test(inner))) return false;
+  }
+  return true;
+}
 
 function isEphemeral(block: Record<string, unknown>): boolean {
-  if (block['type'] !== 'text' || typeof block['text'] !== 'string') return false;
-  const inner = REMINDER.exec(block['text'])?.[1];
-  return inner !== undefined && EPHEMERAL.some((re) => re.test(inner));
+  return block['type'] === 'text' && typeof block['text'] === 'string' && ephemeralText(block['text']);
+}
+
+/** A tool_result block's content as text: a string, or its text blocks joined; other blocks count as content of their own. */
+function resultContent(block: Record<string, unknown>): { text: string; other: boolean } {
+  const content = block['content'];
+  if (typeof content === 'string') return { text: content, other: false };
+  if (!Array.isArray(content)) return { text: '', other: false };
+  const parts = content as Array<Record<string, unknown>>;
+  return {
+    text: parts.filter((p) => p['type'] === 'text' && typeof p['text'] === 'string').map((p) => p['text'] as string).join('\n'),
+    other: parts.some((p) => p['type'] !== 'text'),
+  };
 }
 
 /**
- * What carries a non-ephemeral rider: calls (by tool_use_id, from the result it follows) and user
- * text rows (by object, from the text block that is that row). `rows` are the messages the hook
- * sees; a user row's text starts that row, and whatever follows it before the next result or row
- * hangs on it. Rows with identical text are all protected when one is (the view cannot tell them apart).
+ * Whether a result's API content carries more than the row's own text: 2.1.282's normalizer folds
+ * text that follows a tool_result INTO its content (a verified Slack prompt stays a sibling). What
+ * remains once the row's text is taken out must be ephemeral reminders only. When the two do not
+ * line up (a different join), only the reminders the row's text lacks are judged.
+ */
+function foldedRider(block: Record<string, unknown>, rowText: string | undefined): boolean {
+  const { text } = resultContent(block);
+  if (rowText !== undefined && text.includes(rowText)) return !ephemeralText(text.replace(rowText, ''));
+  const own = rowText ?? '';
+  for (const m of text.matchAll(REMINDER)) {
+    if (own.includes(m[0])) continue;
+    if (!EPHEMERAL.some((re) => re.test(m[1]!.trim()))) return true;
+  }
+  return false;
+}
+
+/**
+ * What carries a non-ephemeral rider, read from the API view (`$.session.messages({ as: "api" })`):
+ * calls (by tool_use_id) and user text rows (by object). `rows` are the messages the hook sees.
+ *
+ * - A rider folded into a result's content protects that result.
+ * - A sibling block protects every result of its message (the normalizer hoists results to the
+ *   front, so position does not say which one it rode on), unless it follows a user row's own
+ *   text: then it rides on that row. Texts are compared trimmed (a merge appends a newline).
+ * - Rows with identical text are all protected when one is.
+ *
+ * The view holds at most 4096 messages; a result outside it is judged unprotected.
  */
 export function riderProtected(
   api: readonly ApiLike[],
   rows: readonly Message[],
 ): { callIds: Set<string>; rows: Set<Message> } {
   const byText = new Map<string, Message[]>();
+  const resultText = new Map<string, string>();
   for (const m of rows) {
+    for (const r of m.toolResults ?? []) resultText.set(r.tool_use_id, r.text);
     if (m.role !== 'user' || !m.text.trim() || (m.toolResults ?? []).length > 0) continue;
-    byText.set(m.text, [...(byText.get(m.text) ?? []), m]);
+    const key = m.text.trim();
+    byText.set(key, [...(byText.get(key) ?? []), m]);
   }
   const callIds = new Set<string>();
   const protectedRows = new Set<Message>();
   for (const message of api) {
     if (message.role !== 'user' || !Array.isArray(message.content)) continue;
-    let current: { id: string } | { rows: Message[] } | undefined;
+    const results: string[] = [];
+    let current: Message[] | undefined;
     for (const block of message.content) {
       if (block['type'] === 'tool_result') {
-        current = typeof block['tool_use_id'] === 'string' ? { id: block['tool_use_id'] } : undefined;
+        const id = typeof block['tool_use_id'] === 'string' ? block['tool_use_id'] : undefined;
+        if (id === undefined) continue;
+        results.push(id);
+        if (foldedRider(block, resultText.get(id))) callIds.add(id);
+        current = undefined;
         continue;
       }
-      const own = block['type'] === 'text' && typeof block['text'] === 'string' ? byText.get(block['text']) : undefined;
+      const own = block['type'] === 'text' && typeof block['text'] === 'string' ? byText.get(block['text'].trim()) : undefined;
       if (own) {
-        current = { rows: own };
+        current = own;
         continue;
       }
-      if (current === undefined || isEphemeral(block)) continue;
-      if ('id' in current) callIds.add(current.id);
-      else for (const m of current.rows) protectedRows.add(m);
+      if (isEphemeral(block)) continue;
+      if (current) for (const m of current) protectedRows.add(m);
+      else for (const id of results) callIds.add(id);
     }
   }
   return { callIds, rows: protectedRows };

@@ -505,10 +505,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (wantsSummary(event)) return await handOff();
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
+      const ridersStarted = Date.now();
       const riders = await riderIds($, event.messages, event.agentId);
+      const ridersMs = Date.now() - ridersStarted;
       if (typeof riders === 'string') debug($, `riders unknown (${riders}); pruning without that guard`);
       else {
-        if (riders.ids.length > 0) debug($, `${riders.ids.length} result${riders.ids.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+        debug($, `${riders.ids.length} result${riders.ids.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them; API view read in ${ridersMs} ms`);
         if (riders.rows.length > 0) debug($, `${riders.rows.length} message${riders.rows.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
       }
       const { result, messages } = await compactSession(

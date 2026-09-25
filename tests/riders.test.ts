@@ -28,9 +28,36 @@ describe('riderProtectedIds', () => {
     expect(riderProtectedIds(api, []).size).toBe(0);
   });
 
-  it('attributes a rider to the result before it, not the one after', () => {
+  it('protects every result of a message a sibling rider follows: the normalizer hoists results to the front', () => {
     const api = [asst('a', 'b'), user(result('a'), result('b'), { type: 'text', text: '<task-notification>done</task-notification>' })];
-    expect([...riderProtectedIds(api, [])]).toEqual(['b']);
+    expect([...riderProtectedIds(api, [])].sort()).toEqual(['a', 'b']);
+  });
+
+  it('protects a result whose content has a rider folded into it', () => {
+    const rows: Message[] = [{ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'a', text: 'out' }] }];
+    const folded = [asst('a'), user(result('a', `out\n${reminder('The user sent a new message while you were working:\nQ').text}`))];
+    expect([...riderProtectedIds(folded, rows)]).toEqual(['a']);
+    const blocks = [asst('a'), user(result('a', [{ type: 'text', text: 'out' }, reminder('The user sent a new message while you were working:\nQ')] as never))];
+    expect([...riderProtectedIds(blocks, rows)]).toEqual(['a']);
+    const ephemeral = [asst('a'), user(result('a', `out\n${reminder('<total_tokens>5 left</total_tokens>').text}`))];
+    expect(riderProtectedIds(ephemeral, rows).size).toBe(0);
+    const plain = [asst('a'), user(result('a', 'out'))];
+    expect(riderProtectedIds(plain, rows).size).toBe(0);
+  });
+
+  it('judges a block holding several reminders by all of them, and by any text outside them', () => {
+    const two = { type: 'text', text: `${reminder('<total_tokens>5 left</total_tokens>').text}\n${reminder('The user sent a new message while you were working:\nQ').text}` };
+    expect([...riderProtectedIds([asst('a'), user(result('a'), two)], [])]).toEqual(['a']);
+    const outside = { type: 'text', text: `${reminder('<total_tokens>5 left</total_tokens>').text}\nplain words` };
+    expect([...riderProtectedIds([asst('a'), user(result('a'), outside)], [])]).toEqual(['a']);
+    const both = { type: 'text', text: `${reminder('<total_tokens>5 left</total_tokens>').text}\n${reminder('SessionStart hook success: x').text}` };
+    expect(riderProtectedIds([asst('a'), user(result('a'), both)], []).size).toBe(0);
+  });
+
+  it('recognises the next typed prompt with a trailing newline the merge added', () => {
+    const rows: Message[] = [{ role: 'user', text: 'next typed prompt', toolUses: [] }];
+    const api = [asst('a'), user(result('a'), { type: 'text', text: 'next typed prompt\n' }, reminder('instructions for the prompt'))];
+    expect(riderProtectedIds(api, rows).size).toBe(0);
   });
 
   it('does not count the next typed prompt (a row of its own) as a rider, nor what follows it', () => {

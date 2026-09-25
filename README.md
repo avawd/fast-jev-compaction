@@ -159,7 +159,10 @@ rebuilt one loses it (measured on 2.1.282: truncating the result of a Bash call 
 was typed removed that prompt from the conversation). So before pruning the hook reads the
 conversation as the model gets it (`$.session.messages({ as: "api" })`) and keeps whole every call
 whose result is followed by anything but an ephemeral reminder (token count, hook context, task and
-todo nags), together with every call sharing a message with it. If that view is unavailable the debug
+todo nags), together with every call sharing a message with it. A rider can reach that view folded
+into the result's own content or as a block beside it; beside it, the normalizer has moved every result
+of the message to the front, so all of them are kept. A block holding several reminders counts as
+ephemeral only when every one of them is. The view holds at most the newest 4096 messages. If that view is unavailable the debug
 log says `riders unknown` and pruning goes on as before.
 
 A call whose assistant message has no text of its own is truncated to its note instead of dropped.
