@@ -38,6 +38,29 @@ describe('skeletonCommand (refusal-prone commands)', () => {
     expect(skeletonCommand('source ~/.profile && wget http://10.0.0.5:8080/x')).toBe('source ~/.profile && wget <url>');
   });
 
+  it('shows no bracketed IPv6 host (re-review MEDIUM-A)', () => {
+    expect(skeletonCommand('curl [2001:db8::1]:8080/x')).toBe('curl <host>');
+    expect(skeletonCommand('ssh -6 [fe80::1%en0] uptime')).toBe('ssh -6 <host>');
+    expect(skeletonCommand('curl [2001:db8::1]:8080/x')).not.toContain('2001');
+  });
+
+  it('keeps the program behind env, sudo, timeout, nice, xargs and VAR= prefixes (re-review LOW-C)', () => {
+    expect(skeletonCommand('env TOKEN=abc curl -uadmin:pw x')).toBe('env TOKEN=… curl -u');
+    expect(skeletonCommand('sudo curl -HX-Key:abc x')).toBe('sudo curl -H');
+    expect(skeletonCommand('TOKEN=abc curl api.corp.test/v1')).toBe('TOKEN=… curl <host>');
+    expect(skeletonCommand('timeout 5 curl x')).toBe('timeout 5 curl');
+    expect(skeletonCommand('nice -n 10 docker login -p hunter2')).toBe('nice docker login -p');
+    expect(skeletonCommand('echo a | xargs -I{} curl {}')).toBe('echo | xargs curl');
+    for (const shown of [skeletonCommand('env TOKEN=abc curl x'), skeletonCommand('TOKEN=abc curl x')]) expect(shown).not.toContain('abc');
+  });
+
+  it('renders $(…) and backticks as one quoted unit (re-review LOW-D)', () => {
+    expect(skeletonCommand('curl -d $(cat /run/secret) x')).toBe("curl -d '…'");
+    expect(skeletonCommand('curl -H "$(cat /run/a) b" `cat /run/secret` x')).toBe("curl -H '…' '…'");
+    expect(skeletonCommand('curl $(printf "%s" "$(cat /run/secret)") x')).toBe("curl '…'");
+    expect(skeletonCommand('curl -d $(cat /run/secret) x')).not.toContain('secret');
+  });
+
   it('never shows a flag value, attached or following, nor a bare host or a gh api path (review HIGH)', () => {
     const cases: Array<[string, string]> = [
       ['curl -uadmin:hunter2 x', 'curl -u'],
@@ -290,6 +313,13 @@ describe('elideSecrets (data minimisation for the fork)', () => {
     expect(elideSecrets('set -a; GH_TOKEN=$GITHUB_TOKEN gh api repos/x')).toBe('set -a; GH_TOKEN=… gh api repos/x');
     expect(elideSecrets('FOO="a b" BAR=\'c\' make')).toBe('FOO=… BAR=… make');
     expect(elideSecrets('npm test --reporter=dot')).toBe('npm test --reporter=dot');
+  });
+
+  it('elides URL userinfo in every command, token or user:pass (re-review MEDIUM-B)', () => {
+    expect(elideSecrets('git push https://tok123@github.com/o/r main')).toBe('git push https://…@github.com/o/r main');
+    expect(elideSecrets('git clone https://user:pa55@host.test/r.git')).toBe('git clone https://…@host.test/r.git');
+    expect(elideSecrets('npm install git+ssh://git@github.com/o/r')).toBe('npm install git+ssh://…@github.com/o/r');
+    expect(elideSecrets('git push https://tok123@github.com/o/r')).not.toContain('tok123');
   });
   it('keeps header names, not their values', () => {
     expect(elideSecrets(`curl -H 'Authorization: Bearer abc.def' -H "X-Api-Key: k1" https://h/x`))

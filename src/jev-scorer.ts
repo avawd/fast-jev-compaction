@@ -61,6 +61,8 @@ function clip(text: string, limit: number): string {
 
 const ENV_ASSIGNMENT = /(^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|)]+)/g;
 const HEADER = /(-H|--header)(\s+)(["'])([A-Za-z0-9-]+):[^"']*\3/g;
+/** `scheme://user@` and `scheme://user:pass@`: a token or password in a URL. */
+const USERINFO = /(:\/\/)[^/\s@]+@/g;
 const HEREDOC = /<<-?\s*(["']?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g;
 
 /**
@@ -72,7 +74,8 @@ export function elideSecrets(command: string): string {
   return command
     .replace(HEREDOC, (_m, _q: string, tag: string) => `<<${tag} …>`)
     .replace(HEADER, (_m, flag: string, space: string, quote: string, name: string) => `${flag}${space}${quote}${name}: …${quote}`)
-    .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`);
+    .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`)
+    .replace(USERINFO, '$1…@');
 }
 
 /**
@@ -81,12 +84,20 @@ export function elideSecrets(command: string): string {
  * refused forks had in common, and the fork needs only what kind of command ran.
  */
 const RISKY = /(?:^|[\s;&|(])(?:ssh|scp|curl|wget|docker|source)(?=\s|$)|\bgh\s+(?:api|pr\s+merge)\b|\bset\s+-a\b|(?:^|[;&|]\s*)\.\s+\S/;
-const TOKEN = /'[^']*'|"(?:\\.|[^"\\])*"|&&|\|\||[;|]|[^\s;&|'"]+(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|'"]+)*/g;
+/** `$(…)` (two levels of nested parentheses) or a backtick substitution: one opaque unit. */
+const SUBST = String.raw`\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)|` + '`[^`]*`';
+const QUOTED = String.raw`'[^']*'|"(?:\\.|[^"\\])*"`;
+/** Characters of an unquoted word; a `$` only when it does not open a `$(`. */
+const PLAIN = String.raw`(?:[^\s;&|'"$` + '`' + String.raw`]|\$(?!\())+`;
+/** A substitution, a quoted string, a separator, or a word (which may embed quotes and substitutions). */
+const TOKEN = new RegExp(`${SUBST}|${QUOTED}|&&|\\|\\||[;|]|${PLAIN}(?:${SUBST}|${QUOTED}|${PLAIN})*`, 'g');
 /** How many subcommand words each program keeps (`gh pr merge`, `docker exec`). */
 const SUBCOMMANDS: Record<string, number> = { gh: 2, docker: 1, git: 1, npm: 1, kubectl: 1 };
 /** Words kept wherever they stand: the interpreter an inline script ran under. */
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'node', 'python', 'python3']);
-const HOST = /@|^\d{1,3}(?:\.\d{1,3}){3}(?::|$)/;
+const HOST = /@|^\d{1,3}(?:\.\d{1,3}){3}(?::|$)|^\[[0-9A-Fa-f:.%\w]*\](?::\d+)?/;
+/** Words before the program: `env`, `sudo`, `timeout 5`, `nice -n 10`, `xargs -I{}`. */
+const PREFIXES = new Set(['env', 'sudo', 'timeout', 'nice', 'xargs']);
 /** A dotted name before `:`, `/` or the end (`api.corp.test/v1`, `box.corp.test:/srv`), or `box:/srv`. */
 const DOTTED_HOST = /^[\w-]+(?:\.[\w-]+)+(?=[:/]|$)|^[\w.-]+:/;
 /** A path that says it is one: absolute, `./`, `../` or `~`. */
@@ -103,6 +114,21 @@ interface SkeletonState {
   flagged: boolean;
   /** `gh api`'s endpoint was shown (as `<path>`). */
   pathShown: boolean;
+  /** The prefix (`env`, `sudo`, `timeout`, ...) seen before the program, if any. */
+  prefix?: string;
+}
+
+/** A word before the program as shown: `VAR=…`, the prefix itself, `timeout`'s duration; undefined drops it. */
+function prefixWord(word: string, state: SkeletonState): string | null | undefined {
+  const assignment = /^([A-Za-z_]\w*)=/.exec(word);
+  if (assignment) return `${assignment[1]}=…`;
+  if (PREFIXES.has(word)) {
+    state.prefix = word;
+    return word;
+  }
+  if (state.prefix && word.startsWith('-')) return undefined;
+  if (state.prefix && /^\d+(?:\.\d+)?[smhd]?$/.test(word)) return state.prefix === 'timeout' ? word : undefined;
+  return null;
 }
 
 /** A flag's name alone: `-uadmin:pw` is `-u`, `--user=admin` is `--user`, `+a` stays. */
@@ -113,7 +139,11 @@ function flagName(word: string): string {
 /** One word of a risky command as shown, or undefined to leave it out. */
 function skeletonWord(word: string, state: SkeletonState): string | undefined {
   if (word.includes('://')) return '<url>';
-  if (word.startsWith("'") || word.startsWith('"')) return "'…'";
+  if (/^['"`]|^\$\(/.test(word)) return "'…'";
+  if (state.first) {
+    const prefix = prefixWord(word, state);
+    if (prefix !== null) return prefix;
+  }
   if (!state.first && /^[-+]/.test(word)) {
     state.sub = 0;
     state.flagged = true;
