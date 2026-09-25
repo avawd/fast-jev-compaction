@@ -75,6 +75,73 @@ export function elideSecrets(command: string): string {
     .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`);
 }
 
+/**
+ * Commands that reach another machine, the network, a container or a credentials file. Their
+ * arguments (hosts, URLs, inline remote scripts, request fields) are what an ops-heavy session's
+ * refused forks had in common, and the fork needs only what kind of command ran.
+ */
+const RISKY = /(?:^|[\s;&|(])(?:ssh|scp|curl|wget|docker|source)(?=\s|$)|\bgh\s+(?:api|pr\s+merge)\b|\bset\s+-a\b|(?:^|[;&|]\s*)\.\s+\S/;
+const TOKEN = /'[^']*'|"(?:\\.|[^"\\])*"|&&|\|\||[;|]|[^\s;&|'"]+(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|'"]+)*/g;
+/** How many subcommand words each program keeps (`gh pr merge`, `docker exec`). */
+const SUBCOMMANDS: Record<string, number> = { gh: 2, docker: 1, git: 1, npm: 1, kubectl: 1 };
+/** Words kept wherever they stand: the interpreter an inline script ran under. */
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'node', 'python', 'python3']);
+const HOST = /@|^\d{1,3}(?:\.\d{1,3}){3}(?::|$)/;
+const PATH_LIKE = /^(?:\/|\.{1,2}\/|~)|\/|\.[A-Za-z]\w{0,4}$/;
+
+/** One word of a risky command as shown, or undefined to leave it out. */
+function skeletonWord(word: string, position: { first: boolean; sub: number; program: string }): string | undefined {
+  if (word.includes('://')) return '<url>';
+  if (word.startsWith("'") || word.startsWith('"')) return "'…'";
+  if (HOST.test(word)) return '<host>';
+  if (position.first) {
+    position.first = false;
+    position.program = word;
+    position.sub = Object.hasOwn(SUBCOMMANDS, word) ? SUBCOMMANDS[word]! : 0;
+    return word;
+  }
+  if (/^[-+]/.test(word)) {
+    position.sub = 0;
+    return word.split('=')[0];
+  }
+  // ssh's positionals are a host (`box`, `box.example.test`) and an unquoted remote command; only a flag's absolute path is shown.
+  if (position.program === 'ssh' && !word.startsWith('/')) return undefined;
+  if (position.sub > 0 && /^[a-z][a-z-]*$/.test(word)) {
+    position.sub -= 1;
+    return word;
+  }
+  position.sub = 0;
+  if (INTERPRETERS.has(word)) return word;
+  return PATH_LIKE.test(word) && !/['"]/.test(word) ? word.split('?')[0] : undefined;
+}
+
+/**
+ * A refusal-prone command (see RISKY) cut to its program, subcommand, flag names and file paths:
+ * quoted strings become `'…'`, URLs `<url>`, hosts `<host>`, and every other argument value goes.
+ * `ssh -F /dev/null me@10.1.2.3 'docker exec …'` becomes `ssh -F /dev/null <host> '…'`. Any
+ * other command is returned unchanged.
+ */
+export function skeletonCommand(command: string): string {
+  if (!RISKY.test(command)) return command;
+  const position = { first: true, sub: 0, program: '' };
+  let out = '';
+  for (const [word] of command.matchAll(TOKEN)) {
+    if (word === ';') {
+      out += ';';
+      position.first = true;
+      continue;
+    }
+    if (word === '&&' || word === '||' || word === '|') {
+      out += ` ${word}`;
+      position.first = true;
+      continue;
+    }
+    const shown = skeletonWord(word, position);
+    if (shown !== undefined) out += `${out ? ' ' : ''}${shown}`;
+  }
+  return out.trim();
+}
+
 function valueText(value: unknown): string {
   if (typeof value === 'string') return value;
   try {
@@ -97,7 +164,7 @@ function inputText(call: ToolCall): string {
     const others = entries.filter(([k]) => k !== 'command' && k !== 'description');
     const rest = others.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
     // Leading `cd DIR &&`, `VAR=value` and `echo "..."` banners carry nothing for the scorer.
-    const command = elideSecrets(stripCommandPrefix(call.input['command']) || call.input['command']);
+    const command = skeletonCommand(elideSecrets(stripCommandPrefix(call.input['command']) || call.input['command']));
     return rest ? `${command} ${rest}` : command;
   }
   return entries.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
@@ -135,12 +202,12 @@ export function toWellFormed(text: string): string {
  */
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
   return toWellFormed([
-    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request.',
+    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request. Answer directly, without deliberating.',
     'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
     'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
     'Put every call in exactly one list: result_needed keeps it whole; call_matters and unsure keep the call and cut its output to its start; drop cuts its output to a one-line note. A call left out of every list is kept whole.',
-    'Reply with the JSON object only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}, writing each id as its number alone (t12 is 12).',
+    'Reply with the JSON object only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}',
     '',
     ...calls.map((call) => jevCandidateLine(call, ctx)),
   ].join('\n'));

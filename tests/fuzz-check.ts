@@ -360,6 +360,11 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (!m) { fail(`unreadable candidate line: ${line.slice(0, 120)}`); continue; }
       if (m[2]!.length > INPUT_CHARS) fail(`${m[1]} input shown as ${m[2]!.length} chars (cap ${INPUT_CHARS})`);
       if ((m[3] ?? '').length > PREVIEW_CHARS) fail(`${m[1]} preview shown as ${m[3]!.length} chars (cap ${PREVIEW_CHARS})`);
+      // A command that reaches a host, the network or a container shows no host, address or URL.
+      const command = byId.get(m[1]!)?.input['command'];
+      if (typeof command === 'string' && /(^|[\s;&|(])(ssh|scp|curl|wget|docker)(\s|$)/.test(command) && /:\/\/|@|\b\d{1,3}(\.\d{1,3}){3}\b/.test(m[2]!)) {
+        fail(`${m[1]} shows a host, address or URL of a remote command: ${m[2]}`);
+      }
     }
     // Every candidate belongs to exactly one chunk: a prompt either opens a chunk with ids no
     // earlier prompt had, or re-asks a subset of exactly one earlier chunk (whole or half).

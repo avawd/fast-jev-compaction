@@ -101,6 +101,14 @@ function secretCommand(r: Rng, i: number, secrets: string[]): string {
     `env PASSWORD='${s}' node seed.js`,
     `cat > .env <<EOF\nSECRET_VALUE=${s}\nEOF`,
     `cat > .env <<'EOF'\n${s}\nEOF\nnpm test`,
+    // Refusal-prone commands whose argument values (hosts, URLs, remote scripts, fields) must not reach the fork.
+    `ssh -F /dev/null ops@10.${i % 250}.0.1 'cd /srv/${s} && docker exec app node -e "1"'`,
+    `ssh ${s}.example.test "docker logs app | tail"`,
+    `curl -s "https://api.example.test/v1/items?key=${s}"`,
+    `gh api -X PUT repos/o/r/pulls/9/merge -f merge_method=${s}`,
+    `set -a; . ./.env.local; set +a; gh pr merge 12 --subject ${s}`,
+    `scp build.tgz ${s}@host.example.test:/tmp/`,
+    `docker exec work sh -c 'grep -rl ${s} /app'`,
   ]);
 }
 
