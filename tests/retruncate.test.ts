@@ -106,4 +106,32 @@ describe('re-truncating a result an earlier pass already truncated', () => {
     expect(texts(twice.messages)).toEqual(texts(once.messages));
     expect(twice.stats.resultsDropped).toBe(0);
   });
+
+  it('never re-cuts or nests an excerpted result, and keeps its pinned windows', async () => {
+    // A first pass excerpts a result whose quoted tokens sit far past any head (excerpt.ts).
+    const body = (k: number) => Array.from({ length: 200 }, (_, i) => `line ${k}-${i} ${'x'.repeat(60)}`).join('\n');
+    const text = `${body(1)}\nsha 7c0ffee1a2b3 here\n${body(2)}\nsha 5eedbead9f00 there\n${body(3)}`;
+    const input = [
+      msg('user', 'go'),
+      use('u1', 'Read', { file_path: '/srv/app/a.ts' }),
+      res('u1', text),
+      msg('assistant', 'Both 7c0ffee1a2b3 and 5eedbead9f00 matter.'),
+      ...tail(),
+    ];
+    const once = await compact(input, dropAll(), { preserveRecentMessages: 6 });
+    const first = once.messages.find((m) => m.toolResults?.length)!.toolResults![0]!.text;
+    expect(first).toMatch(/chars omitted/);
+    for (const options of [{}, { truncateHeadChars: 50, truncateTailChars: 100 }, { escalateBelow: 0.99 }]) {
+      const twice = await compact(once.messages, dropAll(), { preserveRecentMessages: 6, ...options });
+      const second = twice.messages.find((m) => m.toolResults?.length)!.toolResults![0]!.text;
+      expect(notes(second)).toBe(1);
+      expect(second).toContain('7c0ffee1a2b3');
+      expect(second).toContain('5eedbead9f00');
+      expect(second).toBe(first);
+    }
+    // Once nothing quotes the tokens any more, it is still left as it is, not cut around its markers.
+    const unquoted = once.messages.filter((m) => !m.text.startsWith('Both'));
+    const third = await compact(unquoted, dropAll(), { preserveRecentMessages: 6, truncateHeadChars: 50 });
+    expect(third.messages.find((m) => m.toolResults?.length)!.toolResults![0]!.text).toBe(first);
+  });
 });

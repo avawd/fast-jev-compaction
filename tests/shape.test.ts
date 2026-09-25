@@ -48,12 +48,21 @@ describe('planShapes', () => {
     expect(plain.decisions).toEqual([decision('drop_result')]);
   });
 
-  it('widens to head+tail, or keeps verbatim, so every pinned token survives', () => {
+  it('widens to head+tail, or excerpts a window, so every pinned token survives', () => {
     const text = `${'h'.repeat(2000)}PINNEDTOKEN${'t'.repeat(500)}`;
     const widened = planShapes([decision('drop_result')], [bash('./run.sh', text, { refTokens: ['PINNEDTOKEN'] })], options);
     expect(widened.tails.get('u1')).toBe(1000);
     const mid = `${'h'.repeat(9000)}PINNEDTOKEN${'t'.repeat(5000)}`;
-    const kept = planShapes([decision('drop_result')], [bash('./run.sh', mid, { refTokens: ['PINNEDTOKEN'] })], options);
+    const excerpted = planShapes([decision('drop_result')], [bash('./run.sh', mid, { refTokens: ['PINNEDTOKEN'] })], options);
+    expect(excerpted.decisions).toEqual([{ ...decision('drop_result'), windows: [[8800, 9211]] }]);
+    expect(excerpted.tails.has('u1')).toBe(false);
+  });
+
+  it('keeps verbatim when the excerpt windows would keep more than the cap', () => {
+    const tokens = Array.from({ length: 30 }, (_, k) => `PINNED_${String(k).padStart(8, '0')}`);
+    // Mid-line tokens: every window is a full radius either side, 30 of them far past the cap.
+    const text = tokens.map((t) => `${'x'.repeat(1000)} ${t} `).join('') + 'x'.repeat(1000);
+    const kept = planShapes([decision('drop_result')], [bash('./run.sh', text, { refTokens: tokens })], options);
     expect(kept.decisions).toEqual([{ id: 't1', tool: 'Bash', action: 'keep', source: 'pinned' }]);
   });
 
@@ -107,7 +116,8 @@ describe('planShapes over rewritten text', () => {
       resultChars: original.length, isError: false, pinned: false, resultText: original, refTokens: ['PINNEDTOKEN'],
     };
     const d: CallDecision = { id: 't1', tool: call.tool, action: 'drop_result', source: 'claude' };
-    expect(planShapes([d], [call], resolveOptions({})).decisions[0]!.action).toBe('keep');
-    expect(planShapes([d], [call], resolveOptions({}), new Map([['u1', rewritten]])).decisions[0]!.action).toBe('drop_result');
+    // On the original the token is out of reach: an excerpt window. On the rewritten text the head holds it.
+    expect(planShapes([d], [call], resolveOptions({})).decisions[0]!.windows).toEqual([[4800, 5211]]);
+    expect(planShapes([d], [call], resolveOptions({}), new Map([['u1', rewritten]])).decisions[0]).toEqual({ ...d, action: 'drop_result' });
   });
 });

@@ -16,6 +16,11 @@ export interface ScorerOptions {
   keepThreshold?: number;
   /** Most calls per fork. Default 60. */
   chunkSize?: number;
+  /**
+   * Results shorter than this are kept whole without asking: dropping one saves too little to be
+   * worth the fork time its id costs. Default 0 (ask about every call).
+   */
+  minCandidateChars?: number;
   /** Messages in the transcript, for each candidate's `msg i/N`. */
   messageCount?: number;
   /** How long the forks may take when the rules alone already clear the gate. Needs `sleep`. */
@@ -70,7 +75,10 @@ export function makeScorer(options: ScorerOptions): Scorer {
   return async (calls) => {
     const verdicts = applyRules(calls);
     const evidence = new Set([...verdicts.values()].flatMap((v) => [...(v.evidence ? [v.evidence] : []), ...(v.moreEvidence ?? [])]));
-    const undecided = calls.filter((call) => !call.pinned && !verdicts.has(call.id) && !evidence.has(call.id));
+    const minChars = options.minCandidateChars ?? 0;
+    const undecided = calls.filter(
+      (call) => !call.pinned && !verdicts.has(call.id) && !evidence.has(call.id) && call.resultChars >= minChars,
+    );
     if (!options.useClaudeScorer || !options.fork || undecided.length === 0) {
       return { verdicts, claude: 'skipped' };
     }

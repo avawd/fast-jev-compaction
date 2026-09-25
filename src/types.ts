@@ -136,6 +136,11 @@ export interface CallDecision {
   rule?: RuleName;
   /** Characters of the result to keep when it differs from `truncateHeadChars`. */
   headChars?: number;
+  /**
+   * `[start, end)` excerpts of the result to keep between its head and tail, in order and
+   * disjoint, around later-quoted tokens no head could reach (see `excerptPlan`).
+   */
+  windows?: Array<[number, number]>;
 }
 
 export interface CompactOptions {

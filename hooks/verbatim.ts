@@ -33,6 +33,12 @@ export type HookConfig = {
   keepThreshold: number;
   /** Most calls per fork; more candidates run as concurrent forks. Whole number in [1, 400]. */
   forkChunkSize: number;
+  /**
+   * Results shorter than this are kept without asking the forks. Every id asked about costs fork
+   * output time, and on a 1,001-message session the 49 results under 200 chars were 24% of the
+   * candidates but at most 1.5% of the tool output. Whole number, at least 0 (0 asks about all).
+   */
+  minCandidateChars: number;
 };
 
 /**
@@ -70,6 +76,7 @@ const DEFAULTS: HookConfig = {
   stripMcpFurniture: true,
   keepThreshold: 0.5,
   forkChunkSize: 60,
+  minCandidateChars: 200,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -108,6 +115,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     stripMcpFurniture: bool(options, 'stripMcpFurniture', DEFAULTS.stripMcpFurniture),
     keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
+    minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
   };
 }
 
@@ -167,6 +175,7 @@ export async function compactSession(
     maxCandidates: config.maxCandidates,
     keepThreshold: config.keepThreshold,
     chunkSize: config.forkChunkSize,
+    minCandidateChars: config.minCandidateChars,
     messageCount: messages.length,
     claudeTimeoutMs: config.claudeTimeoutMs,
     claudeAwaitMs: Math.max(config.claudeTimeoutMs, CLAUDE_AWAIT_MS),

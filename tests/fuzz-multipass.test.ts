@@ -42,6 +42,32 @@ function split(text: string): { head: string; tail: string; count: number } | un
   return { head, tail, count: Number(m[1]) };
 }
 
+/** Why an excerpt does not account for `src` exactly, or undefined when it does. */
+function excerptAccount(src: string, text: string): string | undefined {
+  const m = NOTE.exec(text);
+  NOTE.lastIndex = 0;
+  if (!m) return 'excerpt without a note';
+  const head = m.index === 0 ? '' : text.slice(0, m.index - 1);
+  const rest = text.slice(m.index + m[0].length + 1).split('\n');
+  let at = head.length;
+  let gaps = 0;
+  if (!src.startsWith(head)) return 'excerpt head is not the start';
+  // After the note: marker, piece lines..., marker, piece..., [marker], [tail]. Rebuild by markers.
+  const joined = rest.join('\n');
+  const pieces = joined.split(/\n?\[… (\d+) chars omitted …\]\n?/);
+  // pieces: [before-first-marker(''), n1, piece1, n2, piece2, ..., nk, tail]
+  if (pieces[0] !== '') return 'text between the note and the first gap marker';
+  for (let i = 1; i < pieces.length; i += 2) {
+    at += Number(pieces[i]);
+    gaps += Number(pieces[i]);
+    const piece = pieces[i + 1] ?? '';
+    if (src.slice(at, at + piece.length) !== piece) return `excerpt piece ${i} is not the original at ${at}`;
+    at += piece.length;
+  }
+  if (gaps !== Number(m[1])) return `note says ${m[1]}, gap markers ${gaps}`;
+  return at === src.length ? undefined : `excerpt accounts for ${at} of ${src.length} chars`;
+}
+
 function check(seed: number, original: Map<string, string>, first: Map<string, string>, second: Map<string, string>): string[] {
   const fail: string[] = [];
   for (const [id, text] of second) {
@@ -61,7 +87,13 @@ function check(seed: number, original: Map<string, string>, first: Map<string, s
         ? was === src
         : !!firstParts && src.startsWith(firstParts.head) && src.endsWith(firstParts.tail) &&
           firstParts.count === src.length - firstParts.head.length - firstParts.tail.length);
-    if (parts && cutOnly) {
+    const excerpt = /\[… \d+ chars omitted …\]/.test(text);
+    if (excerpt && cutOnly && wasN === 0) {
+      // Excerpted by the second pass (excerpt.ts): its pieces are the original's, in order, and
+      // the gap markers account for exactly what they skip, and the note for their sum.
+      const f = excerptAccount(src!, text);
+      if (f) fail.push(`${id}: ${f}`);
+    } else if (parts && cutOnly) {
       if (!src.startsWith(parts.head)) fail.push(`${id}: head is not the original result's start`);
       if (!src.endsWith(parts.tail)) fail.push(`${id}: tail is not the original result's end`);
       if (parts.count !== src.length - parts.head.length - parts.tail.length) {
@@ -97,6 +129,7 @@ describe('fuzz: a second compaction over the first one\'s output', () => {
   it(`never nests notes, keeps counts exact, and keeps pins over ${SEEDS} seeds`, async () => {
     const failures: string[] = [];
     let escalated = 0;
+    let excerptsCarried = 0;
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const transcript = genTranscript(seed);
       const run = await runCase(seed, transcript);
@@ -112,6 +145,7 @@ describe('fuzz: a second compaction over the first one\'s output', () => {
       };
       const second = await compact(run.result.messages, secondScorer(seed), options);
       if (second.stats.tier === 2) escalated += 1;
+      for (const t of results(run.result.messages).values()) if (t.includes('chars omitted …]')) excerptsCarried += 1;
       failures.push(...check(seed, results(transcript.messages), results(run.result.messages), results(second.messages)));
       // Text quotes only: a tool-input quote can go with its call, and then nothing refers to the token.
       const quotes = transcript.quotes.flatMap((q) => (q.kind === 'text' ? [{ token: q.token, row: q.row as Message }] : []));
@@ -119,5 +153,7 @@ describe('fuzz: a second compaction over the first one\'s output', () => {
     }
     expect({ failures: failures.slice(0, 25), total: failures.length }).toEqual({ failures: [], total: 0 });
     expect(escalated).toBeGreaterThan(SEEDS / 20);
+    // First-pass excerpts reach the second pass, so the invariants above cover re-compacting them.
+    expect(excerptsCarried).toBeGreaterThan(0);
   }, Math.max(60_000, SEEDS * 100));
 });

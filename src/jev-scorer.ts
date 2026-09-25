@@ -140,20 +140,28 @@ export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): str
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
     'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
     'Put every call in exactly one list: result_needed keeps it whole; call_matters and unsure keep the call and cut its output to its start; drop cuts its output to a one-line note. A call left out of every list is kept whole.',
-    'Reply with the JSON object only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}',
+    'Reply with the JSON object only, exactly this shape: {"result_needed":[],"call_matters":[],"unsure":[],"drop":[]}, writing each id as its number alone (t12 is 12).',
     '',
     ...calls.map((call) => jevCandidateLine(call, ctx)),
   ].join('\n'));
 }
 
+/** `t12` as written, or `12`: the prompt asks for bare numbers, which cost half the output tokens. */
+function idOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  return Number.isSafeInteger(value) ? `t${value as number}` : undefined;
+}
+
 function idList(value: unknown, ids: ReadonlySet<string>): Set<string> | undefined {
-  if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return undefined;
-  return new Set((value as string[]).filter((id) => ids.has(id)));
+  if (!Array.isArray(value)) return undefined;
+  const read = value.map(idOf);
+  if (read.some((id) => id === undefined)) return undefined;
+  return new Set((read as string[]).filter((id) => ids.has(id)));
 }
 
 /**
  * Parses the reply's JSON object (first `{` to last `}`). `result_needed` and `call_matters`
- * must be string arrays, and `unsure` and `drop` too when present. Anything else, a cut-off reply
+ * must be arrays of ids (`"t12"` or `12`), and `unsure` and `drop` too when present. Anything else, a cut-off reply
  * included, is undefined and decides nothing, as is a reply whose lists cover fewer than
  * MIN_COVERAGE of `ids`. Unknown ids are ignored.
  */

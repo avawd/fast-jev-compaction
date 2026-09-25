@@ -77,11 +77,13 @@ export function applyDecisions(
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
   const heads = new Map<string, number>();
+  const windows = new Map<string, Array<[number, number]>>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') continue;
     actions.set(call.tool_use_id, decision.action);
     if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
+    if (decision.windows && decision.windows.length > 0) windows.set(call.tool_use_id, decision.windows);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -101,7 +103,13 @@ export function applyDecisions(
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
         const head = heads.get(result.tool_use_id) ?? headChars;
-        const text = truncatedResultText(result.text, result.isError ?? false, head, tails.get(result.tool_use_id));
+        const text = truncatedResultText(
+          result.text,
+          result.isError ?? false,
+          head,
+          tails.get(result.tool_use_id),
+          windows.get(result.tool_use_id),
+        );
         return text === result.text
           ? result
           : {
@@ -150,7 +158,7 @@ function preferTruncation(decision: CallDecision, call: ToolCall, messages: read
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
 function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
   if (decision.action !== 'drop_result') return decision;
-  const unchanged = truncatedResultText(text, false, decision.headChars ?? headChars, tailChars) === text;
+  const unchanged = truncatedResultText(text, false, decision.headChars ?? headChars, tailChars, decision.windows) === text;
   return unchanged ? { ...decision, action: 'keep' } : decision;
 }
 

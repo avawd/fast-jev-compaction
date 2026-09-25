@@ -46,6 +46,23 @@ describe('makeScorer', () => {
     expect(out.verdicts.get('t2')?.action).toBe('drop_call'); // unsure above 0.75
   });
 
+  it('does not ask about results under minCandidateChars: they are kept whole, and none saves anything worth a fork', async () => {
+    const prompts: string[] = [];
+    const fork: ForkFn = async (req) => {
+      prompts.push(req.prompt);
+      return { text: '{"result_needed":[],"call_matters":[],"unsure":[],"drop":["t2","t3"]}' };
+    };
+    const sized = [{ ...c('t2', 'Bash', { command: 'a' }), resultChars: 150 }, { ...c('t3', 'Bash', { command: 'b' }), resultChars: 400 }];
+    const out = await makeScorer({ fork, useClaudeScorer: true, maxCandidates: 400, minCandidateChars: 200 })(sized);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).not.toMatch(/^t2 /m);
+    expect(prompts[0]).toMatch(/^t3 /m);
+    expect(out.verdicts.has('t2')).toBe(false);
+    const none = await makeScorer({ fork, useClaudeScorer: true, maxCandidates: 400, minCandidateChars: 500 })(sized);
+    expect(none.claude).toBe('skipped');
+    expect(prompts).toHaveLength(1);
+  });
+
   it('is rules-only when disabled or when no fork is available', async () => {
     let called = false;
     const fork: ForkFn = async () => { called = true; return null; };

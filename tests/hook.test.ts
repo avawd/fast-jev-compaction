@@ -22,6 +22,12 @@ function transcript(): SessionMessage[] {
 }
 
 describe('resolveHookConfig', () => {
+  it('defaults minCandidateChars to 200 and clamps it to a whole number >= 0', () => {
+    expect(resolveHookConfig({}).minCandidateChars).toBe(200);
+    expect(resolveHookConfig({ minCandidateChars: -5 }).minCandidateChars).toBe(0);
+    expect(resolveHookConfig({ minCandidateChars: 99.9 }).minCandidateChars).toBe(99);
+  });
+
   it('clamps keepThreshold to [0, 1] and forkChunkSize to a whole number in [1, 400]', () => {
     expect(resolveHookConfig({ keepThreshold: 0.7 }).keepThreshold).toBe(0.7);
     expect(resolveHookConfig({ keepThreshold: -1 }).keepThreshold).toBe(0);
@@ -36,7 +42,7 @@ describe('resolveHookConfig', () => {
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
-      keepThreshold: 0.5, forkChunkSize: 60,
+      keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({

@@ -114,8 +114,8 @@ type ChunkResult = { verdicts: Map<string, Verdict>; runs: ForkRun[] };
 /**
  * Failures worth a re-ask: a safeguard refusal (2.1.281 reports it as a status-less `api-error`,
  * or, when it lands mid-reply, as cut-off text that does not parse), an empty reply, or a lazy
- * one under the coverage gate. Refusals are probabilistic per request, so the same chunk is asked
- * once more whole, and only then split. A timeout, an abort or a missing fork would fail the same
+ * one under the coverage gate. The others are asked once more whole, and only then split; a refusal
+ * is split at once (see scoreChunkWithRetry). A timeout, an abort or a missing fork would fail the same
  * way again.
  */
 function retryable(status: ClaudeStatus): boolean {
@@ -186,9 +186,29 @@ async function scoreChunk(
   return { verdicts, runs: [run('ran')] };
 }
 
+/** Both halves of `calls`, asked concurrently, their verdicts merged. */
+async function scoreHalves(
+  fork: ForkFn,
+  calls: readonly ToolCall[],
+  options: ClaudeScoreOptions,
+  timeout: ForkTimeout | undefined,
+  now: () => number,
+): Promise<ChunkResult> {
+  const half = Math.ceil(calls.length / 2);
+  const halves = await Promise.all(
+    [calls.slice(0, half), calls.slice(half)].map((part) => scoreChunk(fork, part, options, timeout, now, 'half')),
+  );
+  const verdicts = new Map<string, Verdict>();
+  for (const h of halves) for (const [id, verdict] of h.verdicts) verdicts.set(id, verdict);
+  return { verdicts, runs: halves.flatMap((h) => h.runs) };
+}
+
 /**
  * One chunk; when its fork failed in a retryable way, the same chunk once more whole, and when
- * that fails too, its two halves once, concurrently. Nothing is re-asked past the deadline.
+ * that fails too, its two halves once, concurrently. A refusal goes straight to the halves: live
+ * on 2.1.282, with the no-deliberation prompt, one 60-call chunk was refused on 4 of 5 whole asks
+ * (both whole re-asks included, ~8 s each) while its 30-call halves answered 3 of 4 in ~3 s. Nothing is
+ * re-asked past the deadline.
  */
 async function scoreChunkWithRetry(
   fork: ForkFn,
@@ -199,17 +219,17 @@ async function scoreChunkWithRetry(
   expired: () => boolean,
 ): Promise<ChunkResult> {
   const first = await scoreChunk(fork, calls, options, timeout, now);
-  if (!retryable(first.runs[0]!.status) || expired()) return first;
+  const status = first.runs[0]!.status;
+  if (!retryable(status) || expired()) return first;
+  if (status === 'refused' && calls.length >= 2) {
+    const halves = await scoreHalves(fork, calls, options, timeout, now);
+    return { verdicts: halves.verdicts, runs: [...first.runs, ...halves.runs] };
+  }
   const whole = await scoreChunk(fork, calls, options, timeout, now, 'whole');
   const runs = [...first.runs, ...whole.runs];
   if (!retryable(whole.runs[0]!.status) || calls.length < 2 || expired()) return { verdicts: whole.verdicts, runs };
-  const half = Math.ceil(calls.length / 2);
-  const halves = await Promise.all(
-    [calls.slice(0, half), calls.slice(half)].map((part) => scoreChunk(fork, part, options, timeout, now, 'half')),
-  );
-  const verdicts = new Map<string, Verdict>();
-  for (const h of halves) for (const [id, verdict] of h.verdicts) verdicts.set(id, verdict);
-  return { verdicts, runs: [...runs, ...halves.flatMap((h) => h.runs)] };
+  const halves = await scoreHalves(fork, calls, options, timeout, now);
+  return { verdicts: halves.verdicts, runs: [...runs, ...halves.runs] };
 }
 
 /**
@@ -232,7 +252,7 @@ function overallStatus(chunks: readonly ChunkResult[]): ClaudeStatus {
  * are split into chunks of `chunkSize`, one `runFork` per chunk, all
  * concurrent (at most MAX_CONCURRENT_FORKS: past it chunks grow) and all racing
  * ONE shared deadline (a single sleep). A failed chunk is re-asked whole once,
- * then as two halves. Answers are merged; whatever
+ * then as two halves; a refused one goes straight to its halves. Answers are merged; whatever
  * still failed decides nothing (its calls are kept).
  */
 export async function scoreWithClaude(

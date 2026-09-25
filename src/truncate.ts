@@ -1,6 +1,5 @@
+import { renderTruncation, TRUNCATION_NOTE_PREFIX } from './excerpt.js';
 import { sliceWhole, sliceWholeEnd } from './text.js';
-
-export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 /** Not global: a shared /g regex carries `lastIndex` from one call into the next (`matchAll` copies it). */
 const NOTE_RE = /\[verbatim-compaction truncated (\d+) chars of this tool result( \(error\))?; re-run the tool if needed\]/;
@@ -39,10 +38,15 @@ export function priorTruncation(text: string): Truncated | undefined {
   return found === 'nested' ? undefined : found;
 }
 
+/** The gap marker of an excerpted result (excerpt.ts `renderTruncation`). */
+const OMITTED_RE = /\[… \d+ chars omitted …\]/;
+
 function earlierTruncation(text: string): Truncated | 'nested' | undefined {
   const found = [...text.matchAll(new RegExp(NOTE_RE.source, 'g'))];
   if (found.length === 0) return undefined;
-  if (found.length > 1) return 'nested';
+  // An excerpt (head, windows, tail between gap markers) is never re-cut: its pieces are the
+  // pinned windows, and one note cannot account for gaps a head/tail cut would add around them.
+  if (found.length > 1 || OMITTED_RE.test(text)) return 'nested';
   const m = found[0]!;
   const at = m.index;
   const close = at + m[0].length;
@@ -75,7 +79,17 @@ function retruncated(text: string, earlier: Truncated, isError: boolean, headCha
  * The result cut to `headChars` from its start plus `tailChars` from its end, with a note in
  * between saying how much went; `text` itself when that would not shrink it.
  */
-export function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
+export function truncatedResultText(
+  text: string,
+  isError: boolean,
+  headChars: number,
+  tailChars = 0,
+  /** Excerpt windows (excerpt.ts): only ever planned on a result no earlier pass truncated. */
+  windows: ReadonlyArray<[number, number]> = [],
+): string {
+  if (windows.length > 0) {
+    return isTruncated(text) ? text : renderTruncation(text, isError, { head: headChars, tail: tailChars, windows: [...windows] });
+  }
   // The length test comes first for a re-cut too: the pin's window (pin.ts `covers`) counts on a
   // result this short never being cut.
   if (!shrinks(text.length, headChars, tailChars)) return text;

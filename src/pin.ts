@@ -23,6 +23,8 @@ const OTHER_PATTERNS: RegExp[] = [
   /\b[A-Z][A-Z0-9]+-\d+\b/g,
   /(?<![\w.])\d{4,}(?![\w])/g,
   /\b(?=[A-Za-z0-9_]*(?:[a-z][A-Z]|_[A-Za-z0-9]|[A-Za-z]\d))[A-Za-z_][A-Za-z0-9_]{11,}\b/g,
+  // Shorter names are distinctive when they have two or more underscores or humps (LOCK_TTL_MS, getUserName).
+  /\b(?=[A-Za-z0-9_]{8,}\b)(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+){2,}|[a-z][a-z0-9]*(?:[A-Z][a-z0-9]+){2,})\b/g,
 ];
 
 const YEAR = /^(?:19|20)\d{2}$/;
