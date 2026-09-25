@@ -491,6 +491,11 @@ const SLOW_MODES: ForkMode[] = ['never', 'late', 'lateReject'];
 
 export interface FakeFork {
   fork: ForkFn;
+  /**
+   * The scorer's deadline sleep, for a fork made with `bound`: `late` forks settle only once it has
+   * fired, one macrotask after it, so "late" never depends on how busy the event loop is.
+   */
+  deadline: (instant: boolean) => Promise<void>;
   prompts: string[];
   /** Most forks started and not yet settled at any one time. */
   maxInFlight: () => number;
@@ -506,7 +511,27 @@ export interface FakeFork {
  * the same replies on every run regardless of scheduling. `timed` allows replies that never
  * arrive or arrive after the deadline; `syncThrows` a fork that throws instead of rejecting.
  */
-export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeFork {
+export function fakeFork(seed: number, timed: boolean, syncThrows = true, bound = false): FakeFork {
+  let fired = false;
+  const waiting: Array<() => void> = [];
+  const fire = () => {
+    fired = true;
+    for (const w of waiting.splice(0)) setImmediate(w);
+  };
+  /** Runs `fn` after the deadline when bound (a 5 ms timer otherwise, as fuzz-hook's clocks expect). */
+  const afterDeadline = (fn: () => void) => {
+    if (!bound) setTimeout(fn, 5);
+    else if (fired) setImmediate(fn);
+    else waiting.push(fn);
+  };
+  const deadline = (instant: boolean): Promise<void> => {
+    if (instant) {
+      const now = Promise.resolve();
+      void now.then(fire);
+      return now;
+    }
+    return new Promise<void>((resolve) => setImmediate(() => { resolve(); fire(); }));
+  };
   const attempts = new Map<string, number>();
   const prompts: string[] = [];
   const base = syncThrows ? SAFE_MODES : SAFE_MODES.filter((m) => m !== 'syncThrow');
@@ -552,8 +577,9 @@ export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeF
       case 'syncThrow': throw new Error('fork threw synchronously');
       case 'reject': return Promise.reject(new Error('fork rejected'));
       case 'never': return new Promise<ForkReply>(() => {});
-      case 'late': return new Promise((resolve) => setTimeout(() => resolve(answered(accept(validReply(r, ids)))), 5));
-      case 'lateReject': return new Promise((_, reject) => setTimeout(() => reject(new Error('late failure')), 5));
+      // Drawn now, so the seed's stream never depends on when the timer fires; accepted when it settles.
+      case 'late': { const text = validReply(r, ids); return new Promise((resolve) => afterDeadline(() => resolve(answered(accept(text))))); }
+      case 'lateReject': return new Promise((_, reject) => afterDeadline(() => reject(new Error('late failure'))));
     }
   };
   const fork = ((request: { prompt: string }): Promise<ForkReply> => {
@@ -564,7 +590,7 @@ export function fakeFork(seed: number, timed: boolean, syncThrows = true): FakeF
     pending.then(done, done);
     return pending;
   }) as ForkFn;
-  return { fork, prompts, maxInFlight: () => maxInFlight, decidable };
+  return { fork, prompts, maxInFlight: () => maxInFlight, decidable, deadline };
 }
 
 export function wellFormed(s: string): boolean {

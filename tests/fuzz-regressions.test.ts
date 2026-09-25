@@ -4,6 +4,8 @@
  * to clear the matching KNOWN_BUG flag in fuzz-hook.test.ts.
  */
 import { describe, expect, it } from 'vitest';
+import { fingerprint, runCase } from './fuzz-check.ts';
+import { genTranscript } from './fuzz-gen.ts';
 import { compactUserRows, MAX_CONCURRENT_FORKS, resolveOptions, scoreWithClaude, type ForkFn, type ForkReply, type Message, type ToolCall } from '../src/index.js';
 
 function call(id: string): ToolCall {
@@ -108,4 +110,27 @@ describe('review 2 regressions', () => {
     const out = compactUserRows(input, resolveOptions({ preserveRecentMessages: 2, dedupePeerNotice: false }));
     expect(out.messages.slice(0, 3).map((x) => x.text).join('\n')).toContain('deadbeef12345678');
   });
+
+  // Found by fuzz-integrity seed 4680 (FUZZ_SEEDS=5000) under CPU load: "a second run gave a
+  // different output". The fake's 'late' fork settled on a 5 ms timer and the timed deadline on
+  // setImmediate; a loop held up past 5 ms runs the timer first, so "late" arrived in time. The
+  // harness now settles a late fork only after the deadline has fired. A loop slowed on purpose
+  // (every setImmediate held 10 ms) must not change any seed's output.
+  it('a slow event loop does not change a timed seed\'s output', async () => {
+    const real = globalThis.setImmediate;
+    const slow = ((fn: (...a: unknown[]) => void, ...args: unknown[]) => setTimeout(() => fn(...args), 10)) as unknown as typeof setImmediate;
+    const changed: number[] = [];
+    for (const seed of [4680, ...Array.from({ length: 60 }, (_, k) => k + 1)]) {
+      const normal = fingerprint(await runCase(seed, genTranscript(seed)));
+      globalThis.setImmediate = slow;
+      let held: string;
+      try {
+        held = fingerprint(await runCase(seed, genTranscript(seed)));
+      } finally {
+        globalThis.setImmediate = real;
+      }
+      if (held !== normal) changed.push(seed);
+    }
+    expect(changed).toEqual([]);
+  }, 60_000);
 });

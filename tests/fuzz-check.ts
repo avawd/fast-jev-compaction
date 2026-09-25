@@ -80,7 +80,7 @@ export async function runCase(seed: number, transcript: Transcript = genTranscri
   let decidable = new Set<string>();
   if (setup.scorerKind === 'raw') scorer = rawScorer(seed);
   else {
-    const fake = fakeFork(seed, setup.timed);
+    const fake = fakeFork(seed, setup.timed, true, true);
     prompts = fake.prompts;
     maxInFlight = fake.maxInFlight;
     decidable = fake.decidable;
@@ -94,8 +94,9 @@ export async function runCase(seed: number, transcript: Transcript = genTranscri
       messageCount: input.length,
     };
     if (setup.timed) {
-      // The deadline lands after every microtask-settled fork and before any `late` one.
-      scorerOptions.sleep = instant ? () => Promise.resolve() : () => new Promise<void>((resolve) => setImmediate(resolve));
+      // The deadline lands after every microtask-settled fork and before any `late` one, however
+      // busy the loop is: a late fork waits for it (fuzz-gen fakeFork `bound`).
+      scorerOptions.sleep = () => fake.deadline(instant);
       scorerOptions.claudeTimeoutMs = 1000;
       scorerOptions.claudeAwaitMs = 2000;
     }
