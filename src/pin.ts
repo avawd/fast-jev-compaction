@@ -1,0 +1,178 @@
+import type { Message, ToolCall } from './types.js';
+
+/**
+ * Referenced-later pins. A result that carries a distinctive token (a sha, a
+ * ticket, a path, an identifier...) which the conversation had not seen
+ * before, and which later assistant text or a later tool input quotes, holds
+ * something the work went on to use. Such a result is never dropped, and is
+ * truncated only to a window that still contains every such token.
+ */
+
+/** Truncation leaves text this close to head + tail alone; mirrors compact.ts. */
+const TRUNCATION_SLACK = 120;
+
+const URL_PATTERN = /https?:\/\/[^\s"'<>)\]}\\`]+/g;
+// The lookbehind starts a match only at a run's first character; without it a long
+// slash-free run is rescanned from every position (quadratic). A `/` may start one
+// after another `/`, so `file:///a/b` yields `/a/b`.
+const PATH_PATTERN = /(?<![\w.@-])(?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)+/g;
+const OTHER_PATTERNS: RegExp[] = [
+  /\$\d[\d,]*(?:\.\d+)?/g,
+  /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g,
+  /#\d{2,}\b/g,
+  /\b[A-Z][A-Z0-9]+-\d+\b/g,
+  /(?<![\w.])\d{4,}(?![\w])/g,
+  /\b(?=[A-Za-z0-9_]*(?:[a-z][A-Z]|_[A-Za-z0-9]|[A-Za-z]\d))[A-Za-z_][A-Za-z0-9_]{11,}\b/g,
+  // Shorter names are distinctive when they have two or more underscores or humps (LOCK_TTL_MS, getUserName).
+  /\b(?=[A-Za-z0-9_]{8,}\b)(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+){2,}|[a-z][a-z0-9]*(?:[A-Z][a-z0-9]+){2,})\b/g,
+];
+
+const YEAR = /^(?:19|20)\d{2}$/;
+const MIN_TOKEN = 4;
+/** Paths shorter than this are too generic to pin on (`a/b`, `./x`). */
+const MIN_PATH = 6;
+/**
+ * What makes a slash-joined word a path rather than `10/min` or `Tue/Thu`:
+ * rooted (`/`, `./`, `../`), a file extension, or at least three segments.
+ */
+const PATH_SHAPE = /^(?:\.{0,2}\/)|\.[A-Za-z0-9]{1,8}$|\/[^/]+\/[^/]+$/;
+/** Bounds work on pathological text; far more than any real result needs. */
+const MAX_MATCHES_PER_PATTERN = 5000;
+
+/** Tools whose input authors content rather than quoting it back. */
+const AUTHORING_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+
+function matches(text: string, pattern: RegExp): string[] {
+  const out: string[] = [];
+  pattern.lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (out.length >= MAX_MATCHES_PER_PATTERN) break;
+    const token = match[0].replace(/[.,:;*_~]+$/, '');
+    if (token.length >= MIN_TOKEN && !YEAR.test(token)) out.push(token);
+  }
+  return out;
+}
+
+/** Distinct distinctive tokens of `text`, in first-seen order. */
+export function distinctiveTokens(text: string): string[] {
+  const urls = matches(text, URL_PATTERN);
+  const urlText = urls.join('\n');
+  const paths = matches(text, PATH_PATTERN).filter(
+    (p) => p.length >= MIN_PATH && PATH_SHAPE.test(p) && !urlText.includes(p),
+  );
+  return [...new Set([...urls, ...paths, ...OTHER_PATTERNS.flatMap((re) => matches(text, re))])];
+}
+
+function inputText(input: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(input) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * For each unpinned call, the tokens its result carried that are quoted later
+ * and not available from anything the conversation keeps regardless (user or
+ * assistant text, tool inputs, pinned results). A token carried by several
+ * results is credited to the newest one before the quote, so older copies
+ * stay droppable. Calls with no such token are absent from the map.
+ */
+export function analyzeReferences(calls: readonly ToolCall[], messages: readonly Message[]): Map<string, string[]> {
+  const byUse = new Map(calls.map((c) => [c.tool_use_id, c]));
+  const known = new Set<string>();
+  const carrier = new Map<string, string>();
+  const refs = new Map<string, Set<string>>();
+  const learn = (tokens: string[]) => {
+    for (const t of tokens) known.add(t);
+  };
+  const quote = (tokens: string[]) => {
+    for (const t of tokens) {
+      const id = known.has(t) ? undefined : carrier.get(t);
+      if (id) (refs.get(id) ?? refs.set(id, new Set()).get(id)!).add(t);
+    }
+    learn(tokens);
+  };
+  for (const message of messages) {
+    const textTokens = distinctiveTokens(message.text);
+    if (message.role === 'assistant') quote(textTokens);
+    else learn(textTokens);
+    for (const tool of message.toolUses) {
+      const tokens = distinctiveTokens(inputText(tool.input));
+      // An edit's input is neither a quote nor a safe copy: the edit itself can be dropped.
+      if (!AUTHORING_TOOLS.has(tool.tool)) quote(tokens);
+    }
+    for (const result of message.toolResults ?? []) {
+      const call = byUse.get(result.tool_use_id);
+      const tokens = distinctiveTokens(result.text);
+      if (!call || call.pinned) {
+        learn(tokens);
+        continue;
+      }
+      for (const t of tokens) if (!known.has(t)) carrier.set(t, call.id);
+    }
+  }
+  return new Map([...refs].map(([id, tokens]) => [id, [...tokens]]));
+}
+
+/** How many later-quoted tokens each call's result carries (calls with none are absent). */
+export function refLaterCounts(calls: readonly ToolCall[], messages: readonly Message[]): Map<string, number> {
+  return new Map([...analyzeReferences(calls, messages)].map(([id, tokens]) => [id, tokens.length]));
+}
+
+function covers(text: string, tokens: readonly string[], head: number, tail: number): boolean {
+  if (text.length <= head + tail + TRUNCATION_SLACK) return true;
+  return tokens.every((token) => {
+    const at = text.indexOf(token);
+    return at < 0 || at + token.length <= head || at >= text.length - tail;
+  });
+}
+
+export interface WindowLimits {
+  /** Head the verdict asked for. */
+  head: number;
+  /** Tail the result's kind asks for (0, or truncateTailChars for log-like output). */
+  preferredTail: number;
+  /** Largest tail a pin may widen to. */
+  maxTail: number;
+  /** Largest head a pin may extend to before the result is kept whole instead. */
+  maxHead: number;
+}
+
+/** How far past a token the head may run to end on its line. */
+const LINE_REACH = 200;
+
+/** The shortest head holding every token the tail does not: to the end of the token's line when that is near. */
+function reachingHead(text: string, tokens: readonly string[], tail: number): number {
+  let need = 0;
+  for (const token of tokens) {
+    const at = text.indexOf(token);
+    if (at < 0 || at >= text.length - tail) continue;
+    need = Math.max(need, at + token.length);
+  }
+  const eol = text.indexOf('\n', need);
+  return eol >= 0 && eol - need <= LINE_REACH ? eol : need;
+}
+
+/**
+ * The window to truncate `text` to so that the first occurrence of every
+ * pinned token survives, trying in order: the asked-for head with the
+ * preferred tail; that head with `maxTail`; a head extended to reach the
+ * tokens (at most `maxHead`), with either tail. Undefined when none of these
+ * holds them all and still shrinks the text: the result is kept verbatim.
+ */
+export function pinnedWindow(
+  text: string,
+  tokens: readonly string[],
+  limits: WindowLimits,
+): { head: number; tail: number } | undefined {
+  const { head, preferredTail, maxTail, maxHead } = limits;
+  if (covers(text, tokens, head, preferredTail)) return { head, tail: preferredTail };
+  if (maxTail > preferredTail && covers(text, tokens, head, maxTail)) return { head, tail: maxTail };
+  const tails = maxTail > preferredTail ? [preferredTail, maxTail] : [preferredTail];
+  const options = tails
+    .map((tail) => ({ head: Math.max(head, reachingHead(text, tokens, tail)), tail }))
+    .filter((w) => w.head <= maxHead && text.length > w.head + w.tail + TRUNCATION_SLACK)
+    .sort((a, b) => a.head + a.tail - (b.head + b.tail));
+  return options[0];
+}

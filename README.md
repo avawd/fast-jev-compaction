@@ -1,191 +1,334 @@
-# fast-jev-compaction
+# verbatim-compaction
 
-Claude Code plugin that replaces the compaction summary with Jev decisions:
-every tool call and result is scored in one fast request, stale ones are
-dropped or truncated, everything kept stays verbatim. Also usable as an npm
-library.
+A Claude Code plugin that replaces the compaction summary with **pruning**. Stale tool calls and outputs
+are dropped or truncated; everything else, including every user and assistant message, stays verbatim.
 
-## What and why
+Forked from [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (MIT).
+Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third party:
 
-Most context compaction asks an LLM to summarize old turns. A summary is
-lossy: a file path, exact error, constraint, or command can disappear even when
-it matters later. This library never rewrites anything. It only deletes tool
-calls and tool results Jev says are no longer needed, and it asks Jev while
-showing it the whole conversation. User and assistant text stays verbatim and
-in order.
+1. **Rules** (local, free): a read of a file that is later successfully edited or read again in full is
+   truncated (a later ranged read or a failed edit does not count); an identical search repeated later is
+   dropped; a failed call later retried successfully is dropped. Then, for calls those leave undecided:
+   - an MCP write's echo (`create…`, `edit…`, `update…`, `transition…`, `add…`, `comment…`, over 500
+     chars) is truncated: the call records the write, the echo is the server repeating it;
+   - a Bash command that only reads files (`cat`, `sed -n`, `head`, `tail`, `grep`, `nl`, `wc`…) is
+     truncated once every file it read is later Read, edited, written or read again;
+   - a read-only Bash command (`git status/log/diff/show/branch`, `gh api`, `gh pr view`, `gh run list`,
+     `docker ps/logs`, `ls`…) is truncated once every step of it has been run again later;
+   - agent-launch boilerplate ("Async agent launched successfully") is truncated;
+   - a Read, or a Bash command that only reads, lists or searches files, is truncated once it is older
+     than `staleAfterMessages` messages.
 
-The repository is both an npm package (`src/`) and a Claude Code plugin
-(`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
-built-in compaction summary with the original messages.
+   Commands are parsed with quotes honoured; one with `$(…)`, backticks, a heredoc or a redirection to a
+   file is never treated as read-only. Failed calls and `<persisted-output>` wrappers are never targets.
 
-## How it works
+   **Shapes.** A truncated result keeps `truncateHeadChars` from its start, plus `truncateTailChars` from
+   its end when it is a test/build/deploy/lint/install/push run or ends with a verdict line (`57 passed`,
+   `exit code 1`…), so the verdict survives. MCP results over 500 chars that are kept lose their JSON
+   furniture (`self` links, `avatarUrls`, `iconUrl`, `expand`, `featureFlags`, null `customfield_*`, the
+   server's `context` envelope); every other value is kept exactly, and a payload JSON cannot round-trip
+   exactly (integers past 2^53) is left alone.
 
-1. Every `tool_use` is paired with its `tool_result` by `tool_use_id`. Calls in
-   the first message or in the newest `preserveRecentMessages` messages are
-   pinned and never touched.
-2. The **state** sent to Jev is the whole conversation so far, oldest first,
-   with every tool result replaced by a short note (`ok, 4213 chars (omitted)`).
-   Tool inputs are included, texts are included, nothing is summarized.
-3. The state is fitted into `maxStateTokens` (25k by default) in stages, each
-   applied only if the previous one was not enough: tool inputs truncated to
-   1000, then 200, then 60 characters; long texts abridged to head + tail,
-   oldest non-pinned messages first; old non-pinned messages collapsed to a
-   `[… N chars omitted …]` note; old tool calls reduced to one line each
-   (`t12 Read file_path=src/a.ts → ok 480ch`); old call-less messages left
-   out; runs of old call-only messages folded into one entry. If it still
-   does not fit, compaction throws. Tokens are estimated without a tokenizer (a
-   word per six letters, half a token per digit, ~one per other symbol),
-   calibrated to land a little above the counts Jev reports.
-4. For every non-pinned call Jev gets two `noul` questions: should the **call**
-   stay (knowing it was made, with its input, still matters), and should the
-   **result** stay verbatim (its contents are still needed and re-running the
-   tool would not do).
-5. Questions are split into as many requests as needed so state plus questions
-   stays under `maxRequestTokens` (30k by default, under Jev's 32k request
-   limit). The same full state is resent with every request; requests run
-   concurrently and their answers are merged.
-6. Decisions per call, against `keepThreshold`:
-   - `keepResult ≥ threshold` → keep call and result;
-   - else `keepCall ≥ threshold` → keep the call, truncate the result to its
-     first `truncateHeadChars` characters plus a one-line note;
-   - else → remove the call together with its result.
-7. The message list is rebuilt: a message that loses all its content is
-   removed, untouched messages are returned as the same objects, and no result
-   is ever left without its call.
+   **Referenced-later pin.** A result that introduced a distinctive token (a sha, `#123`, `ABC-123`, a
+   path, a URL, a dollar amount, a long number, a long identifier or one with two or more underscores or
+   humps) which later assistant text or a later tool input quotes (edits excluded) is never dropped,
+   whichever stage decided it: it is truncated only to a head (stretched up to 4000 chars) or head+tail
+   window that still holds the token's first occurrence. When no such window does, it keeps its head and
+   tail plus an excerpt of the lines within 200 chars of each token they miss, each gap marked
+   `[… N chars omitted …]`; only when those pieces would exceed 4000 chars is it kept verbatim. Only text
+   that is never pruned (user and assistant text, pinned results) counts as already having the token;
+   an edit's input does not, because the edit itself can be dropped.
+2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
+   about each remaining call: must its **result** stay verbatim, and does the **call** itself still
+   matter? The answer is four id lists,
+   `{"result_needed":[…],"call_matters":[…],"unsure":[…],"drop":[…]}`: result needed keeps the call
+   whole, call matters truncates its output, `unsure` follows `keepThreshold`, `drop` cuts the output to
+   a one-line note (the call row stays: Claude Code hands each block over as its own message), and a
+   call in no list is kept. A reply whose lists cover under 80% of the chunk's calls counts as
+   unparseable, so a lazy "these three can go" never decides for the other 37. Candidates are split into
+   chunks of `forkChunkSize` (60), one fork per chunk, all concurrent but never more than 8 (past that,
+   chunks grow); each reuses the session's prompt cache, so three forks take about as long as one
+   (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose fork fails or whose reply does not parse is
+   re-asked whole once, then as two halves (a refused one goes straight to the halves); whatever still
+   fails decides nothing, and its calls are kept.
+   The forks race the short `claudeTimeoutMs` only when the rules alone already clear
+   `minReductionRatio`; otherwise they are the only way to clear it, so they may take up to 45 s.
+   A subagent's own compaction uses the rules only (the fork can only fork the main session).
+   A `precompute` run (see below) runs the full pipeline in the background.
 
-Jev failures, malformed answers, a missing key, or a history that cannot be
-fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
+   Why lists and not Jev's per-call probabilities: on Claude Code 2.1.281 the API rejected every
+   fork asked to answer one line per call (digit scores such as `t12 93`, and letters such as
+   `t12 K`), with `invalid_request` and no output, once there were 10 or more candidates. The same
+   candidates passed at 10, 30 and 60 when the reply was JSON lists. So `keepThreshold` is not a
+   probability cut here. It only decides what `unsure` becomes.
 
-## Install and usage
+   Those rejections are the model's safeguards refusing (`stop_reason: "refusal"`), which Claude Code
+   2.1.281 turns into an error frame (`invalid_request`, no status) and a fork reports as `api-error`.
+   How often they fire depends on the whole request, and long tool inputs set them off most: in a
+   security-heavy session, candidate lines carrying Bash commands of up to 400 characters were refused
+   on 3 of 4 first tries, while the same lines cut to 120 or 200 characters passed 16 of 16. So a call's input is
+   shown up to 120 characters, after its secret-bearing parts are reduced to names: env assignment
+   values (`TOKEN=…`), HTTP header values (`-H 'Authorization: …'`) and heredoc bodies (`<<EOF …>`).
+   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) goes straight
+   to two halves: a whole re-ask of the same lines was refused again both times it was tried (live, 2.1.282),
+   while the halves mostly answered. A refusal that lands mid-reply leaves cut-off text, which shows
+   as `unparseable` because the fork result does not say why the text stopped.
+
+If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
+thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
+runs instead. So does
+`/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
+`/compact` prunes. Two exceptions keep a long session verbatim for longer:
+
+- **The plugin's own request** (at `compactAtPercent`) never ends in a summary. Below the gate it
+  leaves the transcript as it is and waits: nothing needs the room yet, and Claude Code's own
+  compaction still runs at its threshold, where the gate decides as above.
+- **Tier 2.** A long session compacts many times, and a later pass has less to cut: the old output
+  is already truncated, so only what arrived since can go. When a pass misses the gate on a
+  transcript an earlier compaction already truncated, it is tried once more with half the
+  `staleAfterMessages`, `truncateHeadChars` and `truncateTailChars`, and old truncations older than
+  that age are cut further (`stale_truncation`). The scorer is not asked again, and pins hold.
+
+A result truncated by an earlier pass is cut again within its own head and tail, with one note whose
+count still accounts for the original result. It is never truncated twice over (two notes).
+
+**How far verbatim compaction can go in a long session.** Replayed over the maintainers' corpus
+(`npm run eval:offline -- --replay`, a 400k window), tool results were under a fifth of the context at
+the first compaction and about a tenth at later ones. The rest was the system prompt and tools, user
+and assistant text, tool inputs, and context the hook never sees, which grows with the session (a fit
+to the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never
+touches. It is not the model's earlier thinking: leaving old turns' thinking rows out of a live
+compaction did not change the next request's input tokens. So a prune
+frees less each time, and on every long session replayed one of the later compactions still fell back
+to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
+sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
+most two points on four. A few passes late in a session freed under 5% of the context, leaving it at
+Claude Code's own threshold, so the fallback came a turn or two later instead.
+
+**Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
+refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
+as a `/compact` prompt). After that refusal (its message says "not available in a headless … session")
+the plugin stops asking for the rest of the session and says so once (a toast and a log line). Any other
+rejection, such as one while a turn is running, is logged and the request is tried again next turn. Send `/compact` yourself, or rely on Claude Code's own
+auto-compaction, which this plugin's `session.compact` hook still handles.
+
+### What changes in a pruned message
+
+Untouched and pinned messages (the first and the newest `preserveRecentMessages`) are handed back
+exactly as Claude Code had them. A message that loses a tool call, and the user message whose tool
+result is truncated, is rebuilt from its role, its text and its tool blocks only: images and documents,
+thinking blocks and the original order of its blocks are not preserved in that message. Truncation
+never rebuilds the assistant message that made the call.
+
+**What a rebuilt message loses that nobody sees.** Claude Code records attachments (hook output,
+reminders, re-sent instructions, a prompt typed while a turn runs, a queued agent message) as entries
+of their own, not as messages. It hangs each on the message recorded before it, and hands the hook only
+the messages. A message returned unchanged keeps what hangs on it; a rebuilt one does not, and the
+hook cannot see what that was (2.1.282: `rowsOf`/`messagesOf` in the session.compact dispatch). So a
+rebuilt tool result can take with it a prompt typed while that tool ran (`queued_command`), and after a
+summary compaction the instructions (CLAUDE.md, memory) hang on the first new user message.
+
+### Teammate messages
+
+In a multi-agent session the other agents' messages arrive as user messages
+(`<teammate-message teammate_id="…">`). On one orchestration session they were 28% of what the hook
+sees, more than its tool output. Typed prompts are never changed; teammate messages are cut three ways:
+
+- an agent's idle notification carries its closing reply, which restates the report it has just sent.
+  The report stays; the reply becomes a note plus the lines holding a sha, key, number, path or name
+  the report lacks (`dedupeTeammates`);
+- a message sent twice word for word keeps its newer copy, unless a token of the older one is quoted
+  in between (`dedupeTeammates`);
+- one older than `staleAfterMessages` keeps `teammateHeadChars`, then the lines holding a token quoted
+  later (always), then lines holding ids and numbers, up to 1000 chars (`trimStaleTeammates`).
+
+The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
+A task notification (a background agent's report, a message that is exactly one
+`<task-notification>`) is cut like a stale teammate message, and its boilerplate `<note>` stays on
+the newest one (`trimStaleTasks`). Reports the work went on to use are mostly kept: every line holding
+a path, name or id quoted later survives, and a cut must still save 30%.
+A cut must save 30% of its block. A block holding a note is never cut again. The gate
+(`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
+compaction clear the gate, never make it harder than tool output alone would. A prompt you type that pastes a whole teammate message, header and all, and nothing else, looks exactly
+like one and may be cut like one; a paste with any text of your own around it is never touched.
+A teammate message a prompt rides on (typed right after it arrived) is kept whole (see Riders).
+This pass never rewrites: the first
+message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
+and the first user message after a summary (it carries the re-sent instructions, see above).
+
+**Riders.** Claude Code records attachments (reminders, hook output, a prompt you type while a tool
+runs, a queued agent or task message) as entries of their own and hangs each on the message recorded
+before it; a hook sees only the messages. A message returned unchanged keeps what hangs on it, a
+rebuilt one loses it (measured on 2.1.282: truncating the result of a Bash call during which a prompt
+was typed removed that prompt from the conversation). So before pruning the hook reads the
+conversation as the model gets it (`$.session.messages({ as: "api" })`) and keeps whole every call
+whose result is followed by anything but an ephemeral reminder (token count, hook context, task and
+todo nags), together with every call sharing a message with it. A rider can reach that view folded
+into the result's own content or as a block beside it; beside it, the normalizer has moved every result
+of the message to the front, so all of them are kept. A block holding several reminders counts as
+ephemeral only when every one of them is. The view holds at most the newest 4096 messages. If that view is unavailable the debug
+log says `riders unknown` and pruning goes on as before.
+
+A call whose assistant message has no text of its own is truncated to its note instead of dropped.
+Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
+dropping the call would leave a message holding only thinking.
+
+### Old call inputs
+
+The inputs of old calls are often a quarter of a long session or more: heredocs, whole file contents, subagent
+prompts. Once the call has run, none of it is needed whole: the file is on disk, and the output or the
+agent's report follows the call. Past `staleAfterMessages`, a string field of 800 characters or more
+keeps its start, every line holding a token a later message quotes, a few lines holding ids and numbers,
+and a note naming what went (`[verbatim-compaction shortened this old command: …]`). The tool_use id and
+every other field stay. A field is kept whole when its quoted lines would not fit, and one holding a note
+is never cut again. `AskUserQuestion`, `ExitPlanMode` and `TodoWrite` are never touched.
+
+A shortened call is handed back as a rebuilt row, and Claude Code merges every row of one reply into
+the place of its first row. So a reply's calls are rebuilt together as one row, and only when nothing
+but their results follows them; in a parallel reply Claude Code wrote as call, result, call, result,
+every later part of the reply is rebuilt too. Replies are never rebuilt: without a message id, a long
+reply before a call cannot be told from the previous reply's turn-end text, which carries what Claude
+Code attaches at the end of a turn (stop-hook feedback, which quotes your goal).
+
+## Install
+
+Function hooks are early access (Claude Code 2.1.274+). Set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in the
+`env` block of your Claude Code settings, then:
 
 ```sh
-npm install fast-jev-compaction
-export TYPESAFE_API_KEY=...
+claude plugin marketplace add <your clone or fork of this repo>
+claude plugin install verbatim-compaction@verbatim-compaction
 ```
-
-```ts
-import { compactMessages, reductionRatio, type Message } from 'fast-jev-compaction';
-
-const transcript: Message[] = [
-  { role: 'user', text: 'Fix the failing test. Never edit src/generated.', toolUses: [] },
-  {
-    role: 'assistant',
-    text: '',
-    toolUses: [{ tool_use_id: 'toolu_1', tool: 'Read', input: { file_path: 'src/a.ts' } }],
-  },
-  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'toolu_1', text: '…file…' }] },
-  // …
-];
-
-const result = await compactMessages(transcript, { preserveRecentMessages: 4 });
-console.log(result.messages, result.decisions, result.stats);
-if (reductionRatio(result) < 0.25) {
-  // not worth it: keep the original transcript, or summarize instead
-}
-```
-
-`Message` is a subset of Claude Code's `SessionMessage`, so a session transcript
-can be passed in as is.
-
-To bring your own transport, implement `JevAsker` (one `ask(state, questions)`
-method) and call `compact(messages, asker, options)`; `buildJevRequest` and
-`parseJevResponse` give you the HTTP request body and response validation.
-The building blocks (`collectToolCalls`, `fitState`, `batchCalls`,
-`decideCall`, `applyDecisions`) are exported too.
-
-`apiKey` defaults to `process.env.TYPESAFE_API_KEY`. Never commit the key or
-put it in a source file.
 
 ## Options
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `apiKey` | `TYPESAFE_API_KEY` | TypeSafe API key (`compactMessages`/`JevClient`) |
-| `model` | `jev-latest` | Jev model name |
-| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
-| `fetch` | native `fetch` | Injectable fetch implementation for tests |
-| `goal` | last 3 user prompts | Ongoing task description included in the state |
-| `keepThreshold` | `0.5` | Minimum keep probability for a call or result to stay |
-| `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
-| `maxStateTokens` | `25000` | Estimated token ceiling for the state |
-| `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
-| `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
-
-`result.stats` reports message and character counts before and after, the
-per-reason decision counts, the state size in estimated tokens, which fitting
-stage was needed, and the number of requests.
-
-## Limitations
-
-- Only tool calls and results are candidates; text messages are never removed
-  or shortened in the output (they are only abridged in the state Jev sees).
-- Token sizes are estimates from character counts, not a tokenizer.
-- Calibration is at the request level; a probability is not a proof that a
-  result is safe to delete. The assistant can always re-run the tool.
-- The full state is repeated with every request, so a history near the state
-  ceiling costs one request per handful of questions.
-
-## Claude Code plugin
-
-The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
-is a thin adapter that feeds `session.compact` transcripts through `src/` and
-falls back to Claude Code's built-in summary on errors or insufficient
-reduction. See [`hooks/README.md`](hooks/README.md) for configuration and the
-Claude Code 2.1.274 type reference.
-
-### Install in Claude Code
-
-Function hooks are an early-access Claude Code feature (2.1.274+), so the
-opt-in flag must be set wherever Claude Code runs, e.g. in `~/.claude/settings.json`:
+Set options in your user settings (`~/.claude/settings.json`), a `--settings` file or managed
+settings, under the plugin's full id. Project settings are not read for plugin options.
 
 ```json
-{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "TYPESAFE_API_KEY": "<your key>" } }
+{
+  "pluginConfigs": {
+    "verbatim-compaction@verbatim-compaction": {
+      "options": { "compactAtPercent": 70, "claudeTimeoutMs": 30000 }
+    }
+  }
+}
 ```
 
-Then add this repository as a plugin marketplace and install the plugin,
-either from the shell or as slash commands inside a session:
+A plugin loaded with `--plugin-dir` reads `verbatim-compaction@inline` instead (Claude Code 2.1.281's
+debug log names the keys it looked for).
+
+| Option | Default | |
+| --- | --- | --- |
+| `compactAtPercent` | 60 | Context % at which compaction is requested (1–100). After the plugin's own compaction it waits until context reads under this again before asking once more, so a prune that leaves context above it is not followed by a compaction on every turn |
+| `compactAtTokens` | 300000 | Context tokens at which compaction is requested, whatever the percent reads; either threshold triggers it. On a 1M-token window 60% waits until 600k tokens, too late to prune verbatim in time. 0 turns it off. When a turn is already running (a busy session: agent messages, task notices), the request is retried every 3 s for up to a minute |
+| `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
+| `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
+| `truncateHeadChars` | 300 | Characters kept from a truncated result |
+| `truncateTailChars` | 1000 | Characters also kept from the end of a log-like result, or to hold a pinned token |
+| `staleAfterMessages` | 100 | Read and Bash file-read results older than this many messages are truncated. Counted in the same units as `preserveRecentMessages` (one per content block); 100 is about 60 merged user/assistant messages |
+| `pinReferenced` | true | Never drop a result whose introduced tokens are quoted later |
+| `stripMcpFurniture` | true | Strip JSON furniture from kept MCP results |
+| `maxCandidates` | 400 | Most calls listed for Claude, largest outputs first |
+| `useClaudeScorer` | true | `false` = rules only, no model call |
+| `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets most slow but healthy forks count (they measured up to about 31 s end to end, so the slowest can still miss it and fall back to the rules alone), and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
+| `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
+| `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
+| `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
+| `dedupeTeammates` | true | Restated idle notifications and exact repeats of teammate messages become notes (see "Teammate messages") |
+| `trimStaleTeammates` | true | Teammate messages older than `staleAfterMessages` keep their head, quoted-later lines and id/number lines |
+| `dedupePeerNotice` | true | The peer-message notice stays on the newest teammate message only |
+| `teammateHeadChars` | 1000 | Head kept of a stale teammate message |
+| `trimStaleTasks` | true | Stale task-notification reports cut like stale teammate messages; the notification note kept once |
+| `keepRecentUserTurns` | 3 | The teammate pass never rewrites the newest this many user messages, or any user message after them |
+| `shrinkOldInputs` | true | Shorten the long inputs of old calls: Bash heredocs, Write contents, Edit strings, subagent prompts (see "Old call inputs") |
+
+### Precompute
+
+When Claude Code precomputes a compaction in the background (`trigger: 'precompute'`), the hook runs
+the full pipeline there and returns the pruned transcript, which Claude Code keeps for the compaction
+that comes (or hands to the built-in summary below `minReductionRatio`). The forks then always get the
+45 s ceiling, and nothing is toasted. Claude Code 2.1.281 arms a precompute only when **all** of these hold (read
+from its source): you are signed in with claude.ai (OAuth) against the first-party API; the
+server-side flag `tengu_sepia_moth` is on for the account; the setting `precomputeCompactionEnabled` is
+`true` (its default is `false`); auto-compact is on; and the context is within the precompute buffer
+(20% by default) below the auto-compact threshold. In `-p`/SDK sessions it is also held back while the
+session has had only one user prompt. This path is covered by harness tests only. One headless probe
+(`precomputeCompactionEnabled: true` in `--settings`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, context about
+464k tokens against a 476k threshold, two user prompts) logged no `precomputed compact:` line of any
+kind, so a gate that no log line names was closed: most likely the server flag, which a user cannot set.
+
+## Resuming a compacted session
+
+**Claude Code 2.1.282 does not resume a session that this plugin has compacted correctly.** This is an
+engine bug. It affects every plugin whose `session.compact` hook keeps rows, and it does not affect the
+built-in summary. `claude --resume` and `--fork-session` rebuild the conversation from the transcript
+file, and for these sessions they splice pre-compaction rows back in. The first request then carries
+duplicated tool calls, the debug log shows `ensureToolResultPairing: repaired …`, and most of the
+compacted conversation is missing. The session you are in is not affected: only the file on disk is.
+Measured on one session compacted from 364k to 310k tokens: after `--resume` the first request held
+74k tokens, and after the repair below it held 316k.
+
+Two things in the written transcript cause it. In both, rows after the `compact_boundary` point back at
+rows before it:
+1. A kept tool_result row gets a fresh `uuid`, but its `sourceToolAssistantUUID` (and `parentUuid`)
+   still names the **pre-compaction** assistant row. The loader re-parents through it, and the chain
+   walk re-enters the old rows.
+2. A kept assistant row keeps its `message.id`. The loader groups assistant rows by `message.id`
+   across the whole file, so it also pulls in the old copies.
+
+`repro/resume-after-hook-compaction/` reproduces it with a ten-line hook, and it is reported upstream.
+Until the engine is fixed, repair the file before resuming:
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
-claude plugin install fast-jev-compaction@fast-jev-compaction
+node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl          # dry run: what it would change
+node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl --write  # repair it
 ```
 
-The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
-…); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
-Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
-auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
-replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
-could not remove enough (short sessions, or when it fails).
+- **What it changes.** For each boundary without the built-in compaction's preserved-segment metadata,
+  it points each stale tool_result row at the post-boundary copy of its assistant row. It gives each
+  post-boundary assistant row whose `message.id` also appears before the boundary a scoped id
+  (`<id>_vc<n>`, the same for every row of one message). Rows before a boundary and rows the model
+  wrote after it are left alone, and unchanged lines are written back byte for byte.
+- **Safety.** It is a dry run unless you pass `--write`. `--write` refuses in these cases:
+  - a live Claude Code process has the session open (`~/.claude/sessions/<pid>.json` with a live pid);
+  - the file was written in the last two minutes, unless you also pass `--force`;
+  - the file has more than one hard link, unless you pass `--force` (the rewrite replaces this name
+    only, and the other names keep the unfixed rows);
+  - the file is not a `<session-id>.jsonl`, such as a subagent's transcript under `subagents/`, which
+    is not supported.
 
-To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
-from the repository root. No publishing step is required; the marketplace is
-just the repo's `.claude-plugin/marketplace.json`.
+  Otherwise it copies the file to `<file>.<UTC timestamp to the ms>.bak` with the same mode. It writes
+  the new content to a temp file with the original mode and fsyncs it. Just before the rename it checks
+  the file again (inode, size, mtime and ctime). If anything changed since the read, it aborts and
+  removes the temp and the backup. After the rename it fsyncs the directory where the filesystem
+  supports that. It follows a symlink and rewrites the real file. A second run changes nothing, and a transcript
+  with no hook compaction is left untouched.
+- **Cost trackers.** A tool that totals usage per `message.id` (and `requestId`) sees each scoped id as
+  a new message. This does not inflate totals: the engine already writes the kept copies with all
+  usage counters at 0 (all 285 kept copies in the measured session), and the script leaves `usage` and
+  `requestId` as they are. A tracker that counts messages rather than tokens will count those rows
+  once more.
+- **Scope.** Run it only on a session that is closed. The checks catch a registered Claude Code
+  process and any change before the rename. A writer that is not registered but still holds the file
+  open can append after the rename, and those rows go to the old, unlinked file and are lost. The next
+  compaction writes new rows the same way, so run it again after that compaction, before the next
+  resume.
+
+## Cost
+
+The fork reads your session's cached prefix at the model's cache-read rate plus a short JSON reply:
+roughly $0.05–0.15 per compaction on a large session (estimate; depends on context size and model).
+A fork that outlasts `claudeTimeoutMs` cannot be cancelled: the hook stops waiting on it and rules
+alone decide, but the fork itself keeps running server-side and is still billed.
+`useClaudeScorer: false` is free.
 
 ## Development
 
 ```sh
 npm install
-npm run typecheck        # library + hook
 npm test
-npm run build
-npm run validate:plugin  # claude plugin validate
-TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
+npm run typecheck
+npm run validate:plugin
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ```
-
-The unit tests use a fake Jev and never contact TypeSafe. The demo is the live
-network check.
-
-## Animated demo (macOS)
-
-`demo/JevDemo` is a small native SwiftUI app that plays a scripted, dramatized
-version of the compaction flow inside a Claude Code-style terminal: the tool
-calls of a canned transcript are scored, results and calls Jev lets go turn red
-and collapse away, and the rest stays verbatim. It never calls the API; it
-exists to be screen recorded.
-
-```sh
-demo/JevDemo/build.sh   # builds demo/JevDemo/build/JevDemo.app and launches it
-```
-
-Press space in the app to replay from the start.

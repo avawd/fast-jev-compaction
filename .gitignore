@@ -1,4 +1,11 @@
 node_modules
 dist
 .env
-demo/JevDemo/build
+.env*
+*.pem
+*.key
+*.p12
+.claude/settings.local.json
+.npmrc
+eval/out
+eval/*.local.json

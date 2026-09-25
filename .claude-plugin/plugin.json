@@ -1,62 +1,30 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "name": "verbatim-compaction",
+  "version": "0.7.0",
+  "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
   "license": "MIT",
   "userConfig": {
-    "apiKey": {
-      "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
-      "sensitive": true
-    },
-    "keepThreshold": {
-      "type": "number",
-      "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
-      "default": 0.5
-    },
-    "preserveRecentMessages": {
-      "type": "number",
-      "title": "Recent messages to preserve",
-      "description": "Number of newest messages pinned from compaction.",
-      "default": 6
-    },
-    "compactAtPercent": {
-      "type": "number",
-      "title": "Compaction percentage",
-      "description": "Context percentage at which turn.complete requests compaction.",
-      "default": 60
-    },
-    "minReductionRatio": {
-      "type": "number",
-      "title": "Minimum reduction ratio",
-      "description": "Minimum estimated character reduction required to replace history.",
-      "default": 0.25
-    },
-    "maxStateTokens": {
-      "type": "number",
-      "title": "Maximum Jev state tokens",
-      "description": "Estimated token budget for the conversation state sent with every Jev request.",
-      "default": 25000
-    },
-    "maxRequestTokens": {
-      "type": "number",
-      "title": "Maximum Jev request tokens",
-      "description": "Estimated token budget for state plus questions in one Jev request.",
-      "default": 30000
-    },
-    "truncateHeadChars": {
-      "type": "number",
-      "title": "Truncated tool result head",
-      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
-      "default": 300
-    },
-    "model": {
-      "type": "string",
-      "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
-      "default": "jev-latest"
-    }
+    "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction. 1–100.", "default": 60 },
+    "compactAtTokens": { "type": "number", "title": "Compaction token count", "description": "Context tokens at which turn.complete requests compaction, whatever the percentage reads (on a 1M window 60% is 600k tokens). 0 turns it off.", "default": 300000 },
+    "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum characters saved, as a share of the transcript's tool-result characters, required to replace history; below it the built-in summary runs. 0.01–0.95.", "default": 0.25 },
+    "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched, counted one per content block (text, thinking, tool call, tool result) as Claude Code hands them over.", "default": 6 },
+    "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },
+    "truncateTailChars": { "type": "number", "title": "Truncated tool result tail", "description": "Characters also kept from the end of a test/build/deploy-like result, or to hold a token quoted later.", "default": 1000 },
+    "staleAfterMessages": { "type": "number", "title": "Stale after messages", "description": "Read and Bash file-read results older than this many messages are truncated. Messages are counted as Claude Code hands them over, one per content block (like preserveRecentMessages): 100 is about 60 turns' worth of merged messages.", "default": 100 },
+    "pinReferenced": { "type": "boolean", "title": "Pin referenced results", "description": "Never drop a result whose introduced tokens (shas, tickets, paths...) are quoted later.", "default": true },
+    "stripMcpFurniture": { "type": "boolean", "title": "Strip MCP furniture", "description": "Remove self links, avatars, feature flags and similar JSON furniture from kept MCP results.", "default": true },
+    "maxCandidates": { "type": "number", "title": "Maximum Claude candidates", "description": "Most tool calls listed for the Claude fork, largest outputs first.", "default": 400 },
+    "useClaudeScorer": { "type": "boolean", "title": "Use Claude scorer", "description": "Ask one tool-less fork of the session about calls the rules leave undecided. Off: rules only, no model call.", "default": true },
+    "claudeTimeoutMs": { "type": "number", "title": "Claude scorer timeout (ms)", "description": "How long the fork may take; past it the rules alone decide. Clamped to [500, 45000] ms. Waiting on the fork does not use up the hook's ten-second budget (measured on 2.1.281).", "default": 30000 },
+    "keepThreshold": { "type": "number", "title": "Keep threshold", "description": "How the fork's 'unsure' calls are treated: below 0.5 kept whole, 0.5-0.75 output truncated, above 0.75 removed. Clamped to [0, 1].", "default": 0.5 },
+    "forkChunkSize": { "type": "number", "title": "Calls per fork", "description": "Most candidate calls asked about in one fork; more run as concurrent forks over the same cached prefix. Whole number in [1, 400].", "default": 60 },
+    "shrinkOldInputs": { "type": "boolean", "title": "Shorten old tool inputs", "description": "Cut the long inputs of old calls (Bash heredocs, Write contents, Edit strings, subagent prompts) to their start, the lines holding values quoted later, and a note. The tool_use id and every other field stay.", "default": true },
+    "dedupeTeammates": { "type": "boolean", "title": "Deduplicate teammate messages", "description": "An agent's idle notification that restates the report it just sent, and a message sent twice word for word, become a one-line note; lines holding a sha, key or number the kept copy lacks stay.", "default": true },
+    "trimStaleTeammates": { "type": "boolean", "title": "Trim stale teammate messages", "description": "Teammate messages older than staleAfterMessages keep their head, their lines holding ids and numbers, and every line holding a token quoted later.", "default": true },
+    "dedupePeerNotice": { "type": "boolean", "title": "One peer-message notice", "description": "The notice Claude Code appends to every teammate message stays on the newest one only.", "default": true },
+    "trimStaleTasks": { "type": "boolean", "title": "Trim stale task notifications", "description": "A background agent's report in a task notification older than staleAfterMessages keeps its head, id/number lines and every line holding a token quoted later; the notification's boilerplate note stays on the newest one.", "default": true },
+    "teammateHeadChars": { "type": "number", "title": "Stale teammate message head", "description": "Characters kept from the start of a stale teammate message.", "default": 1000 },
+    "keepRecentUserTurns": { "type": "number", "title": "Recent user turns untouched", "description": "The teammate-message pass never rewrites the newest this many user text rows or any user row after them.", "default": 3 },
+    "minCandidateChars": { "type": "number", "title": "Smallest result asked about", "description": "Results shorter than this many characters are kept whole without asking the fork: each call asked about costs fork time, and a short result saves little. 0 asks about every call.", "default": 200 }
   }
 }

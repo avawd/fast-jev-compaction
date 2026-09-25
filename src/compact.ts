@@ -1,143 +1,80 @@
-import { noulAnswer } from './request.js';
-import { collectToolCalls, estimateTokens, fitState } from './state.js';
+import { annotateCalls } from './annotate.js';
+import { collectToolCalls } from './calls.js';
+import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
+import { gateRatio, resultChars } from './gate.js';
+import { stripFurnitureInMessages } from './rules-mcp.js';
+import { protectRows } from './riders.js';
+import { planShapes } from './shape.js';
+import { shrinkOld } from './shrink.js';
+import { truncatedResultText } from './truncate.js';
+import { compactUserRows } from './user-rows.js';
 import type {
-  CallAnswer,
   CallDecision,
   CompactOptions,
   CompactResult,
-  CompactionState,
-  JevAsker,
-  JevQuestions,
   Message,
   ResolvedCompactOptions,
+  Scorer,
+  ScoreOutcome,
   ToolCall,
-  ToolUse,
+  Verdict,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
-  goal: '',
-  keepThreshold: 0.5,
   preserveRecentMessages: 6,
-  maxStateTokens: 25_000,
-  maxRequestTokens: 30_000,
   truncateHeadChars: 300,
+  truncateTailChars: 1000,
+  // Rows as the engine hands them over (one per content block). Calibrated as 60 merged
+  // messages; merged-to-row ratios on the review corpus are 1.49-1.76 (median 1.64): ~100 rows.
+  staleAfterMessages: 100,
+  pinReferenced: true,
+  stripMcpFurniture: true,
+  shrinkOldInputs: true,
+  dedupeTeammates: true,
+  trimStaleTeammates: true,
+  dedupePeerNotice: true,
+  trimStaleTasks: true,
+  teammateHeadChars: 1000,
+  keepRecentUserTurns: 3,
 };
-
-/** Tokens the request envelope (`model`, key names) adds around state and questions. */
-const REQUEST_OVERHEAD_TOKENS = 20;
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+function flag(value: boolean | undefined, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOptions {
   return {
-    goal: options.goal ?? DEFAULT_OPTIONS.goal,
-    keepThreshold: finite(options.keepThreshold, DEFAULT_OPTIONS.keepThreshold),
     preserveRecentMessages: Math.max(
       0,
-      Math.floor(
-        finite(options.preserveRecentMessages, DEFAULT_OPTIONS.preserveRecentMessages),
-      ),
-    ),
-    maxStateTokens: Math.max(1, finite(options.maxStateTokens, DEFAULT_OPTIONS.maxStateTokens)),
-    maxRequestTokens: Math.max(
-      1,
-      finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
+      Math.floor(finite(options.preserveRecentMessages, DEFAULT_OPTIONS.preserveRecentMessages)),
     ),
     truncateHeadChars: Math.max(
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
+    truncateTailChars: Math.max(
+      0,
+      Math.floor(finite(options.truncateTailChars, DEFAULT_OPTIONS.truncateTailChars)),
+    ),
+    staleAfterMessages: Math.max(
+      0,
+      Math.floor(finite(options.staleAfterMessages, DEFAULT_OPTIONS.staleAfterMessages)),
+    ),
+    pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
+    stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
+    shrinkOldInputs: flag(options.shrinkOldInputs, DEFAULT_OPTIONS.shrinkOldInputs),
+    dedupeTeammates: flag(options.dedupeTeammates, DEFAULT_OPTIONS.dedupeTeammates),
+    trimStaleTeammates: flag(options.trimStaleTeammates, DEFAULT_OPTIONS.trimStaleTeammates),
+    dedupePeerNotice: flag(options.dedupePeerNotice, DEFAULT_OPTIONS.dedupePeerNotice),
+    trimStaleTasks: flag(options.trimStaleTasks, DEFAULT_OPTIONS.trimStaleTasks),
+    teammateHeadChars: Math.max(0, Math.floor(finite(options.teammateHeadChars, DEFAULT_OPTIONS.teammateHeadChars))),
+    keepRecentUserTurns: Math.max(0, Math.floor(finite(options.keepRecentUserTurns, DEFAULT_OPTIONS.keepRecentUserTurns))),
+    ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
-}
-
-/** The two `noul` questions asked about one call: keep the call, keep its result. */
-export function questionsFor(call: ToolCall): JevQuestions {
-  return {
-    [`call_${call.id}`]: {
-      type: 'noul',
-      instructions: `Tool call ${call.id} (${call.tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next`,
-    },
-    [`result_${call.id}`]: {
-      type: 'noul',
-      instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
-    },
-  };
-}
-
-/**
- * Splits the candidate calls into batches whose questions, together with the
- * (always complete) state, fit one request.
- */
-export function batchCalls(
-  calls: readonly ToolCall[],
-  stateTokens: number,
-  options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
-): ToolCall[][] {
-  const budget = options.maxRequestTokens - stateTokens - REQUEST_OVERHEAD_TOKENS;
-  const batches: ToolCall[][] = [];
-  let current: ToolCall[] = [];
-  let currentTokens = 0;
-  for (const call of calls) {
-    const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
-    if (current.length > 0 && currentTokens + tokens > budget) {
-      batches.push(current);
-      current = [];
-      currentTokens = 0;
-    }
-    if (current.length === 0 && tokens > budget) {
-      throw new Error(
-        `state leaves no room for questions (~${stateTokens} of ${options.maxRequestTokens} tokens)`,
-      );
-    }
-    current.push(call);
-    currentTokens += tokens;
-  }
-  if (current.length > 0) batches.push(current);
-  return batches;
-}
-
-export function decideCall(
-  call: Pick<ToolCall, 'id' | 'tool' | 'pinned'>,
-  answer: CallAnswer,
-  options: Pick<ResolvedCompactOptions, 'keepThreshold'>,
-): CallDecision {
-  const base = { id: call.id, tool: call.tool, ...answer };
-  if (call.pinned) return { ...base, action: 'keep', reason: 'pinned' };
-  if (answer.keepResult >= options.keepThreshold) {
-    return { ...base, action: 'keep', reason: 'kept' };
-  }
-  if (answer.keepCall >= options.keepThreshold) {
-    return { ...base, action: 'drop_result', reason: 'result_dropped' };
-  }
-  return { ...base, action: 'drop_call', reason: 'call_dropped' };
-}
-
-async function askBatch(
-  asker: JevAsker,
-  state: CompactionState,
-  batch: readonly ToolCall[],
-): Promise<Map<string, CallAnswer>> {
-  const questions: JevQuestions = Object.assign({}, ...batch.map(questionsFor));
-  const { answers } = await asker.ask(state, questions);
-  return new Map(
-    batch.map((call) => [
-      call.id,
-      {
-        keepCall: noulAnswer(answers, `call_${call.id}`),
-        keepResult: noulAnswer(answers, `result_${call.id}`),
-      },
-    ]),
-  );
-}
-
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
-    isError ? ' (error)' : ''
-  }; re-run the tool if needed]`;
 }
 
 /**
@@ -151,12 +88,19 @@ export function applyDecisions(
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
   headChars: number,
+  /** Tail characters to keep as well, by `tool_use_id` (see `planShapes`). */
+  tails: ReadonlyMap<string, number> = new Map(),
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
+  const heads = new Map<string, number>();
+  const windows = new Map<string, Array<[number, number]>>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
-    if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
+    if (!call || decision.action === 'keep') continue;
+    actions.set(call.tool_use_id, decision.action);
+    if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
+    if (decision.windows && decision.windows.length > 0) windows.set(call.tool_use_id, decision.windows);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -167,30 +111,22 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    const toolUses = message.toolUses
-      .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => {
-        if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-        );
-        if ((tool.text ?? '') === text) return tool;
-        const copy: ToolUse = {
-          tool_use_id: tool.tool_use_id,
-          tool: tool.tool,
-          input: tool.input,
-          text,
-        };
-        if (tool.isError) copy.isError = true;
-        return copy;
-      });
+    // drop_result shrinks only the user row's tool_result. The assistant row's tool_use is
+    // returned as the engine's own object: rebuilding it would lose its handle (and with it
+    // every block the summary shape does not carry) for no saving the engine would count.
+    const toolUses = message.toolUses.filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call');
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const head = heads.get(result.tool_use_id) ?? headChars;
+        const text = truncatedResultText(
+          result.text,
+          result.isError ?? false,
+          head,
+          tails.get(result.tool_use_id),
+          windows.get(result.tool_use_id),
+        );
         return text === result.text
           ? result
           : {
@@ -224,6 +160,31 @@ export function applyDecisions(
   return kept;
 }
 
+/**
+ * A drop_call on a call whose assistant row has no text becomes a drop_result. Claude Code
+ * hands over one row per content block, so that row's thinking block is a sibling row with no
+ * text of its own: removing the tool_use row would leave an assistant message holding only
+ * thinking. Keeping the call costs its input alone.
+ *
+ * A rule's drop keeps nothing but the note: a later call superseded the result (the repeated
+ * search, the retry that worked), so its head is a copy. Claude's `drop` keeps the default head
+ * and no tail. It used to keep no head either, and the recall eval measured that as the largest
+ * single loss: 9 of the 15 live misses Claude caused sat within the first 300 characters.
+ */
+function preferTruncation(decision: CallDecision, call: ToolCall, messages: readonly Message[]): CallDecision {
+  if (decision.action !== 'drop_call') return decision;
+  if ((messages[call.callIndex]?.text ?? '').trim().length > 0) return decision;
+  if (decision.source === 'rule') return { ...decision, action: 'drop_result', headChars: 0 };
+  return { ...decision, action: 'drop_result', headOnly: true };
+}
+
+/** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
+function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
+  if (decision.action !== 'drop_result') return decision;
+  const unchanged = truncatedResultText(text, false, decision.headChars ?? headChars, tailChars, decision.windows) === text;
+  return unchanged ? { ...decision, action: 'keep' } : decision;
+}
+
 /** Characters of text, tool input and tool output a message holds. */
 export function messageChars(message: Message): number {
   let total = message.text.length;
@@ -243,67 +204,92 @@ export function reductionRatio(result: Pick<CompactResult, 'stats'>): number {
   return charsBefore === 0 ? 0 : (charsBefore - charsAfter) / charsBefore;
 }
 
-function count(decisions: readonly CallDecision[], reason: CallDecision['reason']): number {
-  return decisions.filter((decision) => decision.reason === reason).length;
-}
-
 /**
- * Compacts a transcript by asking Jev, for every tool call outside the pinned
- * first and newest messages, whether the call and whether its result must
- * stay. The whole history (results omitted, fitted into `maxStateTokens`) is
- * sent as state with every batch of questions. Throws when Jev fails or the
- * history cannot be fitted; the caller decides whether to fall back.
+ * Compacts a transcript: every paired call goes to `scorer`, and its verdicts
+ * drop or truncate unpinned calls. Verdicts naming pinned or unknown calls are
+ * ignored. Throws only if the scorer throws; the caller decides the fallback.
  */
 export async function compact(
   messages: readonly Message[],
-  asker: JevAsker,
+  scorer: Scorer,
   options: CompactOptions = {},
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
-  const candidates = calls.filter((call) => !call.pinned);
-  const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  const protectedIds = protectRows(messages, options.protectedResultIds ?? []);
+  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages, protectedIds), messages, resolved);
+  const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
+  const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
+    ? await scorer(calls)
+    : { verdicts: new Map(), claude: 'skipped' };
+  const protectedRows = new Set(options.protectedRows ?? []);
+  const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started, protectedRows);
+  const gate = options.escalateBelow;
+  if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
+  const strict = tier2Options(resolved);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages, protectedIds), messages, strict);
+  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started, protectedRows);
+  if (!(gateRatio(second) > gateRatio(first))) return first;
+  return { ...second, stats: { ...second.stats, tier: 2 } };
+}
 
-  let fitted: { tokens: number; stage: string } = { tokens: 0, stage: '' };
-  let batches: ToolCall[][] = [];
-  const answers = new Map<string, CallAnswer>();
-  if (candidates.length > 0) {
-    const state = fitState(messages, calls, resolved);
-    fitted = state;
-    batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
-      batches.map((batch) => askBatch(asker, state.state, batch)),
-    );
-    for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
-  }
-
-  const decisions = calls.map((call) =>
-    decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
-  );
-  const kept = applyDecisions(
-    messages,
-    decisions,
-    calls,
-    resolved.truncateHeadChars,
-  );
-  return {
-    messages: kept,
-    decisions,
-    stats: {
-      messagesBefore: messages.length,
-      messagesAfter: kept.length,
-      charsBefore,
-      charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
-      calls: calls.length,
-      kept: count(decisions, 'kept'),
-      resultsDropped: count(decisions, 'result_dropped'),
-      callsDropped: count(decisions, 'call_dropped'),
-      pinned: count(decisions, 'pinned'),
-      stateTokens: fitted.tokens,
-      stateStage: fitted.stage,
-      requests: batches.length,
-      ms: Date.now() - started,
-    },
+/** Decisions from verdicts, shaped (pins, tails), applied; the stats of what happened. */
+function build(
+  messages: readonly Message[],
+  source: readonly Message[],
+  calls: readonly ToolCall[],
+  verdicts: ReadonlyMap<string, Verdict>,
+  resolved: ResolvedCompactOptions,
+  outcome: ScoreOutcome,
+  started: number,
+  /** Rows carrying riders (riders.ts): returned unchanged by every pass. */
+  protectedRows: ReadonlySet<Message> = new Set(),
+): CompactResult {
+  const scored: CallDecision[] = calls.map((call) => {
+    if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
+    const verdict = verdicts.get(call.id);
+    if (!verdict) return { id: call.id, tool: call.tool, action: 'keep', source: 'default' };
+    const decision: CallDecision = {
+      id: call.id,
+      tool: call.tool,
+      action: verdict.action,
+      source: verdict.source,
+    };
+    if (verdict.rule) decision.rule = verdict.rule;
+    return preferTruncation(decision, call, messages);
+  });
+  const texts = new Map(source.flatMap((m) => (m.toolResults ?? []).map((r) => [r.tool_use_id, r.text] as const)));
+  const shaped = planShapes(scored, calls, resolved, texts);
+  const byId = new Map(calls.map((call) => [call.id, call]));
+  const decisions = shaped.decisions.map((decision) => {
+    const call = byId.get(decision.id)!;
+    return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
+  });
+  const applied = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
+  const users = compactUserRows(applied, resolved, protectedRows);
+  const shrunk = shrinkOld(users.messages, source, calls, resolved);
+  const kept = shrunk.messages;
+  const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
+  const stats: CompactResult['stats'] = {
+    messagesBefore: messages.length,
+    messagesAfter: kept.length,
+    charsBefore: messages.reduce((sum, m) => sum + messageChars(m), 0),
+    resultCharsBefore: resultChars(messages),
+    charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
+    calls: calls.length,
+    kept: by((d) => d.action === 'keep' && d.source !== 'pinned'),
+    resultsDropped: by((d) => d.action === 'drop_result'),
+    callsDropped: by((d) => d.action === 'drop_call'),
+    pinned: by((d) => d.source === 'pinned'),
+    byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
+    byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
+    inputsShrunk: shrunk.inputs,
+    claude: outcome.claude,
+    ms: Date.now() - started,
   };
+  if (users.stats.rows > 0) stats.userRows = users.stats;
+  if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
+  if (outcome.forks && outcome.forks.length > 0) stats.forks = outcome.forks;
+  if (outcome.wait) stats.wait = outcome.wait;
+  return { messages: kept, decisions, stats };
 }
