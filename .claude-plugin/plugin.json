@@ -18,6 +18,8 @@
     "claudeTimeoutMs": { "type": "number", "title": "Claude scorer timeout (ms)", "description": "How long the fork may take; past it the rules alone decide. Clamped to [500, 45000] ms. Waiting on the fork does not use up the hook's ten-second budget (measured on 2.1.281).", "default": 30000 },
     "keepThreshold": { "type": "number", "title": "Keep threshold", "description": "How the fork's 'unsure' calls are treated: below 0.5 kept whole, 0.5-0.75 output truncated, above 0.75 removed. Clamped to [0, 1].", "default": 0.5 },
     "forkChunkSize": { "type": "number", "title": "Calls per fork", "description": "Most candidate calls asked about in one fork; more run as concurrent forks over the same cached prefix. Whole number in [1, 400].", "default": 60 },
+    "shrinkOldInputs": { "type": "boolean", "title": "Shorten old tool inputs", "description": "Cut the long inputs of old calls (Bash heredocs, Write contents, Edit strings, subagent prompts) to their start, the lines holding values quoted later, and a note. The tool_use id and every other field stay.", "default": true },
+    "shrinkOldText": { "type": "boolean", "title": "Shorten old replies", "description": "Cut long old assistant replies to their start, their lines carrying shas, tickets, numbers or values quoted later, and a note.", "default": true },
     "minCandidateChars": { "type": "number", "title": "Smallest result asked about", "description": "Results shorter than this many characters are kept whole without asking the fork: each call asked about costs fork time, and a short result saves little. 0 asks about every call.", "default": 200 }
   }
 }

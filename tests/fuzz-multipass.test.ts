@@ -5,7 +5,7 @@
  * `FUZZ_SEEDS=5000 npx vitest run tests/fuzz-multipass.test.ts` for a long run.
  */
 import { describe, expect, it } from 'vitest';
-import { compact, TRUNCATION_NOTE_PREFIX, type CompactOptions, type Message, type Scorer, type Verdict } from '../src/index.js';
+import { compact, SHRINK_NOTE_PREFIX, TRUNCATION_NOTE_PREFIX, type CompactOptions, type Message, type Scorer, type Verdict } from '../src/index.js';
 import { runCase } from './fuzz-check.ts';
 import { chance, genTranscript, int, pick, rng, seedCount } from './fuzz-gen.ts';
 
@@ -68,7 +68,11 @@ function excerptAccount(src: string, text: string): string | undefined {
   return at === src.length ? undefined : `excerpt accounts for ${at} of ${src.length} chars`;
 }
 
-function check(seed: number, original: Map<string, string>, first: Map<string, string>, second: Map<string, string>): string[] {
+/**
+ * `rewritten`: MCP results the second pass may strip of furniture before cutting, so its head
+ * and tail need not be the original's (the integrity fuzz checks the strip itself).
+ */
+function check(seed: number, original: Map<string, string>, first: Map<string, string>, second: Map<string, string>, rewritten: ReadonlySet<string>): string[] {
   const fail: string[] = [];
   for (const [id, text] of second) {
     const n = text.split(TRUNCATION_NOTE_PREFIX).length - 1;
@@ -82,6 +86,7 @@ function check(seed: number, original: Map<string, string>, first: Map<string, s
     // the ORIGINAL result exactly: its head starts it, its tail ends it, its count is the rest.
     const cutOnly =
       src !== undefined &&
+      !rewritten.has(id) &&
       !src.includes(TRUNCATION_NOTE_PREFIX) &&
       (wasN === 0
         ? was === src
@@ -110,13 +115,32 @@ function blobOf(messages: readonly Message[]): string {
   return messages.map((m) => [m.text, ...m.toolUses.map((u) => JSON.stringify(u.input)), ...(m.toolResults ?? []).map((r) => r.text)].join('\n')).join('\n');
 }
 
-/** A token a text row quotes, held before that row after the first pass, is still held before it after the second. */
-function pinsHeld(seed: number, first: readonly Message[], second: readonly Message[], quotes: ReadonlyArray<{ token: string; row: Message }>): string[] {
+/** Shrink notes (shrink.ts) in every text and input string: never more than one in any. */
+function shrinkNotesNest(seed: number, messages: readonly Message[]): string[] {
   const fail: string[] = [];
+  const visit = (value: unknown, where: string): void => {
+    if (typeof value === 'string') {
+      const n = value.split(SHRINK_NOTE_PREFIX).length - 1;
+      if (n > 1) fail.push(`seed ${seed}: ${n} shrink notes in ${where}`);
+    } else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) visit(v, `${where}.${k}`);
+  };
+  messages.forEach((m, k) => {
+    visit(m.text, `row ${k} text`);
+    for (const u of m.toolUses) visit(u.input, `${u.tool_use_id} input`);
+  });
+  return fail;
+}
+
+/** A token a text row quotes, held before that row after the first pass, is still held before it after the second. */
+function pinsHeld(seed: number, first: readonly Message[], second: readonly Message[], quotes: ReadonlyArray<{ token: string; row: Message; carrier?: string }>): string[] {
+  const fail: string[] = [];
+  const uses = new Set(second.flatMap((m) => m.toolUses.map((u) => u.tool_use_id)));
   for (const q of quotes) {
     const i1 = first.indexOf(q.row);
     const i2 = second.indexOf(q.row);
     if (i1 < 0 || i2 < 0) continue;
+    // A token planted in a long input goes with its call when the second pass drops it whole.
+    if (q.carrier && !uses.has(q.carrier)) continue;
     if (blobOf(first.slice(0, i1)).includes(q.token) && !blobOf(second.slice(0, i2)).includes(q.token)) {
       fail.push(`seed ${seed}: pinned token ${q.token} lost before its quote on the second pass`);
     }
@@ -146,9 +170,11 @@ describe('fuzz: a second compaction over the first one\'s output', () => {
       const second = await compact(run.result.messages, secondScorer(seed), options);
       if (second.stats.tier === 2) escalated += 1;
       for (const t of results(run.result.messages).values()) if (t.includes('chars omitted …]')) excerptsCarried += 1;
-      failures.push(...check(seed, results(transcript.messages), results(run.result.messages), results(second.messages)));
+      const mcp = new Set(options.stripMcpFurniture === false ? [] : transcript.messages.flatMap((m) => m.toolUses.filter((u) => u.tool.startsWith('mcp__')).map((u) => u.tool_use_id)));
+      failures.push(...check(seed, results(transcript.messages), results(run.result.messages), results(second.messages), mcp));
+      failures.push(...shrinkNotesNest(seed, second.messages));
       // Text quotes only: a tool-input quote can go with its call, and then nothing refers to the token.
-      const quotes = transcript.quotes.flatMap((q) => (q.kind === 'text' ? [{ token: q.token, row: q.row as Message }] : []));
+      const quotes = transcript.quotes.flatMap((q) => (q.kind === 'text' ? [{ token: q.token, row: q.row as Message, ...(q.carrier ? { carrier: q.carrier } : {}) }] : []));
       failures.push(...pinsHeld(seed, run.result.messages, second.messages, quotes));
     }
     expect({ failures: failures.slice(0, 25), total: failures.length }).toEqual({ failures: [], total: 0 });

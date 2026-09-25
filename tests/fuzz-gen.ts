@@ -35,7 +35,8 @@ export const chance = (r: Rng, p: number): boolean => r() < p;
 export type Row = Message & { handle: string };
 
 /** A later quote of a fact a result introduced: an assistant text row, or a tool_use's input. */
-export type Quote = { token: string } & ({ kind: 'text'; row: Row } | { kind: 'tool'; useId: string });
+/** `carrier`: the tool_use whose long input planted the token; a call dropped whole takes it along. */
+export type Quote = { token: string; carrier?: string } & ({ kind: 'text'; row: Row } | { kind: 'tool'; useId: string });
 
 export interface Transcript {
   messages: Row[];
@@ -232,6 +233,40 @@ function inputFor(r: Rng, tool: string, i: number, secrets: string[]): Record<st
   }
 }
 
+/** Lines of filler, some salient, one maybe carrying a token a later row quotes, an astral char near a cut. */
+function longLines(r: Rng, i: number, quotesOut: string[], prefix: string): string[] {
+  const lines = Array.from({ length: int(r, 20, 140) }, (_, k) => {
+    const salient = chance(r, 0.05) ? ` ref #${1000 + k} at ${(0xabc0000 + k * 7 + i).toString(16)}` : '';
+    const astral = chance(r, 0.05) ? pick(r, EMOJI) : '';
+    return `${prefix} ${i}.${k} ${'w'.repeat(int(r, 5, 190))}${astral}${salient}`;
+  });
+  if (chance(r, 0.5)) {
+    const token = `PLANTED_TOKEN_${i}_${int(r, 0, 9999)}`;
+    const at = int(r, 0, lines.length - 1);
+    lines[at] = `${chance(r, 0.2) ? 'z'.repeat(int(r, 100, 500)) : ''}${lines[at]} ${token}`;
+    quotesOut.push(token);
+  }
+  return lines;
+}
+
+/** Some tools' main field made long, as real sessions have them (heredocs, file contents, prompts). */
+function lengthen(r: Rng, tool: string, input: Record<string, unknown>, i: number, quotesOut: string[]): Record<string, unknown> {
+  const body = (prefix: string) => longLines(r, i, quotesOut, prefix).join('\n');
+  switch (tool) {
+    case 'Bash': return { ...input, command: `cat > /tmp/s${i}.py <<'EOF'\n${body('print(')}\nEOF\npython3 /tmp/s${i}.py` };
+    case 'Write': return { ...input, content: body('const') };
+    case 'Edit': return { ...input, old_string: body('old'), new_string: body('new') };
+    case 'Agent': return { ...input, prompt: body('Please') };
+    case 'mcp__claude_ai_Atlassian__editJiraIssue': return { ...input, fields: { summary: 's', description: body('desc') } };
+    default: return input;
+  }
+}
+
+/** A long assistant reply: prose lines, some salient, maybe a planted token. */
+function longReply(r: Rng, i: number, quotesOut: string[]): string {
+  return longLines(r, i, quotesOut, 'Reply line').join('\n');
+}
+
 const TOOLS = [
   'Read', 'Read', 'Bash', 'Bash', 'Bash', 'Edit', 'Write', 'Grep', 'Agent',
   'mcp__claude_ai_Atlassian__getJiraIssue', 'mcp__claude_ai_Atlassian__editJiraIssue',
@@ -257,13 +292,27 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   const secrets: string[] = [];
   const introduced: string[] = [];
   const merged = chance(r, 0.1);
+  // Long inputs and long replies (shrink.ts) draw from their own stream, so every other draw of a
+  // seed stays what it was before they existed.
+  const rl = rng(seed ^ 0x9e3779b9);
+  const pendingQuotes: Array<{ token: string; carrier?: string }> = [];
   let n = 0;
   const turns = int(r, 4, options.maxTurns ?? 60);
   for (let i = 0; i < turns; i += 1) {
     const uses: ToolUse[] = (chance(r, 0.2) ? [`u${i}a`, `u${i}b`] : [`u${i}`]).map((id) => {
       const tool = pick(r, TOOLS);
-      return { tool_use_id: id, tool, input: inputFor(r, tool, i, secrets) };
+      const input = inputFor(r, tool, i, secrets);
+      if (!chance(rl, 0.25)) return { tool_use_id: id, tool, input };
+      const planted: string[] = [];
+      const long = lengthen(rl, tool, input, i, planted);
+      pendingQuotes.push(...planted.map((token) => ({ token, carrier: id })));
+      return { tool_use_id: id, tool, input: long };
     });
+    if (chance(rl, 0.08)) {
+      const planted: string[] = [];
+      messages.push(row({ role: 'assistant', text: longReply(rl, i, planted), toolUses: [] }));
+      pendingQuotes.push(...planted.map((token) => ({ token })));
+    }
     if (chance(r, 0.4)) messages.push(row({ role: 'assistant', text: '', toolUses: [] })); // thinking
     const text = chance(r, 0.5) ? `Now step ${i}.` : '';
     if (merged && chance(r, 0.5)) {
@@ -307,6 +356,13 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
         messages.push(row({ role: 'assistant', text: '', toolUses: [{ tool_use_id: useId, tool: 'Edit', input: { file_path: 'src/a.ts', old_string: 'x', new_string: token } }] }));
         messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: useId, text: 'edited', isError: false }] }));
       }
+    }
+    // A token a long input or reply planted, quoted later: it must survive their shortening.
+    if (pendingQuotes.length > 0 && chance(rl, 0.3)) {
+      const { token, carrier } = pendingQuotes.splice(int(rl, 0, pendingQuotes.length - 1), 1)[0]!;
+      const q = row({ role: 'assistant', text: `Using ${token} from earlier.`, toolUses: [] });
+      messages.push(q);
+      quotes.push({ token, kind: 'text', row: q, ...(carrier ? { carrier } : {}) });
     }
     if (chance(r, 0.15)) messages.push(row({ role: 'user', text: `user says ${i} ${chance(r, 0.3) ? pick(r, EMOJI) : ''}`, toolUses: [] }));
   }

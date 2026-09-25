@@ -44,6 +44,10 @@ export type HookConfig = {
    * candidates but at most 1.5% of the tool output. Whole number, at least 0 (0 asks about all).
    */
   minCandidateChars: number;
+  /** Shorten long inputs of old calls (heredocs, Write contents, subagent prompts) to a head and a note. */
+  shrinkOldInputs: boolean;
+  /** Shorten long old assistant replies to a head, their salient lines and a note. */
+  shrinkOldText: boolean;
 };
 
 /**
@@ -83,6 +87,8 @@ const DEFAULTS: HookConfig = {
   keepThreshold: 0.5,
   forkChunkSize: 60,
   minCandidateChars: 200,
+  shrinkOldInputs: true,
+  shrinkOldText: true,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -123,6 +129,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
     minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
+    shrinkOldInputs: bool(options, 'shrinkOldInputs', DEFAULTS.shrinkOldInputs),
+    shrinkOldText: bool(options, 'shrinkOldText', DEFAULTS.shrinkOldText),
   };
 }
 
@@ -205,6 +213,7 @@ export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
+    `${s.inputsShrunk + s.textsShrunk > 0 ? `; shortened ${s.inputsShrunk} old inputs, ${s.textsShrunk} old replies` : ''}` +
     `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}`;
 }
 

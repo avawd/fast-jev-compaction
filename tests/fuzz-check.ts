@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, INPUT_CHARS, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, MIN_SHRINK_TEXT_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -183,6 +183,39 @@ function piecesFit(src: string, head: string, pieces: Array<{ gap: number; text:
   return undefined;
 }
 
+/** Why `out` is not `src` shortened by shrink.ts (its start, one note, then excerpt lines), or undefined when it is. */
+export function shortenedBadly(src: string, out: string, minChars: number): string | undefined {
+  if (out === src) return undefined;
+  if (src.length < minChars) return `a ${src.length}-char text was shortened`;
+  const notes = out.split(SHRINK_NOTE_PREFIX).length - 1;
+  if (notes !== 1) return `${notes} shrink notes`;
+  if (out.length >= src.length) return 'did not shrink';
+  const at = out.indexOf(`\n${SHRINK_NOTE_PREFIX}`);
+  if (at < 0) return 'no head before the note';
+  if (!src.startsWith(out.slice(0, at))) return 'head is not the start';
+  const close = out.indexOf(']', at);
+  for (const line of out.slice(close + 2).split('\n').filter(Boolean)) {
+    const piece = line.startsWith('…') ? line.slice(1) : line;
+    if (!src.includes(piece)) return `excerpt line not in the source: ${piece.slice(0, 40)}`;
+  }
+  return undefined;
+}
+
+function inputShortenedBadly(src: unknown, out: unknown, depth: number): string | undefined {
+  if (src === out) return undefined;
+  if (typeof src === 'string') return typeof out === 'string' ? shortenedBadly(src, out, MIN_SHRINK_FIELD_CHARS) : 'a string became another type';
+  if (src === null || typeof src !== 'object' || out === null || typeof out !== 'object') return 'a non-string value changed';
+  if (Array.isArray(src) !== Array.isArray(out)) return 'an array changed shape';
+  const a = Object.keys(src as object);
+  const b = Object.keys(out as object);
+  if (a.length !== b.length || a.some((k, i) => k !== b[i])) return `keys changed: ${a.join(',')} → ${b.join(',')}`;
+  for (const k of a) {
+    const bad = inputShortenedBadly((src as Record<string, unknown>)[k], (out as Record<string, unknown>)[k], depth + 1);
+    if (bad) return `${k}: ${bad}`;
+  }
+  return undefined;
+}
+
 /** Every invariant of one run. */
 export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const failures: string[] = [];
@@ -227,14 +260,60 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4. Text never edited, and rows without tool blocks are never removed or rebuilt.
+  // 4. Text is never edited except an old long assistant reply shortened (shrink.ts), and rows
+  //    without tool blocks are never removed; one is rebuilt only for that shortening.
   const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
-  const plainSet = new Set<Message>(plainIn);
-  const plainOut = session.filter((m) => plainSet.has(m));
-  if (plainIn.length !== plainOut.length || plainIn.some((m, i) => plainOut[i] !== m)) fail('a plain text row was removed or rebuilt');
+  // A drop_call on a row holding text and tool_uses leaves its text as a plain row: not one of these.
+  const toolRowTexts = new Set(input.filter((m) => m.toolUses.length > 0 && m.text.trim()).map((m) => m.text));
+  const plainOut = session.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0 && (inputSet.has(m) || !toolRowTexts.has(m.text)));
+  if (plainIn.length !== plainOut.length) fail('a plain text row was removed or added');
+  else plainIn.forEach((m, i) => {
+    const out = plainOut[i]!;
+    if (out === m) return;
+    const bad = shortenedBadly(m.text, out.text, MIN_SHRINK_TEXT_CHARS);
+    if (m.role !== 'assistant' || out.role !== 'assistant' || bad) fail(`plain row ${i} rebuilt: ${bad ?? 'not an assistant reply'}`);
+  });
   const inText = input.map((m) => m.text).filter((t) => t.trim());
   const outText = session.map((m) => m.text).filter((t) => t.trim());
-  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i])) fail('user/assistant text changed or dropped');
+  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i] && shortenedBadly(t, outText[i]!, MIN_SHRINK_TEXT_CHARS))) {
+    fail('user/assistant text changed or dropped');
+  }
+
+  // 10. A tool input is only ever shortened (shrink.ts): same id, same keys, each changed string a
+  //     long one cut to its start plus one note, never on a pinned call or an excluded tool.
+  const sourceUse = new Map(input.flatMap((m) => m.toolUses.map((u) => [u.tool_use_id, u] as const)));
+  const pinnedUse = new Set(collectToolCalls(input, preserve).filter((c) => c.pinned).map((c) => c.tool_use_id));
+  for (const m of session) for (const u of m.toolUses) {
+    const src = sourceUse.get(u.tool_use_id);
+    if (!src || u.input === src.input) continue;
+    if (u.tool !== src.tool) fail(`tool_use ${u.tool_use_id} changed tool`);
+    if (pinnedUse.has(u.tool_use_id)) fail(`pinned tool_use ${u.tool_use_id} input changed`);
+    if (['AskUserQuestion', 'ExitPlanMode', 'TodoWrite'].includes(u.tool)) fail(`${u.tool} input changed`);
+    const bad = inputShortenedBadly(src.input, u.input, 0);
+    if (bad) fail(`tool_use ${u.tool_use_id} input: ${bad}`);
+  }
+
+  // 11. The API pairing Claude Code checks: rows of one reply (a run of the input's assistant rows)
+  //     form one message, a rebuilt row is a message of its own, consecutive user rows merge. Every
+  //     message's tool_uses must have their results in the very next message.
+  const replyOf = new Map<Message, number>();
+  input.forEach((m, k) => { if (m.role === 'assistant') replyOf.set(m, k > 0 && input[k - 1]!.role === 'assistant' ? replyOf.get(input[k - 1]!)! : k); });
+  const api: Array<{ role: string; key: unknown; uses: string[]; results: Set<string> }> = [];
+  session.forEach((m, k) => {
+    const key = m.role === 'assistant' ? (replyOf.get(m) ?? `rebuilt${k}`) : 'user';
+    const last = api[api.length - 1];
+    const msgUses = m.toolUses.map((u) => u.tool_use_id);
+    const msgResults = (m.toolResults ?? []).map((x) => x.tool_use_id);
+    if (last && last.role === m.role && last.key === key) {
+      last.uses.push(...msgUses);
+      for (const id of msgResults) last.results.add(id);
+    } else api.push({ role: m.role, key, uses: msgUses, results: new Set(msgResults) });
+  });
+  api.forEach((a, k) => {
+    const answered = a.uses.filter((id) => resultPos.has(id));
+    const next = api[k + 1];
+    for (const id of answered) if (!next || next.role !== 'user' || !next.results.has(id)) fail(`tool_use ${id}'s result is not in the next API message`);
+  });
 
   // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.
   session.forEach((m, k) => {
@@ -424,6 +503,9 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
         if (q.kind === 'text') fail(`quoting row for ${q.token} vanished`);
         continue; // The quoting call itself was dropped: nothing quotes the token any more.
       }
+      // A token planted in a long input goes with a call dropped whole (drop_call, which pin.ts
+      // allows: an input is a quote, not a carrier); shortening the input must keep it.
+      if (q.carrier && !usePos.has(q.carrier)) continue;
       const before = session.slice(0, at).map(rowText).join('\n');
       if (!before.includes(q.token)) fail(`later-quoted ${q.token} (quoted at row ${at}) is gone from the context before it`);
     }

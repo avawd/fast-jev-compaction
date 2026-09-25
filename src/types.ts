@@ -161,6 +161,13 @@ export interface CompactOptions {
   /** The session's working directory (absolute), for resolving relative paths. Unknown if absent. */
   cwd?: string;
   /**
+   * Shorten the long inputs of old calls (Bash commands, Write contents, Edit strings, subagent
+   * prompts...) to a head, the lines holding later-quoted tokens, and a note (see shrink.ts). Default true.
+   */
+  shrinkOldInputs?: boolean;
+  /** Shorten long old assistant replies the same way. Default true. */
+  shrinkOldText?: boolean;
+  /**
    * The caller's gate (`gateRatio`). When set and missed on a transcript an earlier compaction
    * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
    */
@@ -174,6 +181,8 @@ export interface ResolvedCompactOptions {
   staleAfterMessages: number;
   pinReferenced: boolean;
   stripMcpFurniture: boolean;
+  shrinkOldInputs: boolean;
+  shrinkOldText: boolean;
   cwd?: string;
 }
 
@@ -195,6 +204,9 @@ export interface CompactResult {
     pinned: number;
     byRule: number;
     byClaude: number;
+    /** Old tool inputs and old assistant replies shortened (see shrink.ts). */
+    inputsShrunk: number;
+    textsShrunk: number;
     claude: ClaudeStatus;
     /** How long the Claude stage waited; absent when it never started. */
     claudeMs?: number;

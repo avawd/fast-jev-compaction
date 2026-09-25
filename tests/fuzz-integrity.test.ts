@@ -16,6 +16,8 @@ describe('fuzz: transcript integrity', () => {
   it(`holds every invariant over ${SEEDS} seeds`, async () => {
     const failures: string[] = [];
     let threw = 0;
+    let shrunk = 0;
+    let merged = 0;
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const transcript = genTranscript(seed);
       let run;
@@ -27,11 +29,16 @@ describe('fuzz: transcript integrity', () => {
         continue;
       }
       for (const f of checkCase(transcript, run)) failures.push(`seed ${seed}: ${f}`);
+      shrunk += run.result.stats.inputsShrunk + run.result.stats.textsShrunk;
+      if (run.session.some((m) => m.toolUses.length > 1 && !transcript.messages.includes(m as never))) merged += 1;
       if (seed % DETERMINISM_EVERY === 0) {
         const again = await runCase(seed, genTranscript(seed));
         if (fingerprint(again) !== fingerprint(run)) failures.push(`seed ${seed}: a second run gave a different output`);
       }
     }
     expect({ threw, failures: failures.slice(0, 25), total: failures.length }).toEqual({ threw: 0, failures: [], total: 0 });
+    // Shortening (shrink.ts), parallel groups merged into one row included, is exercised.
+    expect(shrunk).toBeGreaterThan(SEEDS / 10);
+    expect(merged).toBeGreaterThan(0);
   }, Math.max(60_000, SEEDS * 100));
 });

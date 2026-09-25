@@ -4,6 +4,7 @@ import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
 import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
+import { shrinkOld } from './shrink.js';
 import { truncatedResultText } from './truncate.js';
 import type {
   CallDecision,
@@ -26,6 +27,8 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   staleAfterMessages: 100,
   pinReferenced: true,
   stripMcpFurniture: true,
+  shrinkOldInputs: true,
+  shrinkOldText: true,
 };
 
 function finite(value: number | undefined, fallback: number): number {
@@ -56,6 +59,8 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     ),
     pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
+    shrinkOldInputs: flag(options.shrinkOldInputs, DEFAULT_OPTIONS.shrinkOldInputs),
+    shrinkOldText: flag(options.shrinkOldText, DEFAULT_OPTIONS.shrinkOldText),
     ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
 }
@@ -244,7 +249,9 @@ function build(
     const call = byId.get(decision.id)!;
     return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
   });
-  const kept = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
+  const applied = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
+  const shrunk = shrinkOld(applied, source, calls, resolved);
+  const kept = shrunk.messages;
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
   const stats: CompactResult['stats'] = {
     messagesBefore: messages.length,
@@ -259,6 +266,8 @@ function build(
     pinned: by((d) => d.source === 'pinned'),
     byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
     byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
+    inputsShrunk: shrunk.inputs,
+    textsShrunk: shrunk.texts,
     claude: outcome.claude,
     ms: Date.now() - started,
   };
