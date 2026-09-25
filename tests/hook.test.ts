@@ -497,6 +497,25 @@ describe('register', () => {
       expect(h.compactCalls).toBe(attempts + 1);
     });
 
+    it('a gate-miss skip on the plugin\'s own request cancels a pending retry and waits inside autoCompact', async () => {
+      const h = harness({ percent: 90, sessionCompact: async () => { throw new Error('a turn is running (t4)'); } });
+      await h.turnComplete(answered);
+      expect(h.timers).toHaveLength(1);
+      const claudeOnlyish = [
+        { role: 'user' as const, text: 'Run the tests.', toolUses: [] },
+        { role: 'assistant' as const, text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: { command: 'npm test' } }] },
+        { role: 'user' as const, text: '', toolUses: [], toolResults: [{ tool_use_id: 'u1', text: 'y'.repeat(3000) }] },
+        ...Array.from({ length: 6 }, (_, i) => ({ role: (i % 2 ? 'user' : 'assistant') as 'user' | 'assistant', text: `turn ${i}`, toolUses: [] })),
+      ];
+      const out = (await h.compact({ trigger: 'plugin', messages: claudeOnlyish })) as { skip?: string };
+      expect(out.skip).toBeDefined();
+      expect(h.timers).toHaveLength(0);
+      const calls = h.compactCalls;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(calls);
+      expect(h.debugLogs.some((l) => /waiting for context to drop/.test(l))).toBe(true);
+    });
+
     it('a retry that finds context already under the threshold does not compact', async () => {
       let percent = 90;
       const h = harness({ percent: async () => percent, sessionCompact: async () => { throw new Error('a turn is running (t4)'); } });

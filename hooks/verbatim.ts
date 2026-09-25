@@ -432,8 +432,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const outcome = gateOutcome(gateRatio(result), config.minReductionRatio, event.trigger);
       if (outcome === 'skip') {
         // The plugin's own early request: nothing needs the room yet, and a summary would lose every
-        // verbatim fact. Wait for context to drop (Claude Code's own compaction still runs at its threshold).
-        awaitingDrop = true;
+        // verbatim fact. autoCompact waits for context to drop (Claude Code's own compaction still runs
+        // at its threshold), and a pending retry is pointless now.
+        auto.awaitingDrop = true;
+        auto.retry?.cancel();
+        auto.retry = undefined;
         const reason = `pruning would free only ${Math.round(gateRatio(result) * 100)}% of tool output ` +
           `(under ${Math.round(config.minReductionRatio * 100)}%); left as is until Claude Code's own compaction`;
         notify($, `skipped: ${reason} (${summarize(result)})`, false);
