@@ -258,7 +258,7 @@ export function compactUserRows(
       if (!previous || previous.idle) continue;
       const kept = keptLines(b.idle.result, (t) => quotedBetween(quotes, t, b.row) && !previous.body.includes(t), previous.body, 0);
       if (!kept) continue;
-      const note = `${USER_ROW_NOTE} ${b.from}'s closing reply, restating its message above; ${b.idle.result.length} chars omitted]`;
+      const note = `${USER_ROW_NOTE} ${b.from}'s closing reply, restating its message above; ${b.idle.result.length - kept.join('\n').length} chars omitted]`;
       const body = idleBody(b.idle, withLines(note, kept));
       if (body.length >= b.body.length * (1 - MIN_SAVING)) continue;
       edits.set(b, body);

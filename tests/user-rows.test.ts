@@ -52,6 +52,9 @@ describe('compactUserRows: restated idle notifications', () => {
     const result = idleResult(out.messages[2]!);
     expect(result).toContain('52d71c0a');
     expect(result).toContain('#917');
+    const kept = result.split('\n').slice(1).join('\n');
+    const omitted = Number(/(\d+) chars omitted/.exec(result)![1]);
+    expect(omitted).toBe(idleResult(idl).length - kept.length);
     expect(result).not.toContain('restated finding number 5 ');
   });
 
