@@ -211,6 +211,44 @@ describe('compactUserRows: guards', () => {
   });
 });
 
+const TASK_NOTE = '<note>A task-notification fires each time this agent stops with no live background children of its own.</note>';
+function task(id: string, result: string, note = true): Message {
+  return msg('user', `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_${id}</tool-use-id>\n<status>completed</status>\n<summary>Agent "${id}" finished</summary>\n${note ? `${TASK_NOTE}\n` : ''}<result>${result}</result>\n</task-notification>`);
+}
+
+describe('compactUserRows: task notifications', () => {
+  it('cuts a stale agent result like a stale teammate message, keeping the envelope', () => {
+    const body = `${lines('stale', 80)}\nMerged in abc1234def.\n${lines('more', 20)}`;
+    const input = [msg('user', 'Start.'), msg('assistant', 'go'), task('a1', body), ...filler(30)];
+    const out = compactUserRows(input, opts({ staleAfterMessages: 10, teammateHeadChars: 400 }));
+    const text = out.messages[2]!.text;
+    expect(text.length).toBeLessThan(2000);
+    expect(text).toContain('<summary>Agent "a1" finished</summary>');
+    expect(text).toContain('abc1234def');
+    expect(text).toMatch(/<\/result>\n<\/task-notification>$/);
+    expect(out.stats.stale).toBe(1);
+  });
+
+  it('keeps the task note on the newest task notification only', () => {
+    const input = [msg('user', 'Start.'), task('a1', 'short'), msg('assistant', 'ok'), task('a2', 'short'), ...filler(10)];
+    const out = compactUserRows(input, opts());
+    expect(out.messages[1]!.text).not.toContain('<note>');
+    expect(out.messages[3]).toBe(input[3]);
+  });
+
+  it('never touches a row with text around the notification', () => {
+    const row = msg('user', `Look:\n${task('a1', lines('x', 80)).text}`);
+    const input = [msg('user', 'Start.'), row, ...filler(30)];
+    expect(compactUserRows(input, opts({ staleAfterMessages: 2 })).messages[1]).toBe(row);
+  });
+
+  it('leaves task notifications alone when trimStaleTasks is off', () => {
+    const input = [msg('user', 'Start.'), task('a1', lines('x', 80)), task('a2', 'short'), ...filler(30)];
+    const out = compactUserRows(input, opts({ staleAfterMessages: 2, trimStaleTasks: false }));
+    expect(out.messages[1]).toBe(input[1]);
+  });
+});
+
 describe('compact() with user rows', () => {
   it('shrinks teammate rows and reports it in stats; charsAfter counts it', async () => {
     const none: Scorer = async () => ({ verdicts: new Map(), claude: 'skipped' });

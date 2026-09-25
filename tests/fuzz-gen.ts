@@ -363,6 +363,13 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       }
       messages.push(row({ role: 'user', text: `${TEAMMATE_HEADER}${blocks.join('\n\n')}${chance(rt, 0.8) ? TEAMMATE_NOTICE : ''}`, toolUses: [] }));
       if (chance(rt, 0.1)) messages.push(row({ role: 'user', text: SUMMARY_TEXT, toolUses: [] }));
+      // A background agent's task notification, its report carrying facts.
+      if (chance(rt, 0.3)) {
+        const facts = Array.from({ length: int(rt, 0, 3) }, () => fact(rt, tn++));
+        const body = teammateBody(rt, `task ${i}`, facts);
+        introduced.push(...facts);
+        messages.push(row({ role: 'user', text: `<task-notification>\n<task-id>t${i}</task-id>\n<status>completed</status>\n<summary>Agent "t${i}" finished</summary>\n<note>A task-notification fires each time this agent stops.</note>\n<result>${body}</result>\n</task-notification>`, toolUses: [] }));
+      }
       // A typed prompt pasting a teammate block (and sometimes the notice): never to be touched.
       if (chance(rt, 0.1)) messages.push(row({ role: 'user', text: `See this:\n${blocks[0]}${chance(rt, 0.5) ? TEAMMATE_NOTICE : ''}\n\nWhat do you make of it?`, toolUses: [] }));
     }

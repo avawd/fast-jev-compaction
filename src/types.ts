@@ -173,6 +173,8 @@ export interface CompactOptions {
   trimStaleTeammates?: boolean;
   /** The peer-message notice stays on the newest teammate row only. Default true. */
   dedupePeerNotice?: boolean;
+  /** Task notifications (a background agent's report): stale results cut like teammate messages, the note kept once. Default true. */
+  trimStaleTasks?: boolean;
   /** Characters of a stale teammate message's head to keep. Default 1000. */
   teammateHeadChars?: number;
   /** User text rows, newest first, never rewritten, with everything after them. Default 3. */
@@ -190,6 +192,7 @@ export interface ResolvedCompactOptions {
   dedupeTeammates: boolean;
   trimStaleTeammates: boolean;
   dedupePeerNotice: boolean;
+  trimStaleTasks: boolean;
   teammateHeadChars: number;
   keepRecentUserTurns: number;
 }

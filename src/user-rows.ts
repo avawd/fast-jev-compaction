@@ -62,6 +62,8 @@ interface Block {
   start: number;
   end: number;
   body: string;
+  /** A task notification's `<result>` (a background agent's report), not a teammate block. */
+  task?: true;
   /** The parsed idle notification, when the body is one with a string result. */
   idle?: Record<string, unknown> & { result: string };
 }
@@ -92,6 +94,25 @@ function blocksOf(text: string, row: number): Block[] {
   }
   return out;
 }
+
+/**
+ * A task-notification row is exactly one `<task-notification>` element and nothing else; its
+ * block is the `<result>`, the report of the background agent it announces.
+ */
+const isTaskRow = (m: Message) =>
+  m.role === 'user' && (m.toolResults ?? []).length === 0 && m.text.startsWith('<task-notification>') &&
+  m.text.endsWith('</task-notification>') && m.text.split('<task-notification>').length === 2;
+
+function taskBlock(text: string, row: number): Block[] {
+  const open = text.indexOf('<result>');
+  const close = text.lastIndexOf('</result>');
+  if (open < 0 || close < open) return [];
+  const start = open + '<result>'.length;
+  const id = /<task-id>([^<]*)<\/task-id>/.exec(text)?.[1] ?? '?';
+  return [{ row, from: `task ${id}`, start, end: close, body: text.slice(start, close), task: true }];
+}
+
+const TASK_NOTE = /<note>A task-notification fires[^<]*<\/note>\n?/;
 
 /**
  * A teammate row is exactly what Claude Code writes: the header, then teammate blocks and nothing
@@ -213,12 +234,13 @@ export function compactUserRows(
   options: ResolvedCompactOptions,
 ): { messages: Message[]; stats: UserRowStats } {
   const stats: UserRowStats = { teammateChars: teammateChars(messages), rows: 0, charsSaved: 0, restated: 0, repeated: 0, stale: 0, notices: 0 };
-  const { dedupeTeammates, trimStaleTeammates, dedupePeerNotice } = options;
-  if (!dedupeTeammates && !trimStaleTeammates && !dedupePeerNotice) return { messages: [...messages], stats };
+  const { dedupeTeammates, trimStaleTeammates, dedupePeerNotice, trimStaleTasks } = options;
+  if (!dedupeTeammates && !trimStaleTeammates && !dedupePeerNotice && !trimStaleTasks) return { messages: [...messages], stats };
   const total = messages.length;
   const guarded = guardedRows(messages, options);
   const quotes = quoteIndex(messages);
-  const blocks = messages.flatMap((m, row) => (isTeammateRow(m) ? blocksOf(m.text, row) : []));
+  const blocks = messages.flatMap((m, row) =>
+    isTeammateRow(m) ? blocksOf(m.text, row) : trimStaleTasks && isTaskRow(m) ? taskBlock(m.text, row) : []);
   const edits = new Map<Block, string>();
   const editable = (b: Block) => !guarded.has(b.row) && !b.body.includes(USER_ROW_NOTE);
 
@@ -266,9 +288,10 @@ export function compactUserRows(
     }
   }
 
-  if (trimStaleTeammates) {
+  if (trimStaleTeammates || trimStaleTasks) {
     for (const b of blocks) {
       if (edits.has(b) || !editable(b) || b.row >= total - options.staleAfterMessages) continue;
+      if (b.task ? !trimStaleTasks : !trimStaleTeammates) continue;
       const text = b.idle ? b.idle.result : b.body;
       if (text.length < MIN_BLOCK + options.teammateHeadChars) continue;
       const cut = staleBody(text, options.teammateHeadChars, (t) => quotedBetween(quotes, t, b.row));
@@ -281,12 +304,18 @@ export function compactUserRows(
   const byRow = new Map<number, Block[]>();
   for (const b of blocks) byRow.set(b.row, [...(byRow.get(b.row) ?? []), b]);
   const newestTeammate = messages.reduce((last, m, row) => (isTeammateRow(m) ? row : last), -1);
+  const newestTask = messages.reduce((last, m, row) => (isTaskRow(m) ? row : last), -1);
   const out = messages.map((m, row) => {
-    if (guarded.has(row) || !isTeammateRow(m)) return m;
+    const isTask = trimStaleTasks && isTaskRow(m);
+    if (guarded.has(row) || !(isTask || isTeammateRow(m))) return m;
     let text = m.text;
     const rowEdits = (byRow.get(row) ?? []).filter((b) => edits.has(b)).sort((a, b) => b.start - a.start);
     for (const b of rowEdits) text = text.slice(0, b.start) + edits.get(b)! + text.slice(b.end);
-    if (dedupePeerNotice && row !== newestTeammate) {
+    if (isTask && row !== newestTask && TASK_NOTE.test(text)) {
+      text = text.replace(TASK_NOTE, '');
+      stats.notices += 1;
+    }
+    if (!isTask && dedupePeerNotice && row !== newestTeammate) {
       const at = text.lastIndexOf(`\n\n${PEER_NOTICE}`);
       if (at >= 0 && text.lastIndexOf('</teammate-message>') < at) {
         // The notice's own paragraph only.

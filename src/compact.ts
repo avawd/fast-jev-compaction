@@ -30,6 +30,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   dedupeTeammates: true,
   trimStaleTeammates: true,
   dedupePeerNotice: true,
+  trimStaleTasks: true,
   teammateHeadChars: 1000,
   keepRecentUserTurns: 3,
 };
@@ -65,6 +66,7 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     dedupeTeammates: flag(options.dedupeTeammates, DEFAULT_OPTIONS.dedupeTeammates),
     trimStaleTeammates: flag(options.trimStaleTeammates, DEFAULT_OPTIONS.trimStaleTeammates),
     dedupePeerNotice: flag(options.dedupePeerNotice, DEFAULT_OPTIONS.dedupePeerNotice),
+    trimStaleTasks: flag(options.trimStaleTasks, DEFAULT_OPTIONS.trimStaleTasks),
     teammateHeadChars: Math.max(0, Math.floor(finite(options.teammateHeadChars, DEFAULT_OPTIONS.teammateHeadChars))),
     keepRecentUserTurns: Math.max(0, Math.floor(finite(options.keepRecentUserTurns, DEFAULT_OPTIONS.keepRecentUserTurns))),
     ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),

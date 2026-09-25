@@ -143,6 +143,10 @@ sees, more than its tool output. Typed prompts are never changed; teammate messa
   later (always), then lines holding ids and numbers, up to 1000 chars (`trimStaleTeammates`).
 
 The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
+A task notification (a background agent's report, a message that is exactly one
+`<task-notification>`) is cut like a stale teammate message, and its boilerplate `<note>` stays on
+the newest one (`trimStaleTasks`). Reports the work went on to use are mostly kept: every line holding
+a path, name or id quoted later survives, and a cut must still save 30%.
 A cut must save 30% of its block. A block holding a note is never cut again. The gate
 (`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
 compaction clear the gate, never make it harder than tool output alone would. Never rewritten: the first
@@ -202,6 +206,7 @@ debug log names the keys it looked for).
 | `trimStaleTeammates` | true | Teammate messages older than `staleAfterMessages` keep their head, quoted-later lines and id/number lines |
 | `dedupePeerNotice` | true | The peer-message notice stays on the newest teammate message only |
 | `teammateHeadChars` | 1000 | Head kept of a stale teammate message |
+| `trimStaleTasks` | true | Stale task-notification reports cut like stale teammate messages; the notification note kept once |
 | `keepRecentUserTurns` | 3 | The newest this many user messages, and everything after them, are never rewritten |
 
 ### Precompute
