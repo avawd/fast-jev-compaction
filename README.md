@@ -120,6 +120,33 @@ result is truncated, is rebuilt from its role, its text and its tool blocks only
 thinking blocks and the original order of its blocks are not preserved in that message. Truncation
 never rebuilds the assistant message that made the call.
 
+**What a rebuilt message loses that nobody sees.** Claude Code records attachments (hook output,
+reminders, re-sent instructions, a prompt typed while a turn runs, a queued agent message) as entries
+of their own, not as messages. It hangs each on the message recorded before it, and hands the hook only
+the messages. A message returned unchanged keeps what hangs on it; a rebuilt one does not, and the
+hook cannot see what that was (2.1.282: `rowsOf`/`messagesOf` in the session.compact dispatch). So a
+rebuilt tool result can take with it a prompt typed while that tool ran (`queued_command`), and after a
+summary compaction the instructions (CLAUDE.md, memory) hang on the first new user message.
+
+### Teammate messages
+
+In a multi-agent session the other agents' messages arrive as user messages
+(`<teammate-message teammate_id="…">`). On one orchestration session they were 28% of what the hook
+sees, more than its tool output. Typed prompts are never changed; teammate messages are cut three ways:
+
+- an agent's idle notification carries its closing reply, which restates the report it has just sent.
+  The report stays; the reply becomes a note plus the lines holding a sha, key, number, path or name
+  the report lacks (`dedupeTeammates`);
+- a message sent twice word for word keeps its newer copy, unless a token of the older one is quoted
+  in between (`dedupeTeammates`);
+- one older than `staleAfterMessages` keeps `teammateHeadChars`, then the lines holding a token quoted
+  later (always), then lines holding ids and numbers, up to 1000 chars (`trimStaleTeammates`).
+
+The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
+A cut must save 30% of its block. A block holding a note is never cut again. Never rewritten: the first
+message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
+and the first user message after a summary (it carries the re-sent instructions, see above).
+
 A call whose assistant message has no text of its own is truncated to its note instead of dropped.
 Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
 dropping the call would leave a message holding only thinking.
@@ -169,6 +196,11 @@ debug log names the keys it looked for).
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 | `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
+| `dedupeTeammates` | true | Restated idle notifications and exact repeats of teammate messages become notes (see "Teammate messages") |
+| `trimStaleTeammates` | true | Teammate messages older than `staleAfterMessages` keep their head, quoted-later lines and id/number lines |
+| `dedupePeerNotice` | true | The peer-message notice stays on the newest teammate message only |
+| `teammateHeadChars` | 1000 | Head kept of a stale teammate message |
+| `keepRecentUserTurns` | 3 | The newest this many user messages, and everything after them, are never rewritten |
 
 ### Precompute
 

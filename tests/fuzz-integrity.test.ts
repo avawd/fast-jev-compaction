@@ -16,6 +16,8 @@ describe('fuzz: transcript integrity', () => {
   it(`holds every invariant over ${SEEDS} seeds`, async () => {
     const failures: string[] = [];
     let threw = 0;
+    // The teammate-row pass (user-rows.ts) must actually run: each of its cuts on some seed.
+    const cuts = { restated: 0, repeated: 0, stale: 0, notices: 0 };
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const transcript = genTranscript(seed);
       let run;
@@ -27,11 +29,14 @@ describe('fuzz: transcript integrity', () => {
         continue;
       }
       for (const f of checkCase(transcript, run)) failures.push(`seed ${seed}: ${f}`);
+      const users = run.result.stats.userRows;
+      if (users) for (const k of Object.keys(cuts) as Array<keyof typeof cuts>) cuts[k] += users[k] > 0 ? 1 : 0;
       if (seed % DETERMINISM_EVERY === 0) {
         const again = await runCase(seed, genTranscript(seed));
         if (fingerprint(again) !== fingerprint(run)) failures.push(`seed ${seed}: a second run gave a different output`);
       }
     }
     expect({ threw, failures: failures.slice(0, 25), total: failures.length }).toEqual({ threw: 0, failures: [], total: 0 });
+    for (const [k, n] of Object.entries(cuts)) expect(n, `seeds with a ${k} cut`).toBeGreaterThan(SEEDS / 50);
   }, Math.max(60_000, SEEDS * 100));
 });

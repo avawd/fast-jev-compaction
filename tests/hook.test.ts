@@ -53,6 +53,7 @@ describe('resolveHookConfig', () => {
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
       keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200,
+      dedupeTeammates: true, trimStaleTeammates: true, dedupePeerNotice: true, teammateHeadChars: 1000, keepRecentUserTurns: 3,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({

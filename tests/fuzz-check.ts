@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, INPUT_CHARS, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  annotateCalls, applyRules, INPUT_CHARS, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -183,6 +183,37 @@ function piecesFit(src: string, head: string, pieces: Array<{ gap: number; text:
   return undefined;
 }
 
+const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:') || text.includes('<teammate-message');
+const BLOCK_RE = /<teammate-message teammate_id="([^"]+)"[^>]*>\n([\s\S]*?)\n<\/teammate-message>/g;
+
+/** What a rebuilt teammate row may not do, written independently of user-rows.ts. */
+function teammateEdit(before: string, after: string): string[] {
+  const fails: string[] = [];
+  if (after.length >= before.length) fails.push('rebuilt without shrinking');
+  const header = before.slice(0, before.indexOf('<teammate-message'));
+  if (!after.startsWith(header)) fails.push('header changed');
+  const from = (t: string) => [...t.matchAll(BLOCK_RE)].map((m) => m[1]);
+  if (JSON.stringify(from(before)) !== JSON.stringify(from(after))) fails.push('blocks changed order or sender');
+  for (const m of after.matchAll(BLOCK_RE)) {
+    if (m[2]!.split(USER_ROW_NOTE).length - 1 > 1) fails.push(`a block from ${m[1]} holds nested notes`);
+  }
+  return fails;
+}
+
+/** Rows user-rows.ts must never rebuild, derived from the README rules independently. */
+function userRowGuards(input: readonly Message[], resolved: ReturnType<typeof resolveOptions>): number[] {
+  const out = new Set<number>([0]);
+  const userText = input.flatMap((m, k) => (m.role === 'user' && !(m.toolResults ?? []).length && m.text.trim() ? [k] : []));
+  if (resolved.keepRecentUserTurns > 0 && userText.length > 0) {
+    for (let k = userText[Math.max(0, userText.length - resolved.keepRecentUserTurns)]!; k < input.length; k += 1) out.add(k);
+  }
+  for (let k = Math.max(0, input.length - resolved.preserveRecentMessages); k < input.length; k += 1) out.add(k);
+  userText.forEach((k, j) => {
+    if (j === 0 || input[userText[j - 1]!]!.text.startsWith('This session is being continued')) out.add(k);
+  });
+  return [...out];
+}
+
 /** Every invariant of one run. */
 export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const failures: string[] = [];
@@ -227,14 +258,23 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4. Text never edited, and rows without tool blocks are never removed or rebuilt.
+  // 4. Rows without tool blocks are never removed; text is never edited, except a teammate row's
+  //    (user-rows.ts), which keeps its header and its blocks in order, each carrying at most one
+  //    note, and never grows. Typed prompts, assistant text and guarded rows stay the input's own.
   const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
   const plainSet = new Set<Message>(plainIn);
-  const plainOut = session.filter((m) => plainSet.has(m));
-  if (plainIn.length !== plainOut.length || plainIn.some((m, i) => plainOut[i] !== m)) fail('a plain text row was removed or rebuilt');
+  const plainOut = session.filter((m) => !inputSet.has(m) ? isTeammateText(m.text) && m.toolUses.length === 0 && !(m.toolResults ?? []).length : plainSet.has(m));
+  if (plainIn.length !== plainOut.length) fail('a plain text row was removed');
+  plainIn.forEach((m, i) => {
+    const out = plainOut[i];
+    if (!out || out === m) return;
+    if (!isTeammateText(m.text)) fail(`a non-teammate plain row ${i} was rebuilt`);
+    else for (const f of teammateEdit(m.text, out.text)) fail(`teammate row ${i}: ${f}`);
+  });
   const inText = input.map((m) => m.text).filter((t) => t.trim());
   const outText = session.map((m) => m.text).filter((t) => t.trim());
-  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i])) fail('user/assistant text changed or dropped');
+  if (inText.length !== outText.length || inText.some((t, i) => t !== outText[i] && !isTeammateText(t))) fail('user/assistant text changed or dropped');
+  for (const k of userRowGuards(input, resolved)) if (plainSet.has(input[k]!) && !session.includes(input[k]!)) fail(`guarded plain row ${k} was rebuilt`);
 
   // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.
   session.forEach((m, k) => {

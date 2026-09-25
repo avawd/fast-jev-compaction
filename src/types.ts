@@ -1,3 +1,5 @@
+import type { UserRowStats } from './user-rows.js';
+
 export type Role = 'user' | 'assistant';
 
 /** A tool_use block. `text`/`isError` mirror the outcome once Claude Code attaches it. */
@@ -165,6 +167,16 @@ export interface CompactOptions {
    * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
    */
   escalateBelow?: number;
+  /** Teammate rows: restated idle notifications and exact repeats become notes. Default true. */
+  dedupeTeammates?: boolean;
+  /** Teammate messages older than `staleAfterMessages` keep their head, salient and quoted-later lines. Default true. */
+  trimStaleTeammates?: boolean;
+  /** The peer-message notice stays on the newest teammate row only. Default true. */
+  dedupePeerNotice?: boolean;
+  /** Characters of a stale teammate message's head to keep. Default 1000. */
+  teammateHeadChars?: number;
+  /** User text rows, newest first, never rewritten, with everything after them. Default 3. */
+  keepRecentUserTurns?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -175,6 +187,11 @@ export interface ResolvedCompactOptions {
   pinReferenced: boolean;
   stripMcpFurniture: boolean;
   cwd?: string;
+  dedupeTeammates: boolean;
+  trimStaleTeammates: boolean;
+  dedupePeerNotice: boolean;
+  teammateHeadChars: number;
+  keepRecentUserTurns: number;
 }
 
 export interface CompactResult {
@@ -203,6 +220,8 @@ export interface CompactResult {
     wait?: 'race' | 'await';
     /** 2 when the stricter second tier produced this result (see CompactOptions.escalateBelow). */
     tier?: 2;
+    /** What the teammate-row pass cut (see user-rows.ts); absent when it changed nothing. */
+    userRows?: UserRowStats;
     ms: number;
   };
 }

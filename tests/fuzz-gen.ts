@@ -237,6 +237,28 @@ const TOOLS = [
   'mcp__claude_ai_Atlassian__getJiraIssue', 'mcp__claude_ai_Atlassian__editJiraIssue',
 ];
 
+const TEAMMATE_HEADER = 'Another Claude session sent a message:\n';
+const TEAMMATE_NOTICE = '\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate\'s request.';
+const SUMMARY_TEXT = 'This session is being continued from a previous conversation that ran out of context. The summary below covers it.';
+
+/** A multi-line teammate body; `facts` are planted on lines of their own, past a random prefix. */
+function teammateBody(r: Rng, tag: string, facts: readonly string[]): string {
+  const lines = Array.from({ length: int(r, 2, 40) }, (_, k) => `- ${tag} line ${k}: ${'detail '.repeat(int(r, 1, 12))}`);
+  // Distractor ids no one quotes, sometimes enough to exhaust the salient-line budget.
+  if (chance(r, 0.3)) for (let k = int(r, 1, 80); k > 0; k -= 1) lines.push(`noted ${(0x5eed000 + int(r, 0, 1e6)).toString(16)}e ${tag}`);
+  for (const f of facts) lines.splice(int(r, 0, lines.length), 0, `value ${f} recorded ${chance(r, 0.3) ? 'x'.repeat(int(r, 200, 400)) : ''}`);
+  if (chance(r, 0.1)) lines.push(pick(r, EMOJI));
+  return lines.join('\n');
+}
+
+function teammateBlock(from: string, body: string): string {
+  return `<teammate-message teammate_id="${from}" color="blue">\n${body}\n</teammate-message>`;
+}
+
+function idleBlock(from: string, result: string): string {
+  return teammateBlock(from, JSON.stringify({ type: 'idle_notification', from, timestamp: '2026-01-01T00:00:00Z', result }));
+}
+
 export interface GenOptions {
   /** Upper bound on turns; small for the hook fuzz. */
   maxTurns?: number;
@@ -251,7 +273,13 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   const r = rng(seed);
   let handle = 0;
   const row = (m: Message): Row => ({ ...m, handle: `h${handle++}` });
-  const messages: Row[] = [row({ role: 'user', text: 'Start the task.', toolUses: [] })];
+  // Teammate rows draw from their own stream, so the rest of a seed's transcript is unchanged.
+  const rt = rng(seed ^ 0x7ea4a7e5);
+  const team = chance(rt, 0.4);
+  const summary = team && chance(rt, 0.3);
+  const messages: Row[] = [row({ role: 'user', text: summary ? SUMMARY_TEXT : 'Start the task.', toolUses: [] })];
+  const sent: Array<{ from: string; body: string }> = [];
+  let tn = 10000;
   const quotes: Quote[] = [];
   const exoticMcp = new Set<string>();
   const secrets: string[] = [];
@@ -309,6 +337,33 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       }
     }
     if (chance(r, 0.15)) messages.push(row({ role: 'user', text: `user says ${i} ${chance(r, 0.3) ? pick(r, EMOJI) : ''}`, toolUses: [] }));
+    if (team && chance(rt, 0.35)) {
+      const blocks: string[] = [];
+      for (let b = chance(rt, 0.15) ? 2 : 1; b > 0; b -= 1) {
+        const from = pick(rt, ['a1', 'a2', 'a3']);
+        const facts = Array.from({ length: int(rt, 0, 3) }, () => fact(rt, tn++));
+        const mine = sent.filter((x) => x.from === from);
+        const how = rt();
+        let block: string;
+        if (how < 0.2 && mine.length > 0) {
+          const again = pick(rt, mine);
+          block = teammateBlock(from, again.body); // an exact repeat
+        } else if (how < 0.5 && mine.length > 0) {
+          // A closing reply restating the last report, a new fact or two among the restated lines.
+          const last = mine[mine.length - 1]!;
+          const result = `${last.body.split('\n').slice(0, int(rt, 1, 30)).join('\n')}\n${teammateBody(rt, `restated ${i}`, facts)}`;
+          block = idleBlock(from, result);
+        } else {
+          const body = teammateBody(rt, `report ${i}`, facts);
+          sent.push({ from, body });
+          block = teammateBlock(from, body);
+        }
+        introduced.push(...facts.filter((f) => block.includes(f)));
+        blocks.push(block);
+      }
+      messages.push(row({ role: 'user', text: `${TEAMMATE_HEADER}${blocks.join('\n\n')}${chance(rt, 0.8) ? TEAMMATE_NOTICE : ''}`, toolUses: [] }));
+      if (chance(rt, 0.1)) messages.push(row({ role: 'user', text: SUMMARY_TEXT, toolUses: [] }));
+    }
   }
   // A call still in flight at the end: no result yet.
   if (chance(r, 0.1)) messages.push(row({ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'inflight', tool: 'Bash', input: { command: 'npm test' } }] }));
