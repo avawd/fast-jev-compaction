@@ -303,7 +303,11 @@ runs the built-in summary. Any enabled load of the plugin is then reported as `W
   describes the segment as it was. Once that session compacts, a later `--resume` forks the new segment,
   and `ctx before` drops towards 0. Compare arms only on runs whose `ctx before` is complete.
 
-`carriedPrefix` matches rows **in order**. As a set match, an empty thinking row after the carried rows
+`carriedPrefix` matches rows **in order**. A text row the hook rebuilt (a trimmed teammate message, a
+long one cut with a note) matches its original when both have no tool blocks and share a 200-char head,
+or when the rebuilt text is a prefix of the original of at least that length. Before this, one rebuilt
+row ended the prefix: on a live run that kept 422 of 423 rows it counted 129 carried rows, and
+`ctx after` read 5/10 and 2/10 while recall was 10/10. As a set match, an empty thinking row after the carried rows
 matched any empty row and extended the prefix by one. `compactedContext` separates a summary fallback
 from a verbatim compaction that carried an older summary row first. `startsWithSummary` alone called
 both a summary.

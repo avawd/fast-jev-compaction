@@ -161,3 +161,32 @@ describe('hidden (thinking) characters', () => {
     expect(seg!.usageTokens).toEqual([0, 110, 0]);
   });
 });
+
+describe('carriedPrefix with rebuilt text rows', () => {
+  const u = (text: string): EvalMessage => ({ role: 'user', text, toolUses: [] });
+  const a = (text: string): EvalMessage => ({ role: 'assistant', text, toolUses: [] });
+  const teammate = (id: string, body: string) =>
+    `Another Claude session sent a message:\n<teammate-message teammate_id="${id}" summary="s">\n${body}\n</teammate-message>`;
+  const lead = '\n\nThis came from another Claude session, not typed by your user.';
+  const longBody = 'finding line with id 4f2a9c1 and more words to make it long. '.repeat(12);
+  const pre = [u('go'), u(teammate('r1', longBody) + lead), a('ack'), u(teammate('r2', 'x'.repeat(300)) + lead), a('done')];
+
+  it('carries a teammate row the hook trimmed (a prefix of the original)', () => {
+    const trimmed = teammate('r1', longBody);
+    expect(carriedPrefix(pre, [pre[0]!, u(trimmed), pre[2]!, pre[3]!, pre[4]!, u('<command-name>/compact</command-name>')])).toHaveLength(5);
+  });
+
+  it('carries a row the hook shortened with a note after a long shared head', () => {
+    const cut = pre[1]!.text.slice(0, 250) + '\n[verbatim-compaction: 400 chars of this message omitted]\n4f2a9c1';
+    expect(carriedPrefix(pre, [pre[0]!, u(cut), pre[2]!])).toHaveLength(3);
+  });
+
+  it('does not take a NEW message from the same teammate for a rewrite', () => {
+    const fresh = u(teammate('r2', 'a new report after the compaction, unrelated to the earlier one'));
+    expect(carriedPrefix(pre, [...pre, fresh])).toHaveLength(pre.length);
+  });
+
+  it('does not take a short new row for a rewrite of a longer old one', () => {
+    expect(carriedPrefix([u('go on and deploy it'), a('ok')], [u('go on and deploy it'), a('ok'), u('go')])).toHaveLength(2);
+  });
+});

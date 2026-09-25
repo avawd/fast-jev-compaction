@@ -212,6 +212,21 @@ function rowKey(m: EvalMessage): string {
   return tools.length > 0 ? `tools\u0000${tools.join(',')}` : `${m.role}\u0000${m.text}`;
 }
 
+/** A rebuilt row shares at least this much of its head with the original (the whole of it, if shorter). */
+const REWRITE_MIN_HEAD = 200;
+
+/**
+ * Whether `m` is `original` rebuilt: same role, neither has tool blocks, and they share a head of
+ * REWRITE_MIN_HEAD chars, or all of `m` when `m` is a shorter prefix of it. A new message from the
+ * same sender shares far less (the envelope is ~90 chars), and a short row is never a rewrite.
+ */
+function isRewriteOf(m: EvalMessage, original: EvalMessage): boolean {
+  if (m.role !== original.role || original.toolUses.length > 0 || (original.toolResults ?? []).length > 0) return false;
+  const need = Math.min(REWRITE_MIN_HEAD, original.text.length);
+  if (m.text.length < need || m.text === original.text) return false;
+  return m.text.slice(0, need) === original.text.slice(0, need) && (m.text.length >= REWRITE_MIN_HEAD || original.text.startsWith(m.text));
+}
+
 /**
  * The part of the next segment that a verbatim compaction carried over: its
  * prefix of rows that match the previous segment's rows IN ORDER (same tool
@@ -237,6 +252,8 @@ export function carriedPrefix(prev: readonly EvalMessage[], next: readonly EvalM
         break;
       }
     }
+    // A text row the hook rebuilt (a trimmed teammate message, a long one cut with a note) keeps its head.
+    if (found < 0 && tools.length === 0) found = prev.findIndex((p, k) => k >= j && isRewriteOf(m, p));
     if (found < 0) break;
     out.push(m);
     j = found + 1;
