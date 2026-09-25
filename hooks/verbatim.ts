@@ -17,6 +17,12 @@ export type HookConfig = {
    * the percent alone waits until 600k, too late to prune verbatim in time. 0 turns it off.
    */
   compactAtTokens: number;
+  /**
+   * After a compaction (or a gate-miss skip) that leaves context above the threshold, ask again once
+   * context has grown this many tokens past where it then stood. 0 keeps the older rule: wait until
+   * context drops under the threshold, which it never does on its own.
+   */
+  recompactAfterTokens: number;
   minReductionRatio: number;
   preserveRecentMessages: number;
   truncateHeadChars: number;
@@ -83,6 +89,7 @@ const MAX_FORK_CHUNK_SIZE = 400;
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
   compactAtTokens: 300_000,
+  recompactAfterTokens: 50_000,
   minReductionRatio: 0.25,
   preserveRecentMessages: 6,
   truncateHeadChars: 300,
@@ -128,6 +135,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     // back unchanged, and one at 1 or more could never be met.
     compactAtPercent: clamp(num(options, 'compactAtPercent', DEFAULTS.compactAtPercent), 1, 100),
     compactAtTokens: Math.max(0, num(options, 'compactAtTokens', DEFAULTS.compactAtTokens)),
+    recompactAfterTokens: Math.max(0, num(options, 'recompactAfterTokens', DEFAULTS.recompactAfterTokens)),
     minReductionRatio: clamp(num(options, 'minReductionRatio', DEFAULTS.minReductionRatio), 0.01, 0.95),
     preserveRecentMessages: num(options, 'preserveRecentMessages', DEFAULTS.preserveRecentMessages),
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
@@ -340,6 +348,11 @@ type AutoCompactState = {
   compacting: boolean;
   off: boolean;
   awaitingDrop: boolean;
+  /**
+   * Where context stood on the first turn end after `awaitingDrop` was set; the wait ends once it
+   * has grown `recompactAfterTokens` past this. Unset until that first read.
+   */
+  waitFromTokens?: number;
   retry?: { cancel: () => void };
   retriesLeft: number;
 };
@@ -373,12 +386,17 @@ async function autoCompact($: EngineInterface, state: AutoCompactState, config: 
     debug($, `context ${context.percent ?? 0}%${tokens} (compacts at ${config.compactAtPercent}%${limit})`);
     if (!overThreshold(context, config)) {
       state.awaitingDrop = false;
+      state.waitFromTokens = undefined;
       return;
     }
-    if (state.awaitingDrop) {
-      debug($, `waiting for context to drop under the threshold before compacting again`);
+    if (state.awaitingDrop && stillWaiting(context.tokens, state, config)) {
+      const until = state.waitFromTokens === undefined || config.recompactAfterTokens <= 0
+        ? 'for context to drop under the threshold'
+        : `until context reaches ${Math.round((state.waitFromTokens + config.recompactAfterTokens) / 1000)}k tokens`;
+      debug($, `waiting ${until} before compacting again`);
       return;
     }
+    state.waitFromTokens = undefined;
     const outcome = await requestCompaction($);
     state.off = outcome === 'off';
     state.awaitingDrop = outcome === 'compacted';
@@ -388,6 +406,20 @@ async function autoCompact($: EngineInterface, state: AutoCompactState, config: 
   } finally {
     state.compacting = false;
   }
+}
+
+/**
+ * Whether an `awaitingDrop` wait still holds. The first read after a compaction or skip records where
+ * context stands; the wait ends once it has grown `recompactAfterTokens` past that. Without a token
+ * count (or with the option at 0) it holds until context drops under the threshold.
+ */
+function stillWaiting(tokens: number | undefined, state: AutoCompactState, config: HookConfig): boolean {
+  if (config.recompactAfterTokens <= 0 || tokens === undefined) return true;
+  if (state.waitFromTokens === undefined) {
+    state.waitFromTokens = tokens;
+    return true;
+  }
+  return tokens < state.waitFromTokens + config.recompactAfterTokens;
 }
 
 function scheduleRetry($: EngineInterface, state: AutoCompactState, config: HookConfig, fromTimer: boolean): void {
@@ -408,7 +440,7 @@ function scheduleRetry($: EngineInterface, state: AutoCompactState, config: Hook
  * in its debug log (one ran 0.4.0 for days unnoticed). A test holds it equal to package.json and
  * .claude-plugin/plugin.json; bump all three together.
  */
-export const PLUGIN_VERSION = '0.7.0';
+export const PLUGIN_VERSION = '0.7.1';
 
 /** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
 const HEADLESS_REFUSAL = /not available in a headless/;
@@ -535,6 +567,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         // verbatim fact. autoCompact waits for context to drop (Claude Code's own compaction still runs
         // at its threshold), and a pending retry is pointless now.
         auto.awaitingDrop = true;
+        auto.waitFromTokens = undefined;
         auto.retry?.cancel();
         auto.retry = undefined;
         const reason = `pruning would free only ${Math.round(gateRatio(result) * 100)}% of tool output ` +

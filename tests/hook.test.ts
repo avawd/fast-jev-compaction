@@ -49,7 +49,7 @@ describe('resolveHookConfig', () => {
 
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
-      compactAtPercent: 60, compactAtTokens: 300000, minReductionRatio: 0.25, preserveRecentMessages: 6,
+      compactAtPercent: 60, compactAtTokens: 300000, recompactAfterTokens: 50000, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
       keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200,
@@ -687,6 +687,57 @@ describe('register', () => {
       await h.turnComplete(answered);
       expect(h.compactCalls).toBe(calls);
       expect(h.debugLogs.some((l) => /waiting for context to drop/.test(l))).toBe(true);
+    });
+
+    it('after a gate-miss skip, asks again once context has grown recompactAfterTokens past where it waited', async () => {
+      // Seen live: a skip at 302k waited for context to drop under the threshold, which never happens on its
+      // own, so the plugin never asked again and the session reached 375k before a manual /compact.
+      let tokens = 302_000;
+      const h = harness({ percent: 30, tokens: async () => tokens });
+      const claudeOnlyish = [
+        { role: 'user' as const, text: 'Run the tests.', toolUses: [] },
+        { role: 'assistant' as const, text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: { command: 'npm test' } }] },
+        { role: 'user' as const, text: '', toolUses: [], toolResults: [{ tool_use_id: 'u1', text: 'y'.repeat(3000) }] },
+        ...Array.from({ length: 6 }, (_, i) => ({ role: (i % 2 ? 'user' : 'assistant') as 'user' | 'assistant', text: `turn ${i}`, toolUses: [] })),
+      ];
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      const out = (await h.compact({ trigger: 'plugin', messages: claudeOnlyish })) as { skip?: string };
+      expect(out.skip).toBeDefined();
+      await h.turnComplete(answered); // records where it waits: 302k
+      tokens = 340_000;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      expect(h.debugLogs.some((l) => /waiting until context reaches 352k tokens/.test(l))).toBe(true);
+      tokens = 352_000;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(2);
+    });
+
+    it('after a compaction that leaves context above the threshold, asks again only after the same regrowth', async () => {
+      let tokens = 400_000;
+      const h = harness({ percent: 40, tokens: async () => tokens });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      tokens = 330_000; // after the verbatim prune: still over 300k
+      await h.turnComplete(answered);
+      tokens = 370_000;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      tokens = 380_000;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(2);
+    });
+
+    it('recompactAfterTokens 0 keeps the old rule: wait until context drops under the threshold', async () => {
+      let tokens = 400_000;
+      const h = harness({ percent: 40, tokens: async () => tokens, userConfig: { recompactAfterTokens: 0 } });
+      await h.turnComplete(answered);
+      tokens = 330_000;
+      await h.turnComplete(answered);
+      tokens = 900_000;
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
     });
 
     it('a retry that finds context already under the threshold does not compact', async () => {
