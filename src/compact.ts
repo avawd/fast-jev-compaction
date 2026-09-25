@@ -274,7 +274,7 @@ function build(
     claude: outcome.claude,
     ms: Date.now() - started,
   };
-  if (users.stats.rows > 0 || users.stats.teammateChars > 0) stats.userRows = users.stats;
+  if (users.stats.rows > 0) stats.userRows = users.stats;
   if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
   if (outcome.forks && outcome.forks.length > 0) stats.forks = outcome.forks;
   if (outcome.wait) stats.wait = outcome.wait;

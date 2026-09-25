@@ -9,15 +9,16 @@ export function resultChars(messages: readonly Message[]): number {
 
 /**
  * The reduction the fallback gate judges: characters saved over the
- * characters the plugin can shrink, tool results and teammate messages
- * (user-rows.ts), before compaction. A transcript whose bulk is typed text and
- * attachments no longer looks like a failed compaction just because the plugin
- * cannot touch that bulk. Capped at 1 (dropped call inputs can push the saving
- * past the total).
+ * characters of tool results before compaction, plus what the teammate-row
+ * pass saved (user-rows.ts) on both sides: its saving raises the ratio, and a
+ * teammate row it leaves alone never dilutes it. A transcript whose bulk is
+ * user text and attachments no longer looks like a failed compaction just
+ * because the plugin cannot touch that bulk. Capped at 1 (dropped call inputs
+ * can push the saving past the result total).
  */
 export function gateRatio(result: Pick<CompactResult, 'stats'>): number {
   const { charsBefore, charsAfter, resultCharsBefore } = result.stats;
-  const shrinkable = resultCharsBefore + (result.stats.userRows?.teammateChars ?? 0);
+  const shrinkable = resultCharsBefore + (result.stats.userRows?.charsSaved ?? 0);
   if (!shrinkable) return 0;
   return Math.min(1, Math.max(0, (charsBefore - charsAfter) / shrinkable));
 }

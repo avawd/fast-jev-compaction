@@ -143,7 +143,9 @@ sees, more than its tool output. Typed prompts are never changed; teammate messa
   later (always), then lines holding ids and numbers, up to 1000 chars (`trimStaleTeammates`).
 
 The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
-A cut must save 30% of its block. A block holding a note is never cut again. Never rewritten: the first
+A cut must save 30% of its block. A block holding a note is never cut again. The gate
+(`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
+compaction clear the gate, never make it harder than tool output alone would. Never rewritten: the first
 message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
 and the first user message after a summary (it carries the re-sent instructions, see above).
 

@@ -185,21 +185,22 @@ describe('compact() with user rows', () => {
     expect(out.stats.charsAfter).toBeLessThan(out.stats.charsBefore);
   });
 
-  it('judges the gate against tool output plus teammate text: both are what the plugin can shrink', async () => {
+  it('counts teammate savings in the gate without making it harder than tool output alone', async () => {
     const none: Scorer = async () => ({ verdicts: new Map(), claude: 'skipped' });
-    const input = [
-      msg('user', 'Start.'),
+    const tool = [
       msg('assistant', '', { toolUses: [{ tool_use_id: 'u1', tool: 'Bash', input: { command: 'ls' } }] }),
       msg('user', '', { toolResults: [{ tool_use_id: 'u1', text: 'a.ts' }] }),
-      report('a1', lines('r', 60)),
-      idle('a1', lines('i', 40)),
-      ...filler(20),
     ];
+    const input = [msg('user', 'Start.'), ...tool, report('a1', lines('r', 60)), idle('a1', lines('i', 40)), ...filler(20)];
     const out = await compact(input, none, { preserveRecentMessages: 2 });
-    const teammate = input[3]!.text.length + input[4]!.text.length;
-    expect(out.stats.userRows?.teammateChars).toBe(teammate);
-    expect(gateRatio(out)).toBeCloseTo((out.stats.charsBefore - out.stats.charsAfter) / (4 + teammate), 6);
-    expect(gateRatio(out)).toBeLessThan(1);
+    const saved = out.stats.charsBefore - out.stats.charsAfter;
+    expect(out.stats.userRows?.charsSaved).toBe(saved);
+    expect(gateRatio(out)).toBeCloseTo(saved / (4 + saved), 6);
+    // Teammate rows the pass leaves alone (the newest turns) do not dilute the gate.
+    const recent = [msg('user', 'Start.'), ...tool, ...filler(20), report('a1', lines('r', 60))];
+    const kept = await compact(recent, none, { preserveRecentMessages: 2 });
+    expect(gateRatio(kept)).toBe(0);
+    expect(kept.stats.userRows?.charsSaved ?? 0).toBe(0);
   });
 
   it('rulesGate projects the teammate cut when given the options, and only then', () => {

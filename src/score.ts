@@ -4,7 +4,7 @@ import { resultChars } from './gate.js';
 import { DEFAULT_CHUNK_SIZE } from './jev-scorer.js';
 import { applyRules } from './rules.js';
 import type { CallDecision, Message, ResolvedCompactOptions, Scorer, ToolCall, Verdict } from './types.js';
-import { compactUserRows, teammateChars } from './user-rows.js';
+import { compactUserRows } from './user-rows.js';
 
 /** Whether these verdicts alone would clear the reduction gate. */
 export type GateFn = (calls: readonly ToolCall[], verdicts: ReadonlyMap<string, Verdict>) => boolean;
@@ -41,7 +41,7 @@ function forkTimeout(ms: number | undefined, sleep: SleepFn | undefined): ForkTi
 
 /**
  * The gate as the hook applies it (gate.ts `gateRatio`: characters saved over the tool-result
- * and teammate-message characters before), projected for a set of verdicts. It skips what compact() does after scoring
+ * characters before, the teammate-row saving counted on both sides), projected for a set of verdicts. It skips what compact() does after scoring
  * (drop_call→drop_result(0), head+tail shapes, the referenced-later pin, MCP furniture stripping),
  * so it is an estimate: the pin can only lower the real saving, shapes and stripping move it by a
  * tail's worth per call. If gateRatio's measure changes, change this with it.
@@ -61,11 +61,12 @@ export function rulesGate(
         decisions.push({ id: call.id, tool: call.tool, action: verdict.action, source: verdict.source });
       }
     }
-    const denominator = resultChars(messages) + (options ? teammateChars(messages) : 0);
-    if (denominator === 0 || (decisions.length === 0 && !options)) return false;
-    const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
     const pruned = applyDecisions(messages, decisions, calls, headChars);
-    const after = (options ? compactUserRows(pruned, options).messages : pruned).reduce((sum, m) => sum + messageChars(m), 0);
+    const users = options ? compactUserRows(pruned, options) : undefined;
+    const denominator = resultChars(messages) + (users?.stats.charsSaved ?? 0);
+    if (denominator === 0 || (decisions.length === 0 && !users?.stats.rows)) return false;
+    const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
+    const after = (users ? users.messages : pruned).reduce((sum, m) => sum + messageChars(m), 0);
     return Math.min(1, (before - after) / denominator) >= minRatio;
   };
 }
