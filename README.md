@@ -98,8 +98,10 @@ the first compaction and about a tenth at later ones. The rest was the system pr
 and assistant text, tool inputs, and the model's earlier thinking, which stays in context (a fit to
 the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never touches. So a prune
 frees less each time, and on every long session replayed one of the later compactions still fell back
-to the summary. The two exceptions above cut those fallbacks by about a quarter (22 to 16 over four
-sessions and three scorer bounds) without lowering fact survival on any of them.
+to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
+sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
+most two points on four. A few passes late in a session freed under 5% of the context, leaving it at
+Claude Code's own threshold, so the fallback came a turn or two later instead.
 
 **Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
 refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
