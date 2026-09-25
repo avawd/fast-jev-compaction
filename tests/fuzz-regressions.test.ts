@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { fingerprint, runCase } from './fuzz-check.ts';
 import { genTranscript } from './fuzz-gen.ts';
-import { compactUserRows, MAX_CONCURRENT_FORKS, resolveOptions, scoreWithClaude, type ForkFn, type ForkReply, type Message, type ToolCall } from '../src/index.js';
+import { annotateCalls, collectToolCalls, compact, compactUserRows, gateRatio, makeScorer, MAX_CONCURRENT_FORKS, resolveOptions, rulesGate, scoreWithClaude, type ForkFn, type ForkReply, type Message, type ToolCall } from '../src/index.js';
 
 function call(id: string): ToolCall {
   return { id, tool_use_id: `u-${id}`, tool: 'Bash', input: { command: `echo ${id}` }, callIndex: 1, resultIndex: 2, resultChars: 5000, isError: false, pinned: false };
@@ -133,4 +133,57 @@ describe('review 2 regressions', () => {
     }
     expect(changed).toEqual([]);
   }, 60_000);
+
+describe('review of cee10e7 (exact repros)', () => {
+  const heredoc = ['cat > /tmp/s.py <<EOF', ...Array.from({ length: 200 }, (_, i) => `print("line ${i} of the script body")`), 'EOF', 'python3 /tmp/s.py'].join('\n');
+  const m = (role: Message['role'], text: string, extra: Partial<Message> = {}): Message => ({ role, text, toolUses: [], ...extra });
+  const use = (id: string, command: string) => m('assistant', '', { toolUses: [{ tool_use_id: id, tool: 'Bash', input: { command } }] });
+  const res = (id: string, text: string) => m('user', '', { toolResults: [{ tool_use_id: id, text, isError: false }] });
+  const filler = Array.from({ length: 30 }, (_, i) => m(i % 2 === 0 ? 'user' : 'assistant', `filler ${i}`));
+  const keepAll = async () => ({ verdicts: new Map(), claude: 'skipped' as const });
+  const OPTS = { preserveRecentMessages: 6, staleAfterMessages: 20 };
+
+  /** Claude Code's merge: every row of one reply (`reply`) in its first row's place; rebuilt rows their own. */
+  function unpaired(input: Message[], output: Message[], reply: Map<Message, string>): string[] {
+    const api: Array<{ role: string; uses: string[]; results: Set<string> }> = [];
+    const byReply = new Map<string, (typeof api)[number]>();
+    output.forEach((row, k) => {
+      const last = api[api.length - 1];
+      if (row.role === 'assistant') {
+        const key = (input.includes(row) && reply.get(row)) || `rebuilt${k}`;
+        const earlier = byReply.get(key);
+        if (earlier) earlier.uses.push(...row.toolUses.map((u) => u.tool_use_id));
+        else { const made = { role: 'assistant', uses: row.toolUses.map((u) => u.tool_use_id), results: new Set<string>() }; byReply.set(key, made); api.push(made); }
+      } else if (last?.role === 'user') for (const r of row.toolResults ?? []) last.results.add(r.tool_use_id);
+      else api.push({ role: 'user', uses: [], results: new Set((row.toolResults ?? []).map((r) => r.tool_use_id)) });
+    });
+    return api.flatMap((a, k) => a.uses.filter((id) => !api[k + 1]?.results.has(id)));
+  }
+
+  it('HIGH 1: text, use A, result, text, use B, result (one reply) keeps every call paired', async () => {
+    const input = [m('user', 'go'), m('assistant', 'Checking.'), use('a', heredoc), res('a', 'one'), m('assistant', 'Also this.'), use('b', 'echo b'), res('b', 'two'), ...filler];
+    const reply = new Map(input.slice(1, 7).filter((r) => r.role === 'assistant').map((r) => [r, 'S']));
+    const out = (await compact(input, keepAll, OPTS)).messages;
+    expect(out[2]).not.toBe(input[2]);
+    expect(unpaired(input, out, reply)).toEqual([]);
+  });
+
+  it('HIGH 2: a turn-end reply (then a Stop-hook continuation) is never rebuilt with the next call', async () => {
+    const turnEnd = Array.from({ length: 60 }, (_, k) => `Line ${k} of the report that ended the turn.`).join('\n');
+    const input = [m('user', 'go'), use('x', 'ls'), res('x', 'ok'), m('assistant', turnEnd), use('y', heredoc), res('y', 'ok'), ...filler];
+    const out = (await compact(input, keepAll, OPTS)).messages;
+    expect(out[3]).toBe(input[3]);
+    expect(out[4]!.text).toBe('');
+  });
+
+  it('LOW 2: the gate the scorer projects counts the input shrink as gateRatio does', async () => {
+    const input = [m('user', 'go'), use('a', heredoc), res('a', 'x'.repeat(2000)), ...filler];
+    const resolved = resolveOptions(OPTS);
+    const calls = annotateCalls(collectToolCalls(input, resolved.preserveRecentMessages), input, resolved);
+    const actual = await compact(input, makeScorer({ useClaudeScorer: false, maxCandidates: 400, keepThreshold: 0.5, messageCount: input.length }), OPTS);
+    expect(gateRatio(actual)).toBeGreaterThanOrEqual(0.25);
+    expect(rulesGate(input, resolved.truncateHeadChars, 0.25, resolved)(calls, new Map())).toBe(true);
+  });
+});
+
 });

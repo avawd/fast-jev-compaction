@@ -26,8 +26,8 @@ const fileBody = Array.from({ length: 300 }, (_, i) => `export const value${i} =
 
 const OPTS = { preserveRecentMessages: 6, staleAfterMessages: 20 };
 
-function shrinkOf(messages: Message[], options: Partial<typeof OPTS> & { shrinkOldInputs?: boolean; shrinkOldText?: boolean } = {}) {
-  const o = { ...OPTS, shrinkOldInputs: true, shrinkOldText: true, pinReferenced: true, ...options };
+function shrinkOf(messages: Message[], options: Partial<typeof OPTS> & { shrinkOldInputs?: boolean } = {}) {
+  const o = { ...OPTS, shrinkOldInputs: true, pinReferenced: true, ...options };
   const calls: ToolCall[] = annotateCalls(collectToolCalls(messages, o.preserveRecentMessages), messages, o);
   return shrinkOld(messages, messages, calls, o);
 }
@@ -102,9 +102,9 @@ describe('shrinkOld', () => {
     out.forEach((m, i) => expect(m).toBe(messages[i]));
   });
 
-  it('does nothing with both options off', () => {
+  it('does nothing with the option off', () => {
     const messages = [msg('user', 'go'), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), msg('assistant', fileBody), ...filler(30)];
-    const { messages: out } = shrinkOf(messages, { shrinkOldInputs: false, shrinkOldText: false });
+    const { messages: out } = shrinkOf(messages, { shrinkOldInputs: false });
     out.forEach((m, i) => expect(m).toBe(messages[i]));
   });
 
@@ -141,7 +141,7 @@ describe('shrinkOld', () => {
       res('p2', 'two'),
       ...filler(30),
     ];
-    const { messages: out, inputs } = shrinkOf(messages, { shrinkOldText: false });
+    const { messages: out, inputs } = shrinkOf(messages);
     expect(inputs).toBe(0);
     out.forEach((m, i) => expect(m).toBe(messages[i]));
   });
@@ -183,25 +183,13 @@ describe('shrinkOld', () => {
 
   const reply = [...Array.from({ length: 60 }, (_, i) => `Paragraph ${i} explains the plan in some detail and at some length.`), 'Merged as #4567 at sha 9f8e7d6c5b.', ...Array.from({ length: 20 }, () => 'More prose.')].join('\n');
 
-  it('folds a long old reply that leads into a call into one rebuilt row, keeping its salient lines', () => {
-    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), use('b1', 'Bash', { command: 'echo hi' }), res('b1', 'hi'), ...filler(30)];
-    const { messages: out, texts, inputs } = shrinkOf(messages);
-    expect([texts, inputs]).toEqual([1, 0]);
-    expect(out).toHaveLength(messages.length - 1);
-    expect(out[1]).toBe(messages[1]);
-    const row = out[2]!;
-    expect(row.toolUses.map((u) => u.tool_use_id)).toEqual(['b1']);
-    expect(row.text.length).toBeLessThan(reply.length / 2);
-    expect(row.text).toContain('#4567');
-    expect(row.text).toContain(SHRINK_NOTE_PREFIX);
-    expect(out[3]).toBe(messages[4]);
-  });
-
-  it('leaves a reply with no call alone: its last row carries the turn-end riders (stop-hook feedback)', () => {
-    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), msg('assistant', reply), ...filler(30)];
-    const { messages: out, texts } = shrinkOf(messages);
-    expect(texts).toBe(0);
-    out.forEach((m, i) => expect(m).toBe(messages[i]));
+  it('never rebuilds a reply, even one leading into a call (it may be the previous turn-end text)', () => {
+    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), use('b1', 'Bash', { command: heredoc }), res('b1', 'hi'), ...filler(30)];
+    const { messages: out, inputs } = shrinkOf(messages);
+    expect(inputs).toBe(1);
+    expect(out[2]).toBe(messages[2]);
+    expect(out[3]!.text).toBe('');
+    expect(out[3]!.toolUses[0]!.tool_use_id).toBe('b1');
   });
 
   it('rebuilds an interleaved parallel reply only whole: no row of it is left after a rebuilt one', () => {
@@ -226,7 +214,7 @@ describe('shrinkOld', () => {
     expect(out2.messages[4]!.toolUses[0]!.input).toEqual({ command: 'echo b' });
     // B not rebuildable (a row after its tool_use): A stays too.
     const stuck = [msg('user', 'go'), msg('assistant', ''), use('a', 'Bash', { command: heredoc }), res('a', 'one'), use('b', 'Bash', { command: heredoc }), msg('assistant', 'and more'), res('b', 'two'), ...filler(30)];
-    const out3 = shrinkOf(stuck, { shrinkOldText: false });
+    const out3 = shrinkOf(stuck);
     expect(out3.inputs).toBe(0);
     out3.messages.forEach((m, i) => expect(m).toBe(stuck[i]));
   });
@@ -253,12 +241,54 @@ describe('shrinkOld', () => {
   });
 
   it('is idempotent: a second pass over its output changes nothing and nests no note', () => {
-    const messages = [msg('user', 'go'), msg('assistant', reply), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), ...filler(30)];
+    const messages = [msg('user', 'go'), msg('assistant', ''), msg('assistant', reply), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), ...filler(30)];
     const once = shrinkOf(messages).messages;
-    expect(once[1]!.text).toContain(SHRINK_NOTE_PREFIX);
+    expect(once[3]!.toolUses[0]!.input['command']).toContain(SHRINK_NOTE_PREFIX);
     const twice = shrinkOf(once);
-    expect(twice.inputs + twice.texts).toBe(0);
+    expect(twice.inputs).toBe(0);
     twice.messages.forEach((m, i) => expect(m).toBe(once[i]));
+  });
+});
+
+describe('review of cee10e7', () => {
+  it('HIGH 1: a run after results that opens on text but holds a call continues the chain', () => {
+    const messages = [
+      msg('user', 'go'),
+      msg('assistant', 'Checking.'), use('a', 'Bash', { command: heredoc }), res('a', 'one'),
+      msg('assistant', 'Also this.'), use('b', 'Bash', { command: 'echo b' }), res('b', 'two'),
+      ...filler(30),
+    ];
+    const { messages: out, inputs } = shrinkOf(messages);
+    expect(inputs).toBe(1);
+    // A rebuilt, so B is rebuilt too: no call of the reply is left as an engine row after A. The
+    // texts stay engine rows; merged back into the reply's place they hold no call.
+    expect(out.slice(0, 2)).toEqual(messages.slice(0, 2));
+    expect(out[1]).toBe(messages[1]);
+    expect(out[2]).not.toBe(messages[2]);
+    expect(out[4]).toBe(messages[4]);
+    expect(out[5]).not.toBe(messages[5]);
+    expect(out[5]!.toolUses[0]!.input).toEqual({ command: 'echo b' });
+  });
+
+  it('HIGH 1: a continuation whose calls cannot be rebuilt (a row after them) keeps the whole chain', () => {
+    const messages = [
+      msg('user', 'go'),
+      use('a', 'Bash', { command: heredoc }), res('a', 'one'),
+      use('b', 'Bash', { command: heredoc }), msg('assistant', 'after'), res('b', 'two'),
+      ...filler(30),
+    ];
+    const { messages: out, inputs } = shrinkOf(messages);
+    expect(inputs).toBe(0);
+    out.forEach((m, k) => expect(m).toBe(messages[k]));
+  });
+
+  it('HIGH 2: a turn-end reply before the next reply\'s call stays an engine row with its riders', () => {
+    const turnEnd = Array.from({ length: 60 }, (_, k) => `Line ${k} of the report that ended the turn.`).join('\n');
+    const messages = [msg('user', 'go'), use('x', 'Bash', { command: 'ls' }), res('x', 'ok'), msg('assistant', turnEnd), use('y', 'Bash', { command: heredoc }), res('y', 'ok'), ...filler(30)];
+    const { messages: out, inputs } = shrinkOf(messages);
+    expect(inputs).toBe(1);
+    expect(out[3]).toBe(messages[3]);
+    expect(out[4]!.text).toBe('');
   });
 });
 
@@ -276,7 +306,7 @@ describe('compact with shrinking', () => {
 
   it('shrinks nothing when the options are off', async () => {
     const messages = [msg('user', 'go'), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), ...filler(30)];
-    const result = await compact(messages, keepAll, { ...OPTS, shrinkOldInputs: false, shrinkOldText: false });
+    const result = await compact(messages, keepAll, { ...OPTS, shrinkOldInputs: false });
     result.messages.forEach((m, i) => expect(m).toBe(messages[i]));
     expect(result.stats.inputsShrunk).toBe(0);
   });

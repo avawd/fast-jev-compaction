@@ -46,8 +46,6 @@ export type HookConfig = {
   minCandidateChars: number;
   /** Shorten long inputs of old calls (heredocs, Write contents, subagent prompts) to a head and a note. */
   shrinkOldInputs: boolean;
-  /** Shorten long old assistant replies to a head, their salient lines and a note. */
-  shrinkOldText: boolean;
   /** Teammate rows: a restated idle notification or an exact repeat becomes a note (src/user-rows.ts). */
   dedupeTeammates: boolean;
   /** Teammate messages older than `staleAfterMessages` keep their head, salient and quoted-later lines. */
@@ -98,7 +96,6 @@ const DEFAULTS: HookConfig = {
   forkChunkSize: 60,
   minCandidateChars: 200,
   shrinkOldInputs: true,
-  shrinkOldText: true,
   dedupeTeammates: true,
   trimStaleTeammates: true,
   dedupePeerNotice: true,
@@ -145,7 +142,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
     minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
     shrinkOldInputs: bool(options, 'shrinkOldInputs', DEFAULTS.shrinkOldInputs),
-    shrinkOldText: bool(options, 'shrinkOldText', DEFAULTS.shrinkOldText),
     dedupeTeammates: bool(options, 'dedupeTeammates', DEFAULTS.dedupeTeammates),
     trimStaleTeammates: bool(options, 'trimStaleTeammates', DEFAULTS.trimStaleTeammates),
     dedupePeerNotice: bool(options, 'dedupePeerNotice', DEFAULTS.dedupePeerNotice),
@@ -233,7 +229,7 @@ export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output${s.userRows ? ' and cut teammate text' : ''} (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
-    `${s.inputsShrunk + s.textsShrunk > 0 ? `; shortened ${s.inputsShrunk} old inputs, ${s.textsShrunk} old replies` : ''}` +
+    `${s.inputsShrunk > 0 ? `; shortened ${s.inputsShrunk} old inputs` : ''}` +
     `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}` +
     `${s.userRows && s.userRows.rows > 0 ? `; teammate rows: ${s.userRows.rows} rebuilt, -${s.userRows.charsSaved} chars (${s.userRows.restated} restated, ${s.userRows.repeated} repeated, ${s.userRows.stale} stale, ${s.userRows.notices} notices)` : ''}`;
 }

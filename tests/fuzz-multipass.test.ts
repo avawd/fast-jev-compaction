@@ -125,10 +125,8 @@ function shrinkNotesNest(seed: number, messages: readonly Message[]): string[] {
     } else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) visit(v, `${where}.${k}`);
   };
   messages.forEach((m, k) => {
-    // A row may hold several folded replies (shrink.ts joins them with a blank line), each with
-    // its own note; a nested note would sit in another's head, with no blank line between them.
-    const notes = m.text.split(SHRINK_NOTE_PREFIX).slice(1, -1);
-    if (notes.some((between) => !between.includes('\n\n'))) fail.push(`seed ${seed}: nested shrink notes in row ${k} text`);
+    // Replies are never shortened (shrink.ts): no text carries a shrink note at all.
+    if (m.text.includes(SHRINK_NOTE_PREFIX)) fail.push(`seed ${seed}: a shrink note in row ${k} text`);
     for (const u of m.toolUses) visit(u.input, `${u.tool_use_id} input`);
   });
   return fail;

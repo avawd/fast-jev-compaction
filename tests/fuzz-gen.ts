@@ -364,7 +364,7 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
     if (mergedRow) {
       messages.push(row({ role: 'assistant', text: text || `Step ${i}.`, toolUses: uses }, reply));
     } else {
-      // Sometimes a long reply leads straight into the call (shrink.ts folds it into the rebuilt row).
+      // Sometimes a long reply leads straight into the call: shrink.ts must leave it alone.
       if (text) messages.push(row({ role: 'assistant', text: chance(rl, 0.15) ? longReply(rl, i, []) : text, toolUses: [] }, reply));
       for (const u of uses) useRows.push(row({ role: 'assistant', text: '', toolUses: [u] }, reply));
     }
@@ -383,7 +383,11 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       return result;
     });
     if (interleave) {
-      useRows.forEach((u, k) => messages.push(u, row({ role: 'user', text: '', toolUses: [], toolResults: [results[k]!] })));
+      useRows.forEach((u, k) => {
+        // A streamed reply may write text between its calls: text-then-use continuations.
+        if (k > 0 && chance(rl, 0.4)) messages.push(row({ role: 'assistant', text: `Also step ${i}.${k}.`, toolUses: [] }, reply));
+        messages.push(u, row({ role: 'user', text: '', toolUses: [], toolResults: [results[k]!] }));
+      });
     } else if (merged && chance(r, 0.5)) messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: results }));
     else for (const res of results) messages.push(row({ role: 'user', text: '', toolUses: [], toolResults: [res] }));
 

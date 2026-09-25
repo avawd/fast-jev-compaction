@@ -29,7 +29,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   pinReferenced: true,
   stripMcpFurniture: true,
   shrinkOldInputs: true,
-  shrinkOldText: true,
   dedupeTeammates: true,
   trimStaleTeammates: true,
   dedupePeerNotice: true,
@@ -66,7 +65,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     pinReferenced: flag(options.pinReferenced, DEFAULT_OPTIONS.pinReferenced),
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
     shrinkOldInputs: flag(options.shrinkOldInputs, DEFAULT_OPTIONS.shrinkOldInputs),
-    shrinkOldText: flag(options.shrinkOldText, DEFAULT_OPTIONS.shrinkOldText),
     dedupeTeammates: flag(options.dedupeTeammates, DEFAULT_OPTIONS.dedupeTeammates),
     trimStaleTeammates: flag(options.trimStaleTeammates, DEFAULT_OPTIONS.trimStaleTeammates),
     dedupePeerNotice: flag(options.dedupePeerNotice, DEFAULT_OPTIONS.dedupePeerNotice),
@@ -279,7 +277,6 @@ function build(
     byRule: by((d) => d.source === 'rule' && d.action !== 'keep'),
     byClaude: by((d) => d.source === 'claude' && d.action !== 'keep'),
     inputsShrunk: shrunk.inputs,
-    textsShrunk: shrunk.texts,
     claude: outcome.claude,
     ms: Date.now() - started,
   };

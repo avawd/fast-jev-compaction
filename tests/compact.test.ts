@@ -162,7 +162,7 @@ describe('resolveOptions', () => {
   const rest = {
     truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
     dedupeTeammates: true, trimStaleTeammates: true, dedupePeerNotice: true, teammateHeadChars: 1000, keepRecentUserTurns: 3,
-    shrinkOldInputs: true, shrinkOldText: true,
+    shrinkOldInputs: true,
   };
   it('uses defaults for missing, NaN and infinite values', () => {
     expect(resolveOptions()).toEqual({ preserveRecentMessages: 6, truncateHeadChars: 300, ...rest });

@@ -166,8 +166,9 @@ is never cut again. `AskUserQuestion`, `ExitPlanMode` and `TodoWrite` are never 
 A shortened call is handed back as a rebuilt row, and Claude Code merges every row of one reply into
 the place of its first row. So a reply's calls are rebuilt together as one row, and only when nothing
 but their results follows them; in a parallel reply Claude Code wrote as call, result, call, result,
-every later part of the reply is rebuilt too. A reply with no call is never rebuilt: its last row
-carries what Claude Code attaches at the end of a turn (stop-hook feedback, which quotes your goal).
+every later part of the reply is rebuilt too. Replies are never rebuilt: without a message id, a long
+reply before a call cannot be told from the previous reply's turn-end text, which carries what Claude
+Code attaches at the end of a turn (stop-hook feedback, which quotes your goal).
 
 ## Install
 
@@ -220,7 +221,6 @@ debug log names the keys it looked for).
 | `teammateHeadChars` | 1000 | Head kept of a stale teammate message |
 | `keepRecentUserTurns` | 3 | The teammate pass never rewrites the newest this many user messages, or any user message after them |
 | `shrinkOldInputs` | true | Shorten the long inputs of old calls: Bash heredocs, Write contents, Edit strings, subagent prompts (see "Old call inputs") |
-| `shrinkOldText` | true | Shorten a long old reply that leads into a call, folded into the rebuilt call row |
 
 ### Precompute
 

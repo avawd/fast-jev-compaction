@@ -31,7 +31,7 @@ describe('fuzz: transcript integrity', () => {
         continue;
       }
       for (const f of checkCase(transcript, run)) failures.push(`seed ${seed}: ${f}`);
-      shrunk += run.result.stats.inputsShrunk + run.result.stats.textsShrunk;
+      shrunk += run.result.stats.inputsShrunk;
       // A multi-row merge: one rebuilt row holding the calls of more than one input row.
       const rowOf = new Map(transcript.messages.flatMap((m) => m.toolUses.map((u) => [u.tool_use_id, m] as const)));
       if (run.session.some((m) => !transcript.messages.includes(m as never) && new Set(m.toolUses.map((u) => rowOf.get(u.tool_use_id))).size > 1)) merged += 1;

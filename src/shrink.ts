@@ -5,10 +5,9 @@ import { sliceWhole } from './text.js';
 import type { Message, ToolCall, ToolUse } from './types.js';
 
 /**
- * Old assistant-side content, shortened. Tool output is not all a transcript holds: on real
- * sessions the inputs of old calls (Bash heredocs, Write contents, Edit strings, subagent
- * prompts) and long old replies are a quarter to a half of it, and none of it is needed whole
- * once the call ran: the file is on disk, the command's output follows it, the agent answered.
+ * Old call inputs, shortened. Tool output is not all a transcript holds: on real sessions the
+ * inputs of old calls (Bash heredocs, Write contents, Edit strings, subagent prompts) are up to a
+ * third of it, and none of it is needed whole once the call ran: the file is on disk, the command's output follows it, the agent answered.
  * Each such field keeps its start, the lines holding a token something later quotes, a few
  * salient lines (salient.ts), and a note saying what went.
  *
@@ -21,15 +20,16 @@ import type { Message, ToolCall, ToolUse } from './types.js';
  *    So rebuilding one tool_use row of a parallel group split the group and lost results. The
  *    group's tool_use rows are therefore rebuilt as ONE row, and only when they end the run of
  *    assistant rows (nothing but their results follows them).
+ *
+ * Old replies are left alone. Rows carry no message id, so a long reply right before a call cannot
+ * be told from the previous reply's turn-end text (a Stop-hook continuation writes no row between
+ * them); rebuilt, that text would lose its riders, among them the stop-hook feedback quoting the
+ * user's goal. Measured, folding replies freed next to nothing anyway.
  */
 
 export const SHRINK_NOTE_PREFIX = '[verbatim-compaction shortened';
 /** Input fields shorter than this are left whole. */
 export const MIN_SHRINK_FIELD_CHARS = 800;
-/** Assistant text rows shorter than this are left whole. */
-export const MIN_SHRINK_TEXT_CHARS = 1200;
-/** Head kept of a long old assistant reply. */
-const TEXT_HEAD_CHARS = 600;
 /** Most characters of one excerpted line; more only to reach a must-keep token. */
 const LINE_CHARS = 160;
 /** A must-keep token further into its line than this is taken as a window around it. */
@@ -64,7 +64,6 @@ export interface ShrinkSpec {
 
 export interface ShrinkOptions {
   shrinkOldInputs: boolean;
-  shrinkOldText: boolean;
   staleAfterMessages: number;
   preserveRecentMessages: number;
 }
@@ -73,8 +72,6 @@ export interface ShrinkOutcome {
   messages: Message[];
   /** Tool inputs shortened. */
   inputs: number;
-  /** Assistant text rows shortened. */
-  texts: number;
 }
 
 /** Whether an earlier compaction already shortened or truncated this text. */
@@ -207,7 +204,7 @@ function lastQuotes(messages: readonly Message[]): Map<string, number> {
 }
 
 /**
- * Shortens old tool inputs and old assistant replies in `kept` (compact()'s output over
+ * Shortens old tool inputs in `kept` (compact()'s output over
  * `original`). Old means older than `staleAfterMessages` and outside the first row and the
  * preserved tail. A call is shortened only when unpinned; one whose result carries a token quoted
  * later keeps twice the head. Unchanged rows are returned as the objects they came in as.
@@ -218,7 +215,7 @@ export function shrinkOld(
   calls: readonly ToolCall[],
   options: ShrinkOptions,
 ): ShrinkOutcome {
-  if (!options.shrinkOldInputs && !options.shrinkOldText) return { messages: [...kept], inputs: 0, texts: 0 };
+  if (!options.shrinkOldInputs) return { messages: [...kept], inputs: 0 };
   const total = original.length;
   const indexOf = new Map<Message, number>();
   original.forEach((m, i) => indexOf.set(m, i));
@@ -243,22 +240,13 @@ export function shrinkOld(
     const input = shrinkValue(tool.input, head, mustKeep(at), 0) as Record<string, unknown>;
     return input === tool.input ? tool : { ...tool, input };
   };
-  const textSpec: ShrinkSpec = { head: TEXT_HEAD_CHARS, what: 'this old reply', hint: 'what it concluded carried on in the work that followed' };
-  const shrinkReply = (m: Message): string => {
-    const at = indexOf.get(m);
-    if (!options.shrinkOldText || !oldEnough(at) || m.text.length < MIN_SHRINK_TEXT_CHARS) return m.text;
-    return shrinkText(m.text, textSpec, mustKeep(at)(m.text));
-  };
-
   /**
-   * What rebuilding a run would give, or undefined when it may not be rebuilt. Only the block
-   * that ends the run is ever rebuilt, as ONE row: its tool_use rows, plus the reply text rows
-   * right before them when one of those is shortened. The run's other rows (thinking) keep their
-   * message id and stay before it. A run with no tool_use is never rebuilt: its last row carries
-   * the turn-end riders (stop-hook feedback quotes the user's goal), and a middle row rebuilt
-   * would be moved after its siblings when Claude Code merges them by message id.
+   * What rebuilding a run would give, or undefined when it may not be rebuilt. Only the tool_use
+   * rows that end the run are ever rebuilt, as ONE row. The run's other rows keep their message
+   * id and stay before it: they hold no call, so merged back into their reply's place they cannot
+   * split a call from its result. A run with no tool_use is never rebuilt.
    */
-  type Plan = { start: number; row: Message; inputs: number; texts: number };
+  type Plan = { start: number; row: Message; inputs: number };
   const planRun = (run: readonly Message[]): Plan | undefined => {
     const firstTool = run.findIndex((m) => m.toolUses.length > 0);
     if (firstTool < 0) return undefined;
@@ -266,27 +254,19 @@ export function shrinkOld(
     // The tool rows must end the run and all be old: then only their results follow them.
     if (!tools.every((m) => m.toolUses.length > 0 && oldEnough(rowIndex(m)))) return undefined;
     if (tools.length > 1 && tools.some((m) => m.text.length > 0)) return undefined;
-    let start = firstTool;
-    while (start > 0 && run[start - 1]!.toolUses.length === 0 && run[start - 1]!.text.length > 0 && oldEnough(indexOf.get(run[start - 1]!))) start -= 1;
-    let replies = run.slice(start, firstTool).map(shrinkReply);
-    // Fold from the first shortened reply on: the rows before it stay as they are.
-    const firstCut = replies.findIndex((t, k) => t !== run[start + k]!.text);
-    replies = firstCut < 0 ? [] : replies.slice(firstCut);
-    start = firstCut < 0 ? firstTool : start + firstCut;
-    const texts = replies.filter((t, k) => t !== run[start + k]!.text).length;
     const originals = tools.flatMap((m) => m.toolUses);
     const uses = originals.map(shrinkUse);
     const inputs = uses.filter((u, k) => u !== originals[k]).length;
-    const text = [...replies, ...(tools.length === 1 ? [tools[0]!.text] : [])].filter((t) => t.length > 0).join('\n\n');
-    return { start, row: { role: 'assistant', text, toolUses: uses }, inputs, texts };
+    const text = tools.length === 1 ? tools[0]!.text : '';
+    return { start: firstTool, row: { role: 'assistant', text, toolUses: uses }, inputs };
   };
 
-  // Runs, and whether each opens on a tool_use right after nothing but tool results: then it may
+  // Runs, and whether each holds a call right after nothing but tool results: then it may
   // continue the reply before it. Claude Code writes a streamed parallel reply as use A, result A,
   // use B, result B under one message id, and merges every row of an id into its FIRST row's
   // place (probed live: a rebuilt use A left before the reply's own use B lost both B's and C's
-  // results to the pairing repair). So in such a chain a run is rebuilt only if every later run of
-  // the chain is rebuilt too: then no row of the reply is left after a rebuilt one.
+  // results to the pairing repair). So in such a chain a run's calls are rebuilt only if every
+  // later run's calls are rebuilt too: then no call of the reply is left after a rebuilt one.
   const runs: Array<{ rows: Message[]; afterResults: boolean }> = [];
   const pieces: Array<Message | number> = [];
   let gap: Message[] = [];
@@ -302,7 +282,10 @@ export function shrinkOld(
     while (j < kept.length && kept[j]!.role === 'assistant') j += 1;
     const rows = kept.slice(i, j);
     const onlyResults = gap.length > 0 && gap.every((g) => (g.toolResults ?? []).length > 0 && g.text.trim().length === 0);
-    runs.push({ rows, afterResults: runs.length > 0 && onlyResults && rows[0]!.toolUses.length > 0 });
+    // A run holding a call after nothing but results may continue the reply, whatever it opens on
+    // (measured over local transcripts, all 1,444 real continuations opened on a tool_use, but the
+    // rule does not rely on it). A run without a call ends a chain: no row of it holds a call.
+    runs.push({ rows, afterResults: runs.length > 0 && onlyResults && rows.some((m) => m.toolUses.length > 0) });
     pieces.push(runs.length - 1);
     gap = [];
     i = j;
@@ -315,12 +298,11 @@ export function shrinkOld(
     // From the first changed run of the chain's rebuildable tail to the chain's end, all rebuilt.
     let tail = plans.length;
     while (tail > 0 && plans[tail - 1] !== undefined) tail -= 1;
-    const first = plans.findIndex((p, k) => k >= tail && p !== undefined && p.inputs + p.texts > 0);
+    const first = plans.findIndex((p, k) => k >= tail && p !== undefined && p.inputs > 0);
     if (first >= 0) for (let k = first; k < plans.length; k += 1) rebuilt.set(c + k, plans[k]!);
     c = end;
   }
   let inputs = 0;
-  let texts = 0;
   const messages: Message[] = [];
   for (const piece of pieces) {
     if (typeof piece !== 'number') {
@@ -334,8 +316,7 @@ export function shrinkOld(
       continue;
     }
     inputs += plan.inputs;
-    texts += plan.texts;
     messages.push(...rows.slice(0, plan.start), plan.row);
   }
-  return { messages, inputs, texts };
+  return { messages, inputs };
 }

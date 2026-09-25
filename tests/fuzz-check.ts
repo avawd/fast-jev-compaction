@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, MIN_SHRINK_TEXT_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE,
+  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -292,14 +292,14 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4. Rows without tool blocks are never removed, and text is never edited, except:
-  //    - a teammate row's (user-rows.ts), which keeps its header and its blocks in order, each
-  //      carrying at most one note, and never grows;
-  //    - an old reply leading into a call, which may be folded, shortened, into the rebuilt row
-  //      holding the call (shrink.ts).
-  //    Typed prompts and guarded rows stay the input's own; nothing else is rebuilt on its own.
+  // 4. Rows without tool blocks are never removed, and text is never edited, except a teammate
+  //    row's (user-rows.ts), which keeps its header and its blocks in order, each carrying at most
+  //    one note, and never grows. An assistant reply is never rebuilt (shrink.ts: without a
+  //    message id a lead-in cannot be told from the previous reply's turn-end text); a rebuilt
+  //    call row carries only its own input row's text.
   const toolRowTexts = new Set(input.filter((m) => m.toolUses.length > 0 && m.text.trim()).map((m) => m.text));
   const rebuiltTools = session.filter((m) => !inputSet.has(m) && m.toolUses.length > 0);
+  const rowOfUse = new Map(input.flatMap((m) => m.toolUses.map((u) => [u.tool_use_id, m] as const)));
   const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
   const plainSet = new Set<Message>(plainIn);
   const outSet = new Set<Message>(session);
@@ -309,33 +309,21 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const isPlain = (m: Message) => m.toolUses.length === 0 && !(m.toolResults ?? []).length;
   const teammateOut = session.filter((m) => !inputSet.has(m) && isPlain(m) && m.role === 'user' && isTeammateText(m.text));
   let teammateAt = 0;
-  let foldedNotes = 0;
   plainIn.forEach((m, i) => {
     if (outSet.has(m)) return;
-    if (m.role === 'user') {
-      const out = teammateOut[teammateAt++];
-      if (!out || !isTeammateText(m.text)) fail(`a non-teammate plain row ${i} was rebuilt or removed`);
-      else for (const f of teammateEdit(m.text, out.text)) fail(`teammate row ${i}: ${f}`);
-      return;
-    }
-    const host = rebuiltTools.find((h) => h.text.includes(m.text) || (m.text.length >= MIN_SHRINK_TEXT_CHARS && h.text.includes(m.text.slice(0, 200))));
-    if (!m.text.trim() || !host) fail(`plain row "${m.text.slice(0, 30)}" removed`);
-    else if (!host.text.includes(m.text)) foldedNotes += 1;
+    const out = m.role === 'user' ? teammateOut[teammateAt++] : undefined;
+    if (!out || !isTeammateText(m.text)) fail(`plain row ${i} (${m.role}) was rebuilt or removed`);
+    else for (const f of teammateEdit(m.text, out.text)) fail(`teammate row ${i}: ${f}`);
   });
   if (teammateAt !== teammateOut.length) fail(`${teammateOut.length - teammateAt} rebuilt teammate rows with no source`);
-  for (const h of rebuiltTools) foldedNotes -= Math.max(0, h.text.split(SHRINK_NOTE_PREFIX).length - 1);
-  if (foldedNotes > 0) fail('a folded reply was cut without a note');
   for (const m of session) {
     if (inputSet.has(m) || !isPlain(m) || teammateOut.includes(m)) continue;
     if (!toolRowTexts.has(m.text)) fail(`plain row rebuilt on its own: "${m.text.slice(0, 30)}"`);
   }
   for (const h of rebuiltTools) {
-    const pieces = h.text.split('\n\n');
-    for (const piece of h.text.includes(SHRINK_NOTE_PREFIX) ? [] : pieces) {
-      if (piece.trim() && !input.some((m) => m.text.includes(piece))) fail(`rebuilt row text invented: "${piece.slice(0, 30)}"`);
-    }
+    const texts = new Set(h.toolUses.map((u) => rowOfUse.get(u.tool_use_id)?.text ?? ''));
+    if (h.text && !texts.has(h.text)) fail(`rebuilt call row carries text of no row of its calls: "${h.text.slice(0, 30)}"`);
   }
-  // The guards are the teammate pass's (user rows); old replies (shrink.ts) follow the stale window.
   for (const k of userRowGuards(input, resolved)) if (input[k]!.role === 'user' && plainSet.has(input[k]!) && !session.includes(input[k]!)) fail(`guarded plain row ${k} was rebuilt`);
 
   // 10. A tool input is only ever shortened (shrink.ts): same id, same keys, each changed string a
@@ -565,9 +553,7 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   // 9. A fact a result introduced and a later row quotes is still in the context before the quote.
   if (resolved.pinReferenced) {
     for (const q of transcript.quotes) {
-      // A quoting reply may have been folded into the rebuilt row that follows it (shrink.ts).
-      const host = (row: Message) => session.findIndex((m) => !inputSet.has(m) && m.toolUses.length > 0 && m.text.includes(row.text));
-      const at = q.kind === 'text' ? (session.includes(q.row as SessionRow) ? session.indexOf(q.row as SessionRow) : host(q.row)) : usePos.get(q.useId) ?? -1;
+      const at = q.kind === 'text' ? session.indexOf(q.row as SessionRow) : usePos.get(q.useId) ?? -1;
       if (at < 0) {
         if (q.kind === 'text') fail(`quoting row for ${q.token} vanished`);
         continue; // The quoting call itself was dropped: nothing quotes the token any more.
