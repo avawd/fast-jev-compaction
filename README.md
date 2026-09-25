@@ -155,6 +155,7 @@ debug log names the keys it looked for).
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested (1–100). After the plugin's own compaction it waits until context reads under this again before asking once more, so a prune that leaves context above it is not followed by a compaction on every turn |
+| `compactAtTokens` | 300000 | Context tokens at which compaction is requested, whatever the percent reads; either threshold triggers it. On a 1M-token window 60% waits until 600k tokens, too late to prune verbatim in time. 0 turns it off. When a turn is already running (a busy session: agent messages, task notices), the request is retried every 3 s for up to a minute |
 | `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
 | `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |

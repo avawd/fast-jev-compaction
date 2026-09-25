@@ -11,6 +11,11 @@ import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.j
 
 export type HookConfig = {
   compactAtPercent: number;
+  /**
+   * Context tokens at which compaction is requested, whatever the percent reads: on a 1M window
+   * the percent alone waits until 600k, too late to prune verbatim in time. 0 turns it off.
+   */
+  compactAtTokens: number;
   minReductionRatio: number;
   preserveRecentMessages: number;
   truncateHeadChars: number;
@@ -62,6 +67,7 @@ const MAX_FORK_CHUNK_SIZE = 400;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
+  compactAtTokens: 300_000,
   minReductionRatio: 0.25,
   preserveRecentMessages: 6,
   truncateHeadChars: 300,
@@ -99,6 +105,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     // Below 1% every turn would compact; a gate at or under 0 would bill a fork for a transcript it hands
     // back unchanged, and one at 1 or more could never be met.
     compactAtPercent: clamp(num(options, 'compactAtPercent', DEFAULTS.compactAtPercent), 1, 100),
+    compactAtTokens: Math.max(0, num(options, 'compactAtTokens', DEFAULTS.compactAtTokens)),
     minReductionRatio: clamp(num(options, 'minReductionRatio', DEFAULTS.minReductionRatio), 0.01, 0.95),
     preserveRecentMessages: num(options, 'preserveRecentMessages', DEFAULTS.preserveRecentMessages),
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
@@ -278,13 +285,86 @@ async function requestCompaction($: EngineInterface): Promise<'compacted' | 'ret
     // Only the headless refusal is final: 2.1.281 also rejects while a turn runs, which the
     // next turn can get past.
     if (!HEADLESS_REFUSAL.test(text)) {
-      notify($, `auto-compact not requested this turn (${text}); will try again next turn`, false);
+      debug($, `auto-compact refused for now (${text})`);
       return 'retry';
     }
     notify($, `auto-compact off for this session: $.session.compact() was refused (${text}). ` +
       'In a headless (-p / SDK) session send /compact yourself.');
     return 'off';
   }
+}
+
+/**
+ * What the auto-compaction keeps between turns. `awaitingDrop` is set once this plugin's own request
+ * compacted and cleared when usage reads under the threshold again: without it a prune that leaves
+ * context above the threshold is followed by another compaction on the very next turn, which has
+ * little left to prune and falls back to a full built-in summary.
+ */
+type AutoCompactState = {
+  compacting: boolean;
+  off: boolean;
+  awaitingDrop: boolean;
+  retry?: { cancel: () => void };
+  retriesLeft: number;
+};
+
+/**
+ * Between retries of a compaction the engine refused because a turn was running. Seen live: in a
+ * busy session (teammate messages, task notices) the next turn is already running when a turn end
+ * asks, so asking only at turn ends never gets through. The timer asks in the gaps between turns.
+ */
+const AUTO_RETRY_MS = 3_000;
+const AUTO_RETRIES = 20;
+
+function overThreshold(context: { percent?: number; tokens?: number }, config: HookConfig): boolean {
+  const percent = context.percent ?? 0;
+  const tokens = context.tokens ?? 0;
+  return percent >= config.compactAtPercent || (config.compactAtTokens > 0 && tokens >= config.compactAtTokens);
+}
+
+/**
+ * Requests a compaction when context is over the threshold. `fromTimer` marks a retry: a turn end
+ * leaves a pending retry to its timer rather than asking twice. Top-level because the engine
+ * follows `$` only into functions declared at the top of the file.
+ */
+async function autoCompact($: EngineInterface, state: AutoCompactState, config: HookConfig, fromTimer: boolean): Promise<void> {
+  if (state.compacting || state.off || (!fromTimer && state.retry)) return;
+  state.compacting = true;
+  try {
+    const { context } = await $.session.usage();
+    const tokens = context.tokens === undefined ? '' : `, ${Math.round(context.tokens / 1000)}k tokens`;
+    const limit = config.compactAtTokens > 0 ? ` or ${Math.round(config.compactAtTokens / 1000)}k tokens` : '';
+    debug($, `context ${context.percent ?? 0}%${tokens} (compacts at ${config.compactAtPercent}%${limit})`);
+    if (!overThreshold(context, config)) {
+      state.awaitingDrop = false;
+      return;
+    }
+    if (state.awaitingDrop) {
+      debug($, `waiting for context to drop under the threshold before compacting again`);
+      return;
+    }
+    const outcome = await requestCompaction($);
+    state.off = outcome === 'off';
+    state.awaitingDrop = outcome === 'compacted';
+    if (outcome === 'retry') scheduleRetry($, state, config, fromTimer);
+  } catch (error) {
+    notify($, `auto-compact skipped (${message(error)})`, false);
+  } finally {
+    state.compacting = false;
+  }
+}
+
+function scheduleRetry($: EngineInterface, state: AutoCompactState, config: HookConfig, fromTimer: boolean): void {
+  if (!fromTimer) state.retriesLeft = AUTO_RETRIES;
+  if (state.retriesLeft <= 0) {
+    debug($, 'auto-compact: gave up retrying; the next turn end asks again');
+    return;
+  }
+  state.retriesLeft -= 1;
+  state.retry = $.clock.after(AUTO_RETRY_MS, () => {
+    state.retry = undefined;
+    void autoCompact($, state, config, true);
+  });
 }
 
 /** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
@@ -312,12 +392,7 @@ export async function sessionCwd($: { session: { cwd: () => Promise<string> } })
 
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
-  let compacting = false;
-  let autoCompactOff = false;
-  // Set once this plugin's own request compacted; cleared when usage reads under the threshold again.
-  // Without it a prune that leaves context above the threshold is followed by another compaction on
-  // the very next turn, which has little left to prune and falls back to a full built-in summary.
-  let awaitingDrop = false;
+  const auto: AutoCompactState = { compacting: false, off: false, awaitingDrop: false, retriesLeft: 0 };
   // register() has no `$`, so the effective config is logged by the first hook that runs.
   let configLogged = false;
 
@@ -381,24 +456,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
-    if (compacting || autoCompactOff || event.agentId !== undefined || event.reason !== 'answer') return next(event);
-    compacting = true;
-    try {
-      const { context } = await $.session.usage();
-      const percent = context.percent ?? 0;
-      debug($, `context ${percent}% (compacts at ${config.compactAtPercent}%)`);
-      if (percent < config.compactAtPercent) awaitingDrop = false;
-      else if (awaitingDrop) debug($, `waiting for context to drop under ${config.compactAtPercent}% before compacting again`);
-      else {
-        const outcome = await requestCompaction($);
-        autoCompactOff = outcome === 'off';
-        awaitingDrop = outcome === 'compacted';
-      }
-    } catch (error) {
-      notify($, `auto-compact skipped (${message(error)})`, false);
-    } finally {
-      compacting = false;
-    }
+    if (event.agentId !== undefined || event.reason !== 'answer') return next(event);
+    await autoCompact($, auto, config, false);
     return next(event);
   });
 };

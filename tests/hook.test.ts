@@ -39,7 +39,7 @@ describe('resolveHookConfig', () => {
 
   it('reads userConfig and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
-      compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
+      compactAtPercent: 60, compactAtTokens: 300000, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
       keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200,
@@ -363,7 +363,7 @@ describe('register', () => {
     it('logs the context percent against the threshold at debug level', async () => {
       const h = harness({ percent: 59 });
       await h.turnComplete(answered);
-      expect(h.debugLogs).toContain('context 59% (compacts at 60%)');
+      expect(h.debugLogs).toContain('context 59% (compacts at 60% or 300k tokens)');
       expect(h.logs).toHaveLength(0);
     });
 
@@ -395,7 +395,7 @@ describe('register', () => {
       await h.turnComplete(answered);
       await h.turnComplete(answered);
       expect(h.compactCalls).toBe(1);
-      expect(h.debugLogs.some((line) => /waiting for context to drop under 60%/.test(line))).toBe(true);
+      expect(h.debugLogs.some((line) => /waiting for context to drop under the threshold/.test(line))).toBe(true);
       percent = 30;
       await h.turnComplete(answered);
       expect(h.compactCalls).toBe(1);
@@ -422,10 +422,90 @@ describe('register', () => {
       let calls = 0;
       const busy = new Error('$.session.compact: rejected while a turn runs');
       const h = harness({ percent: 90, sessionCompact: async () => { calls += 1; throw busy; } });
-      for (let i = 0; i < 3; i += 1) expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      await h.fireTimers();
+      await h.fireTimers();
       expect(calls).toBe(3);
       expect(h.toasts.some((t) => /auto-compact off/.test(t))).toBe(false);
-      expect(h.logs.filter((line) => /rejected while a turn runs/.test(line))).toHaveLength(3);
+      // Refusals for now go to the debug log only: a retry every few seconds must not fill the transcript.
+      expect(h.logs).toHaveLength(0);
+      expect(h.debugLogs.filter((line) => /rejected while a turn runs/.test(line))).toHaveLength(3);
+    });
+
+    it('compacts once the context holds compactAtTokens, whatever the percent reads', async () => {
+      // A 1M window at 60% is 600k tokens: seen live, that is far too late to prune verbatim in time.
+      const h = harness({ percent: 31, tokens: 310_000 });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+    });
+
+    it('does not compact under both compactAtTokens and compactAtPercent', async () => {
+      const h = harness({ percent: 29, tokens: 290_000 });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(0);
+    });
+
+    it('honours a configured compactAtTokens', async () => {
+      const h = harness({ percent: 15, tokens: 150_000, userConfig: { compactAtTokens: 120_000 } });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+    });
+
+    it('retries on a timer when a queued turn is already running, until it compacts', async () => {
+      // Seen live: in a busy session (teammate messages, task notices) the next turn starts before the
+      // plugin asks, the engine rejects with "a turn is running", and every turn end hits the same wall.
+      let busy = 2;
+      const h = harness({
+        percent: 90,
+        sessionCompact: async () => {
+          if (busy > 0) { busy -= 1; throw new Error('$.session.compact: a turn is running (t1); the conversation compacts between turns'); }
+          return { messages: [] };
+        },
+      });
+      expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
+      expect(h.compactCalls).toBe(1);
+      expect(h.timers).toHaveLength(1);
+      await h.fireTimers();
+      expect(h.compactCalls).toBe(2);
+      expect(h.timers).toHaveLength(1);
+      await h.fireTimers();
+      expect(h.compactCalls).toBe(3);
+      expect(h.timers).toHaveLength(0);
+      // Compacted: hysteresis holds until usage drops.
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(3);
+    });
+
+    it('keeps one retry timer at a time, and a turn end while one is pending does not ask again', async () => {
+      const h = harness({ percent: 90, sessionCompact: async () => { throw new Error('a turn is running (t2)'); } });
+      await h.turnComplete(answered);
+      await h.turnComplete(answered);
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      expect(h.timers).toHaveLength(1);
+    });
+
+    it('gives up retrying after a bounded number of attempts and waits for the next turn end', async () => {
+      const h = harness({ percent: 90, sessionCompact: async () => { throw new Error('a turn is running (t3)'); } });
+      await h.turnComplete(answered);
+      for (let i = 0; i < 100 && h.timers.length > 0; i += 1) await h.fireTimers();
+      expect(h.timers).toHaveLength(0);
+      const attempts = h.compactCalls;
+      expect(attempts).toBeGreaterThan(5);
+      expect(attempts).toBeLessThan(40);
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(attempts + 1);
+    });
+
+    it('a retry that finds context already under the threshold does not compact', async () => {
+      let percent = 90;
+      const h = harness({ percent: async () => percent, sessionCompact: async () => { throw new Error('a turn is running (t4)'); } });
+      await h.turnComplete(answered);
+      expect(h.compactCalls).toBe(1);
+      percent = 10;
+      await h.fireTimers();
+      expect(h.compactCalls).toBe(1);
+      expect(h.timers).toHaveLength(0);
     });
 
     it('ignores subagent turns and turns that did not end in an answer', async () => {
