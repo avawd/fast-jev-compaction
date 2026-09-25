@@ -59,6 +59,13 @@ export interface Segment {
   cwd?: string;
   /** Whether message 0 is the built-in compaction summary (`isCompactSummary`). */
   startsWithSummary: boolean;
+  /**
+   * Per message (same index): characters of thinking/redacted_thinking blocks, signatures
+   * included. The hook never sees them, but the model's context carries them (eval/replay.ts).
+   */
+  hiddenChars: number[];
+  /** Per message: the API's input + cache-read + cache-creation tokens on an assistant row, else 0. */
+  usageTokens: number[];
   thinkingRows: number;
   metaRowsSkipped: number;
   skippedLines: number;
@@ -100,8 +107,23 @@ function textOf(blocks: Block[]): string {
     .join('\n');
 }
 
+function hiddenCharsOf(blocks: Block[]): number {
+  let n = 0;
+  for (const b of blocks) {
+    if (b.type === 'thinking') n += String(b['thinking'] ?? '').length + String(b['signature'] ?? '').length;
+    else if (b.type === 'redacted_thinking') n += String(b['data'] ?? '').length;
+  }
+  return n;
+}
+
+function usageTokensOf(usage: Record<string, unknown> | undefined): number {
+  if (!usage) return 0;
+  const n = (k: string) => (typeof usage[k] === 'number' ? (usage[k] as number) : 0);
+  return n('input_tokens') + n('cache_read_input_tokens') + n('cache_creation_input_tokens');
+}
+
 function newSegment(file: string, index: number): Segment {
-  return { file, index, messages: [], startsWithSummary: false, thinkingRows: 0, metaRowsSkipped: 0, skippedLines: 0 };
+  return { file, index, messages: [], hiddenChars: [], usageTokens: [], startsWithSummary: false, thinkingRows: 0, metaRowsSkipped: 0, skippedLines: 0 };
 }
 
 export async function loadSegments(file: string): Promise<Segment[]> {
@@ -140,9 +162,11 @@ export async function loadSegments(file: string): Promise<Segment[]> {
       seg.metaRowsSkipped += 1;
       continue;
     }
-    const msg = row['message'] as { content?: unknown } | undefined;
+    const msg = row['message'] as { content?: unknown; usage?: Record<string, unknown> } | undefined;
     if (!msg) continue;
     const blocks = blocksOf(msg.content);
+    seg.hiddenChars.push(hiddenCharsOf(blocks));
+    seg.usageTokens.push(row['type'] === 'assistant' ? usageTokensOf(msg.usage) : 0);
 
     if (row['type'] === 'assistant') {
       const message: EvalMessage = { role: 'assistant', text: textOf(blocks), toolUses: [] };

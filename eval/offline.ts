@@ -6,6 +6,8 @@
  *                           [--options '<plugin options json>'] [--min-reduction 0.25]
  *   npm run eval:offline -- --compare <a.json> <b.json>
  *   npm run eval:offline -- --facts <label> [--limit 40]   (prints never-echoed facts; private data, stdout only)
+ *   npm run eval:offline -- --replay <label|file> [--whole] [--window 400000] [--compact-at 0.6] ...
+ *                           (repeated compactions over one long transcript; see eval/replay.ts)
  *
  * See eval/README.md for what every column means.
  */
@@ -15,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { contextBlob, factSets, resultsById, survival, type FactSets, type Survival } from './facts.ts';
 import { carriedPrefix, loadSegments, type Segment } from './parse.ts';
 import { ARMS, loadPlugin, runArm, type Arm, type PluginApi } from './plugin.ts';
+import { replayMain } from './replay-cli.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -279,6 +282,11 @@ async function main(): Promise<void> {
     if (!entry) throw new Error(`--facts ${label}: not a corpus label or a file`);
     if (entry.segment < 0) entry.segment = (await loadSegments(entry.file)).length - 1;
     await printFacts(api, entry, Number(a.get('limit')?.[0] ?? 40));
+    return;
+  }
+
+  if (a.has('replay')) {
+    await replayMain(api, a, corpus);
     return;
   }
 
