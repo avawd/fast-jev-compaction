@@ -3,7 +3,8 @@ import { applyDecisions, messageChars } from './compact.js';
 import { resultChars } from './gate.js';
 import { DEFAULT_CHUNK_SIZE } from './jev-scorer.js';
 import { applyRules } from './rules.js';
-import type { CallDecision, Message, Scorer, ToolCall, Verdict } from './types.js';
+import type { CallDecision, Message, ResolvedCompactOptions, Scorer, ToolCall, Verdict } from './types.js';
+import { compactUserRows } from './user-rows.js';
 
 /** Whether these verdicts alone would clear the reduction gate. */
 export type GateFn = (calls: readonly ToolCall[], verdicts: ReadonlyMap<string, Verdict>) => boolean;
@@ -40,12 +41,22 @@ function forkTimeout(ms: number | undefined, sleep: SleepFn | undefined): ForkTi
 
 /**
  * The gate as the hook applies it (gate.ts `gateRatio`: characters saved over the tool-result
- * characters before), projected for a set of verdicts. It skips what compact() does after scoring
+ * characters before, the teammate-row saving counted on both sides), projected for a set of verdicts. It skips what compact() does after scoring
  * (drop_call→drop_result(0), head+tail shapes, the referenced-later pin, MCP furniture stripping),
  * so it is an estimate: the pin can only lower the real saving, shapes and stripping move it by a
  * tail's worth per call. If gateRatio's measure changes, change this with it.
  */
-export function rulesGate(messages: readonly Message[], headChars: number, minRatio: number): GateFn {
+export function rulesGate(
+  messages: readonly Message[],
+  headChars: number,
+  minRatio: number,
+  /** The compact options, so the teammate-row pass counts as it will (user-rows.ts); absent: tool output only. */
+  options?: ResolvedCompactOptions,
+): GateFn {
+  // The teammate-row pass does not depend on the verdicts: run it once, not per evaluation.
+  const userSaved = options ? compactUserRows(messages, options).stats.charsSaved : 0;
+  const denominator = resultChars(messages) + userSaved;
+  const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
   return (calls, verdicts) => {
     const decisions: CallDecision[] = [];
     for (const call of calls) {
@@ -54,10 +65,8 @@ export function rulesGate(messages: readonly Message[], headChars: number, minRa
         decisions.push({ id: call.id, tool: call.tool, action: verdict.action, source: verdict.source });
       }
     }
-    const denominator = resultChars(messages);
-    if (denominator === 0 || decisions.length === 0) return false;
-    const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
-    const after = applyDecisions(messages, decisions, calls, headChars).reduce((sum, m) => sum + messageChars(m), 0);
+    if (denominator === 0 || (decisions.length === 0 && userSaved === 0)) return false;
+    const after = applyDecisions(messages, decisions, calls, headChars).reduce((sum, m) => sum + messageChars(m), 0) - userSaved;
     return Math.min(1, (before - after) / denominator) >= minRatio;
   };
 }

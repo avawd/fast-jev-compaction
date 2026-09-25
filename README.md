@@ -120,9 +120,54 @@ result is truncated, is rebuilt from its role, its text and its tool blocks only
 thinking blocks and the original order of its blocks are not preserved in that message. Truncation
 never rebuilds the assistant message that made the call.
 
+**What a rebuilt message loses that nobody sees.** Claude Code records attachments (hook output,
+reminders, re-sent instructions, a prompt typed while a turn runs, a queued agent message) as entries
+of their own, not as messages. It hangs each on the message recorded before it, and hands the hook only
+the messages. A message returned unchanged keeps what hangs on it; a rebuilt one does not, and the
+hook cannot see what that was (2.1.282: `rowsOf`/`messagesOf` in the session.compact dispatch). So a
+rebuilt tool result can take with it a prompt typed while that tool ran (`queued_command`), and after a
+summary compaction the instructions (CLAUDE.md, memory) hang on the first new user message.
+
+### Teammate messages
+
+In a multi-agent session the other agents' messages arrive as user messages
+(`<teammate-message teammate_id="…">`). On one orchestration session they were 28% of what the hook
+sees, more than its tool output. Typed prompts are never changed; teammate messages are cut three ways:
+
+- an agent's idle notification carries its closing reply, which restates the report it has just sent.
+  The report stays; the reply becomes a note plus the lines holding a sha, key, number, path or name
+  the report lacks (`dedupeTeammates`);
+- a message sent twice word for word keeps its newer copy, unless a token of the older one is quoted
+  in between (`dedupeTeammates`);
+- one older than `staleAfterMessages` keeps `teammateHeadChars`, then the lines holding a token quoted
+  later (always), then lines holding ids and numbers, up to 1000 chars (`trimStaleTeammates`).
+
+The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
+A cut must save 30% of its block. A block holding a note is never cut again. The gate
+(`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
+compaction clear the gate, never make it harder than tool output alone would. This pass never rewrites: the first
+message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
+and the first user message after a summary (it carries the re-sent instructions, see above).
+
 A call whose assistant message has no text of its own is truncated to its note instead of dropped.
 Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
 dropping the call would leave a message holding only thinking.
+
+### Old call inputs
+
+The inputs of old calls are often a quarter of a long session or more: heredocs, whole file contents, subagent
+prompts. Once the call has run, none of it is needed whole: the file is on disk, and the output or the
+agent's report follows the call. Past `staleAfterMessages`, a string field of 800 characters or more
+keeps its start, every line holding a token a later message quotes, a few lines holding ids and numbers,
+and a note naming what went (`[verbatim-compaction shortened this old command: …]`). The tool_use id and
+every other field stay. A field is kept whole when its quoted lines would not fit, and one holding a note
+is never cut again. `AskUserQuestion`, `ExitPlanMode` and `TodoWrite` are never touched.
+
+A shortened call is handed back as a rebuilt row, and Claude Code merges every row of one reply into
+the place of its first row. So a reply's calls are rebuilt together as one row, and only when nothing
+but their results follows them; in a parallel reply Claude Code wrote as call, result, call, result,
+every later part of the reply is rebuilt too. A reply with no call is never rebuilt: its last row
+carries what Claude Code attaches at the end of a turn (stop-hook feedback, which quotes your goal).
 
 ## Install
 
@@ -169,6 +214,13 @@ debug log names the keys it looked for).
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 | `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
+| `dedupeTeammates` | true | Restated idle notifications and exact repeats of teammate messages become notes (see "Teammate messages") |
+| `trimStaleTeammates` | true | Teammate messages older than `staleAfterMessages` keep their head, quoted-later lines and id/number lines |
+| `dedupePeerNotice` | true | The peer-message notice stays on the newest teammate message only |
+| `teammateHeadChars` | 1000 | Head kept of a stale teammate message |
+| `keepRecentUserTurns` | 3 | The teammate pass never rewrites the newest this many user messages, or any user message after them |
+| `shrinkOldInputs` | true | Shorten the long inputs of old calls: Bash heredocs, Write contents, Edit strings, subagent prompts (see "Old call inputs") |
+| `shrinkOldText` | true | Shorten a long old reply that leads into a call, folded into the rebuilt call row |
 
 ### Precompute
 

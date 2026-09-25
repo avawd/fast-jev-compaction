@@ -16,6 +16,33 @@ describe('resolveHookConfig (Stage 2a options)', () => {
   });
 });
 
+describe('resolveHookConfig (teammate rows)', () => {
+  it('defaults the teammate-row options on and reads them from userConfig', () => {
+    expect(resolveHookConfig({})).toMatchObject({
+      dedupeTeammates: true, trimStaleTeammates: true, dedupePeerNotice: true, teammateHeadChars: 1000, keepRecentUserTurns: 3,
+    });
+    expect(resolveHookConfig({ dedupeTeammates: false, trimStaleTeammates: false, dedupePeerNotice: false, teammateHeadChars: 50.5, keepRecentUserTurns: -2 }))
+      .toMatchObject({ dedupeTeammates: false, trimStaleTeammates: false, dedupePeerNotice: false, teammateHeadChars: 50, keepRecentUserTurns: 0 });
+  });
+
+  it('names the teammate cut in the summary line, and the rebuilt rows reach the engine without a handle', async () => {
+    const { summarize, compactSession } = await import('../hooks/verbatim.ts');
+    const body = Array.from({ length: 40 }, (_, i) => `- finding ${i} explained at some length for the test`).join('\n');
+    const idle = JSON.stringify({ type: 'idle_notification', from: 'a1', result: body.replace(/finding/g, 'restated') });
+    const row = (inner: string) => `Another Claude session sent a message:\n<teammate-message teammate_id="a1">\n${inner}\n</teammate-message>`;
+    const messages = [
+      { ...m('user', 'Start.'), handle: 'h0' },
+      { ...m('user', row(body)), handle: 'h1' },
+      { ...m('user', row(idle)), handle: 'h2' },
+      ...Array.from({ length: 8 }, (_, i) => ({ ...m(i % 2 ? 'user' : 'assistant', `turn ${i}`), handle: `t${i}` })),
+    ];
+    const { result, messages: out } = await compactSession(messages, resolveHookConfig({ useClaudeScorer: false }));
+    expect(summarize(result)).toMatch(/teammate rows: 1 rebuilt, -\d+ chars \(1 restated, 0 repeated, 0 stale, 0 notices\)/);
+    expect(out[1]).toBe(messages[1]);
+    expect(out[2]!.handle).toBeUndefined();
+  });
+});
+
 describe('the fallback gate', () => {
   // Two reads of one file: stale_read saves ~half of the tool-result bytes, but the user
   // text (attachments, reminders) is so large that it is under 25% of the whole transcript.

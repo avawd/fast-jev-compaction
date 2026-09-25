@@ -3,7 +3,7 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-import { compact, reductionRatio } from '../src/compact.js';
+import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
 import { gateOutcome, gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
@@ -48,6 +48,16 @@ export type HookConfig = {
   shrinkOldInputs: boolean;
   /** Shorten long old assistant replies to a head, their salient lines and a note. */
   shrinkOldText: boolean;
+  /** Teammate rows: a restated idle notification or an exact repeat becomes a note (src/user-rows.ts). */
+  dedupeTeammates: boolean;
+  /** Teammate messages older than `staleAfterMessages` keep their head, salient and quoted-later lines. */
+  trimStaleTeammates: boolean;
+  /** The peer-message notice stays on the newest teammate row only. */
+  dedupePeerNotice: boolean;
+  /** Head of a stale teammate message kept. Whole number, at least 0. */
+  teammateHeadChars: number;
+  /** User text rows, newest first, the teammate pass never rewrites, with every user row after them. Whole number, at least 0. */
+  keepRecentUserTurns: number;
 };
 
 /**
@@ -89,6 +99,11 @@ const DEFAULTS: HookConfig = {
   minCandidateChars: 200,
   shrinkOldInputs: true,
   shrinkOldText: true,
+  dedupeTeammates: true,
+  trimStaleTeammates: true,
+  dedupePeerNotice: true,
+  teammateHeadChars: 1000,
+  keepRecentUserTurns: 3,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -131,6 +146,11 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
     shrinkOldInputs: bool(options, 'shrinkOldInputs', DEFAULTS.shrinkOldInputs),
     shrinkOldText: bool(options, 'shrinkOldText', DEFAULTS.shrinkOldText),
+    dedupeTeammates: bool(options, 'dedupeTeammates', DEFAULTS.dedupeTeammates),
+    trimStaleTeammates: bool(options, 'trimStaleTeammates', DEFAULTS.trimStaleTeammates),
+    dedupePeerNotice: bool(options, 'dedupePeerNotice', DEFAULTS.dedupePeerNotice),
+    teammateHeadChars: Math.max(0, Math.floor(num(options, 'teammateHeadChars', DEFAULTS.teammateHeadChars))),
+    keepRecentUserTurns: Math.max(0, Math.floor(num(options, 'keepRecentUserTurns', DEFAULTS.keepRecentUserTurns))),
   };
 }
 
@@ -196,7 +216,7 @@ export async function compactSession(
     claudeAwaitMs: Math.max(config.claudeTimeoutMs, CLAUDE_AWAIT_MS),
     rulesClearGate: background
       ? () => false
-      : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
+      : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio, resolveOptions(config)),
   });
   // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
   const options = { ...config, escalateBelow: config.minReductionRatio };
@@ -211,10 +231,11 @@ function claudeStage(stats: CompactResult['stats']): string {
 
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
+  return `${Math.round(gateRatio(result) * 100)}% of tool output${s.userRows ? ' and cut teammate text' : ''} (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
     `${s.inputsShrunk + s.textsShrunk > 0 ? `; shortened ${s.inputsShrunk} old inputs, ${s.textsShrunk} old replies` : ''}` +
-    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}`;
+    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}` +
+    `${s.userRows && s.userRows.rows > 0 ? `; teammate rows: ${s.userRows.rows} rebuilt, -${s.userRows.charsSaved} chars (${s.userRows.restated} restated, ${s.userRows.repeated} repeated, ${s.userRows.stale} stale, ${s.userRows.notices} notices)` : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */

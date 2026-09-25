@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, MIN_SHRINK_TEXT_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX,
+  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, MIN_SHRINK_TEXT_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -216,6 +216,37 @@ function inputShortenedBadly(src: unknown, out: unknown, depth: number): string 
   return undefined;
 }
 
+const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:');
+const BLOCK_RE = /<teammate-message teammate_id="([^"]+)"[^>]*>\n([\s\S]*?)\n<\/teammate-message>/g;
+
+/** What a rebuilt teammate row may not do, written independently of user-rows.ts. */
+function teammateEdit(before: string, after: string): string[] {
+  const fails: string[] = [];
+  if (after.length >= before.length) fails.push('rebuilt without shrinking');
+  const header = before.slice(0, before.indexOf('<teammate-message'));
+  if (!after.startsWith(header)) fails.push('header changed');
+  const from = (t: string) => [...t.matchAll(BLOCK_RE)].map((m) => m[1]);
+  if (JSON.stringify(from(before)) !== JSON.stringify(from(after))) fails.push('blocks changed order or sender');
+  for (const m of after.matchAll(BLOCK_RE)) {
+    if (m[2]!.split(USER_ROW_NOTE).length - 1 > 1) fails.push(`a block from ${m[1]} holds nested notes`);
+  }
+  return fails;
+}
+
+/** Rows user-rows.ts must never rebuild, derived from the README rules independently. */
+function userRowGuards(input: readonly Message[], resolved: ReturnType<typeof resolveOptions>): number[] {
+  const out = new Set<number>([0]);
+  const userText = input.flatMap((m, k) => (m.role === 'user' && !(m.toolResults ?? []).length && m.text.trim() ? [k] : []));
+  if (resolved.keepRecentUserTurns > 0 && userText.length > 0) {
+    for (let k = userText[Math.max(0, userText.length - resolved.keepRecentUserTurns)]!; k < input.length; k += 1) out.add(k);
+  }
+  for (let k = Math.max(0, input.length - resolved.preserveRecentMessages); k < input.length; k += 1) out.add(k);
+  userText.forEach((k, j) => {
+    if (j === 0 || input[userText[j - 1]!]!.text.startsWith('This session is being continued')) out.add(k);
+  });
+  return [...out];
+}
+
 /** Every invariant of one run. */
 export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const failures: string[] = [];
@@ -260,27 +291,41 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4. Text is never edited or dropped, except an old reply leading into a call: that one may be
-  //    folded, shortened, into the rebuilt row holding the call (shrink.ts). Rows without tool
-  //    blocks are otherwise never removed, and never rebuilt on their own.
+  // 4. Rows without tool blocks are never removed, and text is never edited, except:
+  //    - a teammate row's (user-rows.ts), which keeps its header and its blocks in order, each
+  //      carrying at most one note, and never grows;
+  //    - an old reply leading into a call, which may be folded, shortened, into the rebuilt row
+  //      holding the call (shrink.ts).
+  //    Typed prompts and guarded rows stay the input's own; nothing else is rebuilt on its own.
   const toolRowTexts = new Set(input.filter((m) => m.toolUses.length > 0 && m.text.trim()).map((m) => m.text));
   const rebuiltTools = session.filter((m) => !inputSet.has(m) && m.toolUses.length > 0);
   const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
+  const plainSet = new Set<Message>(plainIn);
   const outSet = new Set<Message>(session);
   const keptPlain = plainIn.filter((m) => outSet.has(m));
-  const keptOrder = session.filter((m) => keptPlain.includes(m));
+  const keptOrder = session.filter((m) => plainSet.has(m));
   if (keptOrder.some((m, i) => m !== keptPlain[i])) fail('plain rows reordered');
+  const isPlain = (m: Message) => m.toolUses.length === 0 && !(m.toolResults ?? []).length;
+  const teammateOut = session.filter((m) => !inputSet.has(m) && isPlain(m) && m.role === 'user' && isTeammateText(m.text));
+  let teammateAt = 0;
   let foldedNotes = 0;
-  for (const m of plainIn) {
-    if (outSet.has(m)) continue;
+  plainIn.forEach((m, i) => {
+    if (outSet.has(m)) return;
+    if (m.role === 'user') {
+      const out = teammateOut[teammateAt++];
+      if (!out || !isTeammateText(m.text)) fail(`a non-teammate plain row ${i} was rebuilt or removed`);
+      else for (const f of teammateEdit(m.text, out.text)) fail(`teammate row ${i}: ${f}`);
+      return;
+    }
     const host = rebuiltTools.find((h) => h.text.includes(m.text) || (m.text.length >= MIN_SHRINK_TEXT_CHARS && h.text.includes(m.text.slice(0, 200))));
-    if (m.role !== 'assistant' || !m.text.trim() || !host) fail(`plain row "${m.text.slice(0, 30)}" removed`);
+    if (!m.text.trim() || !host) fail(`plain row "${m.text.slice(0, 30)}" removed`);
     else if (!host.text.includes(m.text)) foldedNotes += 1;
-  }
+  });
+  if (teammateAt !== teammateOut.length) fail(`${teammateOut.length - teammateAt} rebuilt teammate rows with no source`);
   for (const h of rebuiltTools) foldedNotes -= Math.max(0, h.text.split(SHRINK_NOTE_PREFIX).length - 1);
   if (foldedNotes > 0) fail('a folded reply was cut without a note');
   for (const m of session) {
-    if (inputSet.has(m) || m.toolUses.length > 0 || (m.toolResults ?? []).length > 0) continue;
+    if (inputSet.has(m) || !isPlain(m) || teammateOut.includes(m)) continue;
     if (!toolRowTexts.has(m.text)) fail(`plain row rebuilt on its own: "${m.text.slice(0, 30)}"`);
   }
   for (const h of rebuiltTools) {
@@ -289,6 +334,8 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (piece.trim() && !input.some((m) => m.text.includes(piece))) fail(`rebuilt row text invented: "${piece.slice(0, 30)}"`);
     }
   }
+  // The guards are the teammate pass's (user rows); old replies (shrink.ts) follow the stale window.
+  for (const k of userRowGuards(input, resolved)) if (input[k]!.role === 'user' && plainSet.has(input[k]!) && !session.includes(input[k]!)) fail(`guarded plain row ${k} was rebuilt`);
 
   // 10. A tool input is only ever shortened (shrink.ts): same id, same keys, each changed string a
   //     long one cut to its start plus one note, never on a pinned call or an excluded tool.

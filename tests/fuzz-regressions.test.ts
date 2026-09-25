@@ -4,7 +4,7 @@
  * to clear the matching KNOWN_BUG flag in fuzz-hook.test.ts.
  */
 import { describe, expect, it } from 'vitest';
-import { MAX_CONCURRENT_FORKS, scoreWithClaude, type ForkFn, type ForkReply, type ToolCall } from '../src/index.js';
+import { compactUserRows, MAX_CONCURRENT_FORKS, resolveOptions, scoreWithClaude, type ForkFn, type ForkReply, type Message, type ToolCall } from '../src/index.js';
 
 function call(id: string): ToolCall {
   return { id, tool_use_id: `u-${id}`, tool: 'Bash', input: { command: `echo ${id}` }, callIndex: 1, resultIndex: 2, resultChars: 5000, isError: false, pinned: false };
@@ -94,5 +94,18 @@ describe('review 2 regressions', () => {
     // Let every fork that is still queued or running settle before judging.
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(lateStarts).toEqual([]);
+  });
+
+  // Found by review of c6815d5: the repeat check tokenized an idle notification's raw JSON, where
+  // `\ndeadbeef12345678` reads as `ndeadbeef12345678`, so the quote between the two copies was
+  // missed and the older copy was stubbed: the token was gone before the quote.
+  it('an idle token quoted between two identical copies survives', () => {
+    const m = (role: Message['role'], text: string): Message => ({ role, text, toolUses: [] });
+    const idle = (result: string) => m('user', `Another Claude session sent a message:\n<teammate-message teammate_id="x" color="blue">\n${JSON.stringify({ type: 'idle_notification', from: 'x', result })}\n</teammate-message>`);
+    const result = `${'p'.repeat(500)}\ndeadbeef12345678 is the commit`;
+    const input = [m('user', 'Start'), m('assistant', 'go'), idle(result), m('assistant', 'use deadbeef12345678'), idle(result),
+      ...Array.from({ length: 10 }, (_, i) => m(i % 2 ? 'assistant' : 'user', `f${i}`))];
+    const out = compactUserRows(input, resolveOptions({ preserveRecentMessages: 2, dedupePeerNotice: false }));
+    expect(out.messages.slice(0, 3).map((x) => x.text).join('\n')).toContain('deadbeef12345678');
   });
 });

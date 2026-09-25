@@ -18,6 +18,8 @@ describe('fuzz: transcript integrity', () => {
     let threw = 0;
     let shrunk = 0;
     let merged = 0;
+    // The teammate-row pass (user-rows.ts) must actually run: each of its cuts on some seed.
+    const cuts = { restated: 0, repeated: 0, stale: 0, notices: 0 };
     for (let seed = 1; seed <= SEEDS; seed += 1) {
       const transcript = genTranscript(seed);
       let run;
@@ -33,6 +35,8 @@ describe('fuzz: transcript integrity', () => {
       // A multi-row merge: one rebuilt row holding the calls of more than one input row.
       const rowOf = new Map(transcript.messages.flatMap((m) => m.toolUses.map((u) => [u.tool_use_id, m] as const)));
       if (run.session.some((m) => !transcript.messages.includes(m as never) && new Set(m.toolUses.map((u) => rowOf.get(u.tool_use_id))).size > 1)) merged += 1;
+      const users = run.result.stats.userRows;
+      if (users) for (const k of Object.keys(cuts) as Array<keyof typeof cuts>) cuts[k] += users[k] > 0 ? 1 : 0;
       if (seed % DETERMINISM_EVERY === 0) {
         const again = await runCase(seed, genTranscript(seed));
         if (fingerprint(again) !== fingerprint(run)) failures.push(`seed ${seed}: a second run gave a different output`);
@@ -42,5 +46,6 @@ describe('fuzz: transcript integrity', () => {
     // Shortening (shrink.ts), parallel groups merged into one row included, is exercised.
     expect(shrunk).toBeGreaterThan(SEEDS / 10);
     expect(merged).toBeGreaterThan(0);
+    for (const [k, n] of Object.entries(cuts)) expect(n, `seeds with a ${k} cut`).toBeGreaterThan(SEEDS / 50);
   }, Math.max(60_000, SEEDS * 100));
 });

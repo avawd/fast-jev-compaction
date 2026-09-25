@@ -6,6 +6,7 @@ import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
 import { shrinkOld } from './shrink.js';
 import { truncatedResultText } from './truncate.js';
+import { compactUserRows } from './user-rows.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -29,6 +30,11 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   stripMcpFurniture: true,
   shrinkOldInputs: true,
   shrinkOldText: true,
+  dedupeTeammates: true,
+  trimStaleTeammates: true,
+  dedupePeerNotice: true,
+  teammateHeadChars: 1000,
+  keepRecentUserTurns: 3,
 };
 
 function finite(value: number | undefined, fallback: number): number {
@@ -61,6 +67,11 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
     shrinkOldInputs: flag(options.shrinkOldInputs, DEFAULT_OPTIONS.shrinkOldInputs),
     shrinkOldText: flag(options.shrinkOldText, DEFAULT_OPTIONS.shrinkOldText),
+    dedupeTeammates: flag(options.dedupeTeammates, DEFAULT_OPTIONS.dedupeTeammates),
+    trimStaleTeammates: flag(options.trimStaleTeammates, DEFAULT_OPTIONS.trimStaleTeammates),
+    dedupePeerNotice: flag(options.dedupePeerNotice, DEFAULT_OPTIONS.dedupePeerNotice),
+    teammateHeadChars: Math.max(0, Math.floor(finite(options.teammateHeadChars, DEFAULT_OPTIONS.teammateHeadChars))),
+    keepRecentUserTurns: Math.max(0, Math.floor(finite(options.keepRecentUserTurns, DEFAULT_OPTIONS.keepRecentUserTurns))),
     ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
 }
@@ -250,7 +261,8 @@ function build(
     return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
   });
   const applied = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
-  const shrunk = shrinkOld(applied, source, calls, resolved);
+  const users = compactUserRows(applied, resolved);
+  const shrunk = shrinkOld(users.messages, source, calls, resolved);
   const kept = shrunk.messages;
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;
   const stats: CompactResult['stats'] = {
@@ -271,6 +283,7 @@ function build(
     claude: outcome.claude,
     ms: Date.now() - started,
   };
+  if (users.stats.rows > 0) stats.userRows = users.stats;
   if (outcome.claudeMs !== undefined) stats.claudeMs = outcome.claudeMs;
   if (outcome.forks && outcome.forks.length > 0) stats.forks = outcome.forks;
   if (outcome.wait) stats.wait = outcome.wait;
