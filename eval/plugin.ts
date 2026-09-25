@@ -61,6 +61,11 @@ export interface PluginApi {
   reductionRatio: (result: PluginResult) => number;
   /** Which export `reductionRatio` resolved to, so a report says what the gate column measured. */
   gateMeasure: 'gateRatio' | 'reductionRatio';
+  /**
+   * What the hook does with a gate result (prune, skip or summary) by trigger: the branch's
+   * `gateOutcome`, or for branches without one, a summary below the gate whatever the trigger.
+   */
+  gateOutcome: (ratio: number, min: number, trigger: string) => 'prune' | 'skip' | 'summary';
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -101,6 +106,9 @@ export async function loadPlugin(srcArg?: string): Promise<PluginApi> {
     // `reductionRatio` (whole transcript). Use whichever the hook would, so the gate column matches it.
     reductionRatio: (typeof mod['gateRatio'] === 'function' ? mod['gateRatio'] : mod['reductionRatio']) as PluginApi['reductionRatio'],
     gateMeasure: typeof mod['gateRatio'] === 'function' ? 'gateRatio' : 'reductionRatio',
+    gateOutcome: typeof mod['gateOutcome'] === 'function'
+      ? (mod['gateOutcome'] as PluginApi['gateOutcome'])
+      : (ratio, min) => (ratio >= min ? 'prune' : 'summary'),
   };
 }
 

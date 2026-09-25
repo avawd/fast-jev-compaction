@@ -77,10 +77,23 @@ describe('compact with the Stage 2a rules', () => {
     expect(resultText(reached.messages, 'u1')).toContain('deadbeef1234');
     expect(resultText(reached.messages, 'u1')!.length).toBeLessThan(2200);
     expect(reached.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'drop_result', headChars: 2013 });
-    // Out of reach (past MAX_PINNED_HEAD and the tail): kept verbatim.
+    // Out of reach (past MAX_PINNED_HEAD and the tail): the head plus a window around the token.
     const far = `${'x'.repeat(6000)} deadbeef1234 ${'y'.repeat(5000)}`;
-    const kept = await run(far);
-    expect(resultText(kept.messages, 'u1')).toBe(far);
+    const excerpted = await run(far);
+    const text = resultText(excerpted.messages, 'u1')!;
+    expect(text).toContain(' deadbeef1234 ');
+    expect(text.startsWith('x'.repeat(300))).toBe(true);
+    expect(text).toContain(TRUNCATION_NOTE_PREFIX);
+    expect(text).toMatch(/\[… 5501 chars omitted …\]/);
+    expect(text.length).toBeLessThan(1000);
+    expect(excerpted.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'drop_result', windows: [[5801, 6213]] });
+    // Too many far tokens to excerpt within the cap: kept verbatim.
+    const many = Array.from({ length: 30 }, (_, k) => `${'x'.repeat(1000)} deadbeef${String(k).padStart(4, '0')} `).join('');
+    const quoting = [msg('user', 'go'), use('u1', 'Bash', { command: './find.sh' }, 'Looking.'), res('u1', many),
+      use('u2', 'Bash', { command: 'echo ' + Array.from({ length: 30 }, (_, k) => `deadbeef${String(k).padStart(4, '0')}`).join(' ') }, 'Showing.'),
+      res('u2', 'ok'), ...tail(8)];
+    const kept = await compact(quoting, dropAll, {});
+    expect(resultText(kept.messages, 'u1')).toBe(many);
     expect(kept.decisions.find((d) => d.id === 't1')).toMatchObject({ action: 'keep', source: 'pinned' });
     // Pin off: the call goes, token and all.
     expect(resultText((await run(near, { pinReferenced: false })).messages, 'u1')).toBeUndefined();

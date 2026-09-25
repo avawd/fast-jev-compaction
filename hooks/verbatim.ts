@@ -4,13 +4,18 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio } from '../src/compact.js';
-import { gateRatio } from '../src/gate.js';
+import { gateOutcome, gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
 
 export type HookConfig = {
   compactAtPercent: number;
+  /**
+   * Context tokens at which compaction is requested, whatever the percent reads: on a 1M window
+   * the percent alone waits until 600k, too late to prune verbatim in time. 0 turns it off.
+   */
+  compactAtTokens: number;
   minReductionRatio: number;
   preserveRecentMessages: number;
   truncateHeadChars: number;
@@ -33,6 +38,12 @@ export type HookConfig = {
   keepThreshold: number;
   /** Most calls per fork; more candidates run as concurrent forks. Whole number in [1, 400]. */
   forkChunkSize: number;
+  /**
+   * Results shorter than this are kept without asking the forks. Every id asked about costs fork
+   * output time, and on a 1,001-message session the 49 results under 200 chars were 24% of the
+   * candidates but at most 1.5% of the tool output. Whole number, at least 0 (0 asks about all).
+   */
+  minCandidateChars: number;
 };
 
 /**
@@ -56,6 +67,7 @@ const MAX_FORK_CHUNK_SIZE = 400;
 
 const DEFAULTS: HookConfig = {
   compactAtPercent: 60,
+  compactAtTokens: 300_000,
   minReductionRatio: 0.25,
   preserveRecentMessages: 6,
   truncateHeadChars: 300,
@@ -70,6 +82,7 @@ const DEFAULTS: HookConfig = {
   stripMcpFurniture: true,
   keepThreshold: 0.5,
   forkChunkSize: 60,
+  minCandidateChars: 200,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -92,6 +105,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     // Below 1% every turn would compact; a gate at or under 0 would bill a fork for a transcript it hands
     // back unchanged, and one at 1 or more could never be met.
     compactAtPercent: clamp(num(options, 'compactAtPercent', DEFAULTS.compactAtPercent), 1, 100),
+    compactAtTokens: Math.max(0, num(options, 'compactAtTokens', DEFAULTS.compactAtTokens)),
     minReductionRatio: clamp(num(options, 'minReductionRatio', DEFAULTS.minReductionRatio), 0.01, 0.95),
     preserveRecentMessages: num(options, 'preserveRecentMessages', DEFAULTS.preserveRecentMessages),
     truncateHeadChars: num(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
@@ -108,6 +122,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     stripMcpFurniture: bool(options, 'stripMcpFurniture', DEFAULTS.stripMcpFurniture),
     keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
+    minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
   };
 }
 
@@ -167,6 +182,7 @@ export async function compactSession(
     maxCandidates: config.maxCandidates,
     keepThreshold: config.keepThreshold,
     chunkSize: config.forkChunkSize,
+    minCandidateChars: config.minCandidateChars,
     messageCount: messages.length,
     claudeTimeoutMs: config.claudeTimeoutMs,
     claudeAwaitMs: Math.max(config.claudeTimeoutMs, CLAUDE_AWAIT_MS),
@@ -174,7 +190,9 @@ export async function compactSession(
       ? () => false
       : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
   });
-  const result = await compact(messages, scorer, cwd ? { ...config, cwd } : config);
+  // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
+  const options = { ...config, escalateBelow: config.minReductionRatio };
+  const result = await compact(messages, scorer, cwd ? { ...options, cwd } : options);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -186,7 +204,8 @@ function claudeStage(stats: CompactResult['stats']): string {
 export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
-    `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}`;
+    `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
+    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */
@@ -246,6 +265,7 @@ function mayFork(event: SessionCompactInput): boolean {
 
 /** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
 const EMPTY_SKIP_REASON = 'nothing to compact yet';
+const ALREADY_RUNNING = 'a compaction of this transcript is already running';
 
 /**
  * `$.session.compact()` rejects in a headless (-p / SDK) session on 2.1.281, where compaction
@@ -266,7 +286,7 @@ async function requestCompaction($: EngineInterface): Promise<'compacted' | 'ret
     // Only the headless refusal is final: 2.1.281 also rejects while a turn runs, which the
     // next turn can get past.
     if (!HEADLESS_REFUSAL.test(text)) {
-      notify($, `auto-compact not requested this turn (${text}); will try again next turn`, false);
+      debug($, `auto-compact refused for now (${text})`);
       return 'retry';
     }
     notify($, `auto-compact off for this session: $.session.compact() was refused (${text}). ` +
@@ -274,6 +294,86 @@ async function requestCompaction($: EngineInterface): Promise<'compacted' | 'ret
     return 'off';
   }
 }
+
+/**
+ * What the auto-compaction keeps between turns. `awaitingDrop` is set once this plugin's own request
+ * compacted and cleared when usage reads under the threshold again: without it a prune that leaves
+ * context above the threshold is followed by another compaction on the very next turn, which has
+ * little left to prune and falls back to a full built-in summary.
+ */
+type AutoCompactState = {
+  compacting: boolean;
+  off: boolean;
+  awaitingDrop: boolean;
+  retry?: { cancel: () => void };
+  retriesLeft: number;
+};
+
+/**
+ * Between retries of a compaction the engine refused because a turn was running. Seen live: in a
+ * busy session (teammate messages, task notices) the next turn is already running when a turn end
+ * asks, so asking only at turn ends never gets through. The timer asks in the gaps between turns.
+ */
+const AUTO_RETRY_MS = 3_000;
+const AUTO_RETRIES = 20;
+
+function overThreshold(context: { percent?: number; tokens?: number }, config: HookConfig): boolean {
+  const percent = context.percent ?? 0;
+  const tokens = context.tokens ?? 0;
+  return percent >= config.compactAtPercent || (config.compactAtTokens > 0 && tokens >= config.compactAtTokens);
+}
+
+/**
+ * Requests a compaction when context is over the threshold. `fromTimer` marks a retry: a turn end
+ * leaves a pending retry to its timer rather than asking twice. Top-level because the engine
+ * follows `$` only into functions declared at the top of the file.
+ */
+async function autoCompact($: EngineInterface, state: AutoCompactState, config: HookConfig, fromTimer: boolean): Promise<void> {
+  if (state.compacting || state.off || (!fromTimer && state.retry)) return;
+  state.compacting = true;
+  try {
+    const { context } = await $.session.usage();
+    const tokens = context.tokens === undefined ? '' : `, ${Math.round(context.tokens / 1000)}k tokens`;
+    const limit = config.compactAtTokens > 0 ? ` or ${Math.round(config.compactAtTokens / 1000)}k tokens` : '';
+    debug($, `context ${context.percent ?? 0}%${tokens} (compacts at ${config.compactAtPercent}%${limit})`);
+    if (!overThreshold(context, config)) {
+      state.awaitingDrop = false;
+      return;
+    }
+    if (state.awaitingDrop) {
+      debug($, `waiting for context to drop under the threshold before compacting again`);
+      return;
+    }
+    const outcome = await requestCompaction($);
+    state.off = outcome === 'off';
+    state.awaitingDrop = outcome === 'compacted';
+    if (outcome === 'retry') scheduleRetry($, state, config, fromTimer);
+  } catch (error) {
+    notify($, `auto-compact skipped (${message(error)})`, false);
+  } finally {
+    state.compacting = false;
+  }
+}
+
+function scheduleRetry($: EngineInterface, state: AutoCompactState, config: HookConfig, fromTimer: boolean): void {
+  if (!fromTimer) state.retriesLeft = AUTO_RETRIES;
+  if (state.retriesLeft <= 0) {
+    debug($, 'auto-compact: gave up retrying; the next turn end asks again');
+    return;
+  }
+  state.retriesLeft -= 1;
+  state.retry = $.clock.after(AUTO_RETRY_MS, () => {
+    state.retry = undefined;
+    void autoCompact($, state, config, true);
+  });
+}
+
+/**
+ * This plugin's version, logged with the config so a session still running an old copy is obvious
+ * in its debug log (one ran 0.4.0 for days unnoticed). A test holds it equal to package.json and
+ * .claude-plugin/plugin.json; bump all three together.
+ */
+export const PLUGIN_VERSION = '0.5.2';
 
 /** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
 const HEADLESS_REFUSAL = /not available in a headless/;
@@ -300,23 +400,27 @@ export async function sessionCwd($: { session: { cwd: () => Promise<string> } })
 
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
-  let compacting = false;
-  let autoCompactOff = false;
-  // Set once this plugin's own request compacted; cleared when usage reads under the threshold again.
-  // Without it a prune that leaves context above the threshold is followed by another compaction on
-  // the very next turn, which has little left to prune and falls back to a full built-in summary.
-  let awaitingDrop = false;
+  const auto: AutoCompactState = { compacting: false, off: false, awaitingDrop: false, retriesLeft: 0 };
+  // Single flight, per transcript (main or a subagent's) and per kind (a background precompute does
+  // not hold up a foreground compaction). The engine dispatches again while the forks of the first
+  // run are still out (seen: 7 at once on a resumed 965k-token session, 7 summary requests). The
+  // extra ones are skipped, not handed to next(): next() would start a concurrent built-in summary
+  // of the same transcript, which is what produced the 7 summaries, and whichever installs last
+  // would overwrite the other. A skip leaves the conversation as it is; the running compaction
+  // installs, and if the engine still needs room it asks again after that.
+  const inFlight = new Set<string>();
   // register() has no `$`, so the effective config is logged by the first hook that runs.
   let configLogged = false;
 
   on('session.compact', async ($, event, next) => {
-    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
+    if (!configLogged) configLogged = debug($, `verbatim-compaction ${PLUGIN_VERSION} config ${JSON.stringify(config)}`);
     // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
     // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
     const cancelSleep = new AbortController();
     // Once next() has been called the compaction is core's: a throw from it is rethrown, never
     // answered with a second next().
     let handedOff = false;
+    let flightKey: string | undefined;
     const handOff = () => {
       handedOff = true;
       return next(event);
@@ -327,56 +431,65 @@ export const register: Register = (on: On, options: PluginOptions) => {
         notify($, EMPTY_SKIP_REASON, false);
         return { skip: EMPTY_SKIP_REASON };
       }
-      if (event.messages.length >= MAX_MESSAGES) {
-        notify($, `${event.messages.length} messages: handed to the built-in compaction untouched`, false);
-        return handOff();
-      }
-      if (wantsSummary(event)) return handOff();
       // A precompute runs in the background ahead of the threshold; what it returns is kept and
       // installed by the compaction that comes, so it runs the real pipeline, gives the forks the
       // ceiling, and reports in the log only (nobody is looking at a toast for it).
       const background = event.trigger === 'precompute';
       const prefix = background ? 'precompute: ' : '';
+      // Taken before any hand-off, and held until the hand-off settles (every path returns
+      // `await handOff()`): a built-in summary started by next() is part of this flight.
+      const key = `${event.agentId ?? 'main'}:${background ? 'precompute' : 'foreground'}`;
+      if (inFlight.has(key)) {
+        // A typed /compact is told why nothing happened; an automatic one only logs it.
+        notify($, `skipped: ${ALREADY_RUNNING}${event.trigger === 'manual' ? '; /compact again once it finishes if you still need room' : ''}`,
+          event.trigger === 'manual');
+        return { skip: ALREADY_RUNNING };
+      }
+      inFlight.add(key);
+      flightKey = key;
+      if (event.messages.length >= MAX_MESSAGES) {
+        notify($, `${event.messages.length} messages: handed to the built-in compaction untouched`, false);
+        return await handOff();
+      }
+      if (wantsSummary(event)) return await handOff();
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
       const forks = describeForks(result);
       if (forks) debug($, forks);
-      if (gateRatio(result) < config.minReductionRatio) {
+      const outcome = gateOutcome(gateRatio(result), config.minReductionRatio, event.trigger);
+      if (outcome === 'skip') {
+        // The plugin's own early request: nothing needs the room yet, and a summary would lose every
+        // verbatim fact. autoCompact waits for context to drop (Claude Code's own compaction still runs
+        // at its threshold), and a pending retry is pointless now.
+        auto.awaitingDrop = true;
+        auto.retry?.cancel();
+        auto.retry = undefined;
+        const reason = `pruning would free only ${Math.round(gateRatio(result) * 100)}% of tool output ` +
+          `(under ${Math.round(config.minReductionRatio * 100)}%); left as is until Claude Code's own compaction`;
+        notify($, `skipped: ${reason} (${summarize(result)})`, false);
+        return { skip: reason };
+      }
+      if (outcome === 'summary') {
         notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
-        return handOff();
+        return await handOff();
       }
       notify($, `${prefix}kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, !background);
       return { messages };
     } catch (error) {
       if (handedOff) throw error;
       notify($, `fallback to built-in summary (${message(error)})`, event.trigger !== 'precompute');
-      return handOff();
+      return await handOff();
     } finally {
       cancelSleep.abort();
+      if (flightKey) inFlight.delete(flightKey);
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
-    if (compacting || autoCompactOff || event.agentId !== undefined || event.reason !== 'answer') return next(event);
-    compacting = true;
-    try {
-      const { context } = await $.session.usage();
-      const percent = context.percent ?? 0;
-      debug($, `context ${percent}% (compacts at ${config.compactAtPercent}%)`);
-      if (percent < config.compactAtPercent) awaitingDrop = false;
-      else if (awaitingDrop) debug($, `waiting for context to drop under ${config.compactAtPercent}% before compacting again`);
-      else {
-        const outcome = await requestCompaction($);
-        autoCompactOff = outcome === 'off';
-        awaitingDrop = outcome === 'compacted';
-      }
-    } catch (error) {
-      notify($, `auto-compact skipped (${message(error)})`, false);
-    } finally {
-      compacting = false;
-    }
+    if (!configLogged) configLogged = debug($, `verbatim-compaction ${PLUGIN_VERSION} config ${JSON.stringify(config)}`);
+    if (event.agentId !== undefined || event.reason !== 'answer') return next(event);
+    await autoCompact($, auto, config, false);
     return next(event);
   });
 };

@@ -12,6 +12,8 @@ type Handler = ($: unknown, event: unknown, next: unknown) => Promise<unknown>;
 export interface FakeOptions {
   fork?: (request: { prompt: string }) => Promise<ForkReply>;
   percent?: number | (() => Promise<number>);
+  /** `context.tokens` from `$.session.usage()`; absent when undefined. */
+  tokens?: number | (() => Promise<number>);
   /** Replaces `$.session.compact`, e.g. with the rejection a headless session gives. */
   sessionCompact?: () => Promise<unknown>;
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
@@ -22,6 +24,8 @@ export interface FakeOptions {
   nextThrows?: Error;
   /** Makes `next()` throw synchronously, as a validating engine may. */
   nextThrowsSync?: Error;
+  /** Awaited inside `next()` before it settles (e.g. a pending built-in summary). */
+  nextWait?: () => Promise<void>;
   /** Hands the hook a `next` without a `signal`. */
   noSignal?: boolean;
 }
@@ -35,6 +39,10 @@ export interface Harness {
   /** Lines logged with `{ to: 'debug' }`: the debug log only, never the transcript. */
   debugLogs: string[];
   sleeps: Array<{ ms: number; signal?: AbortSignal }>;
+  /** Timers set with `$.clock.after`, not yet fired or cancelled. */
+  timers: Array<{ ms: number; fn: () => void }>;
+  /** Fires every pending timer once (in order) and waits for what they started to settle. */
+  fireTimers: () => Promise<void>;
   usageCalls: number;
   compactCalls: number;
   nextCalls: unknown[];
@@ -68,7 +76,13 @@ export function harness(options: FakeOptions = {}): Harness {
   const h: Harness = {
     compact: (event) => run('session.compact', event),
     turnComplete: (event) => run('turn.complete', event),
-    forkCalls: [], toasts: [], logs: [], debugLogs: [], sleeps: [],
+    forkCalls: [], toasts: [], logs: [], debugLogs: [], sleeps: [], timers: [],
+    fireTimers: async () => {
+      const due = h.timers.splice(0);
+      for (const timer of due) timer.fn();
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
     usageCalls: 0, compactCalls: 0, nextCalls: [],
     signal: controller.signal,
   };
@@ -84,7 +98,9 @@ export function harness(options: FakeOptions = {}): Harness {
       usage: async () => {
         h.usageCalls += 1;
         const p = options.percent;
-        return { context: { percent: typeof p === 'function' ? await p() : (p ?? 0) } };
+        const t = options.tokens;
+        const tokens = typeof t === 'function' ? await t() : t;
+        return { context: { percent: typeof p === 'function' ? await p() : (p ?? 0), window: 1_000_000, ...(tokens === undefined ? {} : { tokens }) } };
       },
       compact: async () => {
         h.compactCalls += 1;
@@ -99,6 +115,11 @@ export function harness(options: FakeOptions = {}): Harness {
       toast: (text: string) => { h.toasts.push(text); options.toast?.(text); },
     },
     clock: {
+      after: (ms: number, fn: () => void) => {
+        const timer = { ms, fn };
+        h.timers.push(timer);
+        return { cancel: () => { const i = h.timers.indexOf(timer); if (i >= 0) h.timers.splice(i, 1); } };
+      },
       sleep: (ms: number, opts?: { signal?: AbortSignal }) => {
         h.sleeps.push({ ms, signal: opts?.signal });
         return options.sleep ? options.sleep(ms, opts) : new Promise<void>(() => {});
@@ -124,6 +145,7 @@ export function harness(options: FakeOptions = {}): Harness {
       if (name === 'session.compact' && Array.isArray(msgs) && msgs.length === 0) {
         throw new Error('next() passed an argument with an empty messages (a compaction leaves at least one)');
       }
+      if (options.nextWait) await options.nextWait();
       if (options.nextThrows) throw options.nextThrows;
       return NEXT_RESULT;
     };

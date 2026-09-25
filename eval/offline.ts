@@ -8,6 +8,8 @@
  *   npm run eval:offline -- --facts <label> [--limit 40]   (prints never-echoed facts; private data, stdout only)
  *   npm run eval:offline -- --facts <label|file> --recall-out eval/recall-x.local.json [--ne 25 --echoed 10 --batch 10 --seed 1]
  *                           (writes a stratified recall set; same as `npm run eval:recall -- gen`)
+ *   npm run eval:offline -- --replay <label|file> [--whole] [--window 400000] [--compact-at 0.6] ...
+ *                           (repeated compactions over one long transcript; see eval/replay.ts)
  *
  * See eval/README.md for what every column means.
  */
@@ -17,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { contextBlob, factSets, resultsById, survival, type FactSets, type Survival } from './facts.ts';
 import { compactedContext, loadSegments, type Segment } from './parse.ts';
 import { ARMS, loadPlugin, runArm, type Arm, type PluginApi } from './plugin.ts';
+import { replayMain } from './replay-cli.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +39,8 @@ export interface ArmReport {
   decisions: Record<string, number>;
   neverEchoed: { survived: number; total: number; pct: number };
   laterRef: { lost: number; total: number };
+  /** Unpinned result bytes a referenced-later pin kept whole (source 'pinned' on an unpinned call). */
+  pinnedWholeBytes?: number;
   filled: number;
   unfilled: number;
 }
@@ -152,7 +157,10 @@ async function evalSegment(
     for (const c of unpinned) removed += c.resultChars - (after.get(c.tool_use_id)?.length ?? 0);
     const s: Survival = survival(facts, run.result.messages, seg.messages);
     const decisions: Record<string, number> = {};
+    const unpinnedIds = new Map(unpinned.map((c) => [c.id, c]));
+    let pinnedWholeBytes = 0;
     for (const d of run.result.decisions) {
+      if (d.source === 'pinned') pinnedWholeBytes += unpinnedIds.get(d.id)?.resultChars ?? 0;
       const key = d.source === 'pinned' ? 'pinned' : `${d.action}:${d.rule ?? d.source}`;
       decisions[key] = (decisions[key] ?? 0) + 1;
     }
@@ -166,6 +174,7 @@ async function evalSegment(
       decisions,
       neverEchoed: { survived: s.neverEchoedSurvived, total: s.neverEchoedTotal, pct: pct(s.neverEchoedSurvived, s.neverEchoedTotal) },
       laterRef: { lost: s.laterRefLost, total: s.laterRefTotal },
+      pinnedWholeBytes,
       filled: run.filled,
       unfilled: run.unfilled,
     };
@@ -219,7 +228,9 @@ function printTable(r: OfflineReport): void {
   console.log('trunc/floor also remove: ' + r.segments.map((s) => `${s.label} ${s.arms.trunc.removedPct}%/${s.arms.floor.removedPct}%`).join(', '));
   for (const s of r.segments) {
     const d = Object.entries(s.arms.rules.decisions).filter(([k]) => !k.startsWith('keep')).map(([k, v]) => `${k}=${v}`).join(' ');
-    console.log(`  ${s.label} rules decisions: ${d || '(none)'}`);
+    const whole = s.arms.rules.pinnedWholeBytes;
+    const pinned = whole ? ` (kept whole by a later-ref pin: ${kb(whole)} = ${pct(whole, s.unpinnedResultBytes)}% of unpinned)` : '';
+    console.log(`  ${s.label} rules decisions: ${d || '(none)'}${pinned}`);
   }
   for (const k of r.skipped) console.log(`  skipped ${k.label}: ${k.reason}`);
 }
@@ -293,6 +304,11 @@ async function main(): Promise<void> {
     }
     if (entry.segment < 0) entry.segment = (await loadSegments(entry.file)).length - 1;
     await printFacts(api, entry, Number(a.get('limit')?.[0] ?? 40));
+    return;
+  }
+
+  if (a.has('replay')) {
+    await replayMain(api, a, corpus);
     return;
   }
 

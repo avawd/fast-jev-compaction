@@ -181,6 +181,7 @@ function handlers(r: Rng): Map<string, Handler> {
   if (chance(r, 0.3)) config['claudeTimeoutMs'] = pick(r, [-1, 500, 45_000, Number.NaN]);
   if (chance(r, 0.3)) config['forkChunkSize'] = pick(r, [0, 1, 7, 1000]);
   if (chance(r, 0.3)) config['minReductionRatio'] = pick(r, [0, 0.25, 0.99]);
+  if (chance(r, 0.3)) config['minCandidateChars'] = pick(r, [0, 200, -1, 1e9]);
   register(((name: string, h: Handler) => { map.set(name, h); }) as never, config as never);
   return map;
 }

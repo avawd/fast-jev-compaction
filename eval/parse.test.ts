@@ -138,3 +138,26 @@ describe('carriedPrefix / compactedContext', () => {
     expect(ctx.context.map((m) => m.text)).toEqual(['new summary']);
   });
 });
+
+describe('hidden (thinking) characters', () => {
+  it('records per message the thinking and signature characters the hook never sees', async () => {
+    const file = fixture([
+      user('go'),
+      assistant('m1', { type: 'thinking', thinking: 'abcd', signature: 'SIG' }),
+      assistant('m1', { type: 'text', text: 'ok' }),
+      assistant('m2', { type: 'redacted_thinking', data: 'xxxxx' }),
+    ]);
+    const [seg] = await loadSegments(file);
+    expect(seg!.hiddenChars).toEqual([0, 7, 0, 5]);
+  });
+
+  it('records each assistant row\'s API context tokens where the row has usage', async () => {
+    const file = fixture([
+      user('go'),
+      { type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'a' }], usage: { input_tokens: 3, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 } } },
+      assistant('m2', { type: 'text', text: 'b' }),
+    ]);
+    const [seg] = await loadSegments(file);
+    expect(seg!.usageTokens).toEqual([0, 110, 0]);
+  });
+});

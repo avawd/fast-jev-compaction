@@ -142,15 +142,45 @@ function rowText(m: Message): string {
   return parts.join('\n');
 }
 
-/** Splits a truncated result into its kept head and tail around the note. */
-function splitTruncated(text: string): { head: string; tail: string; omitted: number } | undefined {
+/** The gap marker between excerpt pieces, as README describes it. */
+const OMITTED = /\n\[… (\d+) chars omitted …\](?:\n|$)/g;
+
+/**
+ * Splits a truncated result into its kept head, the note's count, and what follows the note:
+ * the tail, or (for an excerpted result) the kept pieces each with the gap skipped to reach it.
+ * A piece of '' after the last gap means no tail was kept.
+ */
+function splitTruncated(text: string): { head: string; tail: string; omitted: number; pieces?: Array<{ gap: number; text: string }> } | undefined {
   const at = text.indexOf(TRUNCATION_NOTE_PREFIX);
   if (at < 0) return undefined;
   const close = text.indexOf(']', at);
   const omitted = Number(/truncated (\d+) chars/.exec(text.slice(at, close))?.[1]);
   const head = at === 0 ? '' : text.slice(0, at - 1);
   const tail = close + 1 < text.length ? text.slice(close + 2) : '';
-  return { head, tail, omitted };
+  const rest = text.slice(close + 1);
+  if (!rest.startsWith('\n[… ')) return { head, tail, omitted };
+  const found = [...rest.matchAll(OMITTED)];
+  const pieces = found.map((m, k) => ({
+    gap: Number(m[1]),
+    text: rest.slice(m.index! + m[0].length, found[k + 1]?.index ?? rest.length),
+  }));
+  return { head, tail, omitted, pieces };
+}
+
+/** Whether an excerpted result's pieces sit where the gaps say, ending at the source's end. */
+function piecesFit(src: string, head: string, pieces: Array<{ gap: number; text: string }>, omitted: number): string | undefined {
+  let at = head.length;
+  let gaps = 0;
+  for (const piece of pieces) {
+    if (piece.gap <= 0) return `a gap of ${piece.gap}`;
+    at += piece.gap;
+    gaps += piece.gap;
+    if (src.slice(at, at + piece.text.length) !== piece.text) return `a piece is not the source at offset ${at}`;
+    at += piece.text.length;
+  }
+  if (at !== src.length) return `pieces end at ${at}, not ${src.length}`;
+  if (gaps !== omitted) return `note says ${omitted} chars omitted, gaps sum to ${gaps}`;
+  return undefined;
 }
 
 /** Every invariant of one run. */
@@ -246,8 +276,26 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       else if (out.length >= src.length) fail(`drop_result ${d.id} did not shrink`);
       else if (!mcp || exotic || !resolved.stripMcpFurniture) {
         if (!src.startsWith(parts.head)) fail(`drop_result ${d.id} head is not the result's start`);
-        if (!src.endsWith(parts.tail)) fail(`drop_result ${d.id} tail is not the result's end`);
-        if (parts.omitted !== src.length - parts.head.length - parts.tail.length) fail(`drop_result ${d.id} note says ${parts.omitted} chars omitted`);
+        if (parts.pieces) {
+          const bad = piecesFit(src, parts.head, parts.pieces, parts.omitted);
+          if (bad) fail(`drop_result ${d.id} excerpts: ${bad}`);
+        } else {
+          if (!src.endsWith(parts.tail)) fail(`drop_result ${d.id} tail is not the result's end`);
+          if (parts.omitted !== src.length - parts.head.length - parts.tail.length) fail(`drop_result ${d.id} note says ${parts.omitted} chars omitted`);
+        }
+      }
+      if (parts && (parts.pieces !== undefined) !== (d.windows !== undefined)) fail(`drop_result ${d.id} excerpts shown ${parts.pieces ? 'without' : 'for no'} windows`);
+      // Windows: in order, disjoint, non-empty, and a real gap before each one.
+      let last = 0;
+      for (const [start, end] of d.windows ?? []) {
+        if (!(start > last && end > start && end <= src.length)) fail(`drop_result ${d.id} window [${start}, ${end}) is out of order or empty`);
+        last = end;
+      }
+      // Every later-quoted token the result carried survives a truncation.
+      if (resolved.pinReferenced) {
+        for (const token of c.refTokens ?? []) {
+          if (src.includes(token) && !out.includes(token)) fail(`drop_result ${d.id} lost pinned token ${token}`);
+        }
       }
     } else if (out !== src) {
       if (!mcp || !resolved.stripMcpFurniture) fail(`kept non-MCP ${d.id} text changed`);
@@ -283,15 +331,20 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
     for (const d of result.decisions) {
       if (d.source === 'claude' && d.action !== 'keep' && !run.decidable.has(d.id)) fail(`claude ${d.action} on ${d.id}, which no acceptable reply decided`);
     }
-    // Retries, where no deadline can cut them short: a refused, api-error, unparseable or empty
-    // first ask is re-asked whole once, a failed whole re-ask of 2+ calls splits into two halves,
-    // and nothing else is re-asked.
+    // Retries, where no deadline can cut them short: a refused first ask of 2+ calls splits into two
+    // halves at once; any other refused, api-error, unparseable or empty first ask is re-asked whole
+    // once, a failed whole re-ask of 2+ calls splits into two halves, and nothing else is re-asked.
     if (!setup.timed) {
       const retryable = (st: string) => st === 'refused' || st === 'api-error' || st === 'unparseable' || st === 'empty';
       const runs = result.stats.forks ?? [];
       for (let k = 0; k < runs.length; k += 1) {
         const first = runs[k]!;
         if (first.retry) continue;
+        if (first.status === 'refused' && first.candidates >= 2) {
+          const halves = runs.slice(k + 1, k + 3).filter((x) => x.retry === 'half');
+          if (runs[k + 1]?.retry === 'whole' || halves.length !== 2) fail(`fork ${k} (refused, ${first.candidates}) was not split at once`);
+          continue;
+        }
         const whole = runs[k + 1]?.retry === 'whole' ? runs[k + 1] : undefined;
         if (retryable(first.status) !== (whole !== undefined)) fail(`fork ${k} (${first.status}) ${whole ? 'was' : 'was not'} re-asked whole`);
         if (!whole) continue;
@@ -307,6 +360,29 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (!m) { fail(`unreadable candidate line: ${line.slice(0, 120)}`); continue; }
       if (m[2]!.length > INPUT_CHARS) fail(`${m[1]} input shown as ${m[2]!.length} chars (cap ${INPUT_CHARS})`);
       if ((m[3] ?? '').length > PREVIEW_CHARS) fail(`${m[1]} preview shown as ${m[3]!.length} chars (cap ${PREVIEW_CHARS})`);
+      // A command that reaches a host, the network or a container shows no host, address or URL.
+      const command = byId.get(m[1]!)?.input['command'];
+      if (typeof command === 'string' && /(^|[\s;&|(])(ssh|scp|curl|wget|docker)(\s|$)/.test(command) && /:\/\/|@|\b\d{1,3}(\.\d{1,3}){3}\b|\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*\]/.test(m[2]!)) {
+        fail(`${m[1]} shows a host, address or URL of a remote command: ${m[2]}`);
+      }
+      // ...nor a flag's value (attached, `=`-joined or the next word, unless an explicit path) or a dotted host name.
+      if (typeof command === 'string' && /(^|[\s;&|(])(ssh|scp|curl|wget|docker)(\s|$)|\bgh\s+(api|pr\s+merge)\b/.test(command)) {
+        const shown = new Set(m[2]!.split(/\s+/));
+        const raw = command.split(/\s+/).filter((w) => !/['";&|]/.test(w));
+        const explicitPath = (w: string) => /^(\/|\.{1,2}\/|~)/.test(w);
+        raw.forEach((w, k) => {
+          if (/^-[^-]./.test(w) || (w.startsWith('--') && w.includes('='))) {
+            if (shown.has(w)) fail(`${m[1]} shows the flag value in ${w}`);
+          }
+          const next = raw[k + 1];
+          if (/^-/.test(w) && next !== undefined && !next.startsWith('-') && !explicitPath(next) && command.includes(`${w} ${next}`) && shown.has(next)) {
+            fail(`${m[1]} shows ${next}, the value after ${w}`);
+          }
+        });
+        for (const word of shown) {
+          if (!explicitPath(word) && /^[\w-]+(\.[\w-]+)+([:/]|$)/.test(word)) fail(`${m[1]} shows the host-like word ${word}`);
+        }
+      }
     }
     // Every candidate belongs to exactly one chunk: a prompt either opens a chunk with ids no
     // earlier prompt had, or re-asks a subset of exactly one earlier chunk (whole or half).

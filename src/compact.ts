@@ -1,9 +1,10 @@
 import { annotateCalls } from './annotate.js';
 import { collectToolCalls } from './calls.js';
-import { resultChars } from './gate.js';
+import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
+import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
-import { sliceWhole, sliceWholeEnd } from './text.js';
+import { truncatedResultText } from './truncate.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -13,6 +14,7 @@ import type {
   Scorer,
   ScoreOutcome,
   ToolCall,
+  Verdict,
 } from './types.js';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -25,8 +27,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   pinReferenced: true,
   stripMcpFurniture: true,
 };
-
-export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -60,22 +60,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
   };
 }
 
-/** A result this short is left whole: the note would cost about as much as it saves. */
-function shrinks(resultChars: number, headChars: number, tailChars = 0): boolean {
-  return resultChars > headChars + tailChars + 120;
-}
-
-function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
-  if (!shrinks(text.length, headChars, tailChars)) return text;
-  const kept = sliceWhole(text, headChars);
-  const end = sliceWholeEnd(text, tailChars);
-  const head = kept.length > 0 ? `${kept}\n` : '';
-  const tail = end.length > 0 ? `\n${end}` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length - end.length} chars of this tool result${
-    isError ? ' (error)' : ''
-  }; re-run the tool if needed]${tail}`;
-}
-
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
  * together with its result; a dropped result keeps a bounded head and note.
@@ -93,11 +77,13 @@ export function applyDecisions(
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
   const heads = new Map<string, number>();
+  const windows = new Map<string, Array<[number, number]>>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') continue;
     actions.set(call.tool_use_id, decision.action);
     if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
+    if (decision.windows && decision.windows.length > 0) windows.set(call.tool_use_id, decision.windows);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -117,7 +103,13 @@ export function applyDecisions(
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
         const head = heads.get(result.tool_use_id) ?? headChars;
-        const text = truncatedResultText(result.text, result.isError ?? false, head, tails.get(result.tool_use_id));
+        const text = truncatedResultText(
+          result.text,
+          result.isError ?? false,
+          head,
+          tails.get(result.tool_use_id),
+          windows.get(result.tool_use_id),
+        );
         return text === result.text
           ? result
           : {
@@ -152,21 +144,28 @@ export function applyDecisions(
 }
 
 /**
- * A drop_call on a call whose assistant row has no text becomes a drop_result that keeps
- * nothing but the note. Claude Code hands over one row per content block, so that row's
- * thinking block is a sibling row with no text of its own: removing the tool_use row would
- * leave an assistant message holding only thinking. Keeping the call costs its input alone.
+ * A drop_call on a call whose assistant row has no text becomes a drop_result. Claude Code
+ * hands over one row per content block, so that row's thinking block is a sibling row with no
+ * text of its own: removing the tool_use row would leave an assistant message holding only
+ * thinking. Keeping the call costs its input alone.
+ *
+ * A rule's drop keeps nothing but the note: a later call superseded the result (the repeated
+ * search, the retry that worked), so its head is a copy. Claude's `drop` keeps the default head
+ * and no tail. It used to keep no head either, and the recall eval measured that as the largest
+ * single loss: 9 of the 15 live misses Claude caused sat within the first 300 characters.
  */
 function preferTruncation(decision: CallDecision, call: ToolCall, messages: readonly Message[]): CallDecision {
   if (decision.action !== 'drop_call') return decision;
   if ((messages[call.callIndex]?.text ?? '').trim().length > 0) return decision;
-  return { ...decision, action: 'drop_result', headChars: 0 };
+  if (decision.source === 'rule') return { ...decision, action: 'drop_result', headChars: 0 };
+  return { ...decision, action: 'drop_result', headOnly: true };
 }
 
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
 function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
   if (decision.action !== 'drop_result') return decision;
-  return shrinks(text.length, decision.headChars ?? headChars, tailChars) ? decision : { ...decision, action: 'keep' };
+  const unchanged = truncatedResultText(text, false, decision.headChars ?? headChars, tailChars, decision.windows) === text;
+  return unchanged ? { ...decision, action: 'keep' } : decision;
 }
 
 /** Characters of text, tool input and tool output a message holds. */
@@ -201,15 +200,33 @@ export async function compact(
   const started = Date.now();
   const resolved = resolveOptions(options);
   const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages), messages, resolved);
-  const charsBefore = messages.reduce((sum, m) => sum + messageChars(m), 0);
   const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
   const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
     ? await scorer(calls)
     : { verdicts: new Map(), claude: 'skipped' };
+  const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started);
+  const gate = options.escalateBelow;
+  if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
+  const strict = tier2Options(resolved);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
+  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
+  if (!(gateRatio(second) > gateRatio(first))) return first;
+  return { ...second, stats: { ...second.stats, tier: 2 } };
+}
 
+/** Decisions from verdicts, shaped (pins, tails), applied; the stats of what happened. */
+function build(
+  messages: readonly Message[],
+  source: readonly Message[],
+  calls: readonly ToolCall[],
+  verdicts: ReadonlyMap<string, Verdict>,
+  resolved: ResolvedCompactOptions,
+  outcome: ScoreOutcome,
+  started: number,
+): CompactResult {
   const scored: CallDecision[] = calls.map((call) => {
     if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
-    const verdict = outcome.verdicts.get(call.id);
+    const verdict = verdicts.get(call.id);
     if (!verdict) return { id: call.id, tool: call.tool, action: 'keep', source: 'default' };
     const decision: CallDecision = {
       id: call.id,
@@ -232,7 +249,7 @@ export async function compact(
   const stats: CompactResult['stats'] = {
     messagesBefore: messages.length,
     messagesAfter: kept.length,
-    charsBefore,
+    charsBefore: messages.reduce((sum, m) => sum + messageChars(m), 0),
     resultCharsBefore: resultChars(messages),
     charsAfter: kept.reduce((sum, m) => sum + messageChars(m), 0),
     calls: calls.length,

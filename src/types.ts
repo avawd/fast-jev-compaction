@@ -62,7 +62,9 @@ export type RuleName =
   | 'bash_read_superseded'
   | 'readonly_superseded'
   | 'agent_boilerplate'
-  | 'stale_age';
+  | 'stale_age'
+  /** Tier 2 only: a result an earlier compaction truncated, older than the tier's age, cut further. */
+  | 'stale_truncation';
 
 /** A non-keep decision about one call, and who made it. */
 export interface Verdict {
@@ -134,6 +136,13 @@ export interface CallDecision {
   rule?: RuleName;
   /** Characters of the result to keep when it differs from `truncateHeadChars`. */
   headChars?: number;
+  /** Keep no tail, whatever the tool: a Claude `drop` keeps its head only (see compact.ts preferTruncation). */
+  headOnly?: boolean;
+  /**
+   * `[start, end)` excerpts of the result to keep between its head and tail, in order and
+   * disjoint, around later-quoted tokens no head could reach (see `excerptPlan`).
+   */
+  windows?: Array<[number, number]>;
 }
 
 export interface CompactOptions {
@@ -151,6 +160,11 @@ export interface CompactOptions {
   stripMcpFurniture?: boolean;
   /** The session's working directory (absolute), for resolving relative paths. Unknown if absent. */
   cwd?: string;
+  /**
+   * The caller's gate (`gateRatio`). When set and missed on a transcript an earlier compaction
+   * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
+   */
+  escalateBelow?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -187,6 +201,8 @@ export interface CompactResult {
     /** Per-fork timings of the Claude stage; absent when no fork ran. */
     forks?: ForkRun[];
     wait?: 'race' | 'await';
+    /** 2 when the stricter second tier produced this result (see CompactOptions.escalateBelow). */
+    tier?: 2;
     ms: number;
   };
 }

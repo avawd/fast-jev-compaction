@@ -57,7 +57,7 @@ function fact(r: Rng, n: number): string {
   if (!/\d/.test(hex)) hex += '1';
   return pick(r, [
     `#${900 + n}`,
-    `BST-${4400 + n}`,
+    `ABC-${4400 + n}`,
     hex,
     `https://github.com/o/r/pull/${700 + n}`,
     `/srv/x/proj/lib/mod${n}.ts`,
@@ -101,6 +101,33 @@ function secretCommand(r: Rng, i: number, secrets: string[]): string {
     `env PASSWORD='${s}' node seed.js`,
     `cat > .env <<EOF\nSECRET_VALUE=${s}\nEOF`,
     `cat > .env <<'EOF'\n${s}\nEOF\nnpm test`,
+    // Refusal-prone commands whose argument values (hosts, URLs, remote scripts, fields) must not reach the fork.
+    `ssh -F /dev/null ops@10.${i % 250}.0.1 'cd /srv/${s} && docker exec app node -e "1"'`,
+    `ssh ${s}.example.test "docker logs app | tail"`,
+    `curl -s "https://api.example.test/v1/items?key=${s}"`,
+    `gh api -X PUT repos/o/r/pulls/9/merge -f merge_method=${s}`,
+    `set -a; . ./.env.local; set +a; gh pr merge 12 --subject ${s}`,
+    `scp build.tgz ${s}@host.example.test:/tmp/`,
+    `docker exec work sh -c 'grep -rl ${s} /app'`,
+    // Values attached to or following a flag, bare dotted hosts, and gh api paths (review HIGH).
+    `curl -uadmin:${s} x`,
+    `docker login -p${s}`,
+    `curl -HAuthorization:Bearer_${s} x`,
+    `curl --user=admin:${s} https://api.example.test/`,
+    `curl api.${s}.example.test/v1`,
+    `wget ${s}.corp.test/file.tar`,
+    `scp f box.${s}.test:/srv/app/`,
+    `docker login -p ${s} registry.corp.test`,
+    `gh api repos/${s}/private-repo/pulls/12`,
+    // Re-review: bracketed IPv6, URL userinfo on any command, prefixed programs, substitutions.
+    `curl [2001:db8::${(i % 9) + 1}]:8080/${s}`,
+    `git push https://${s}@github.com/o/r main`,
+    `git clone https://user:${s}@host.test/r.git`,
+    `env TOKEN=${s} curl x`,
+    `sudo curl -u${s} x`,
+    `timeout 5 curl -H X-Key:${s} x`,
+    `curl -d $(cat /run/${s}) x`,
+    `curl \`cat /run/${s}\` x`,
   ]);
 }
 
@@ -131,7 +158,7 @@ function mcpJson(r: Rng, i: number, f: string | undefined, exotic: boolean): str
   const body: Record<string, unknown> = {
     self: `https://j/rest/api/3/issue/${1000 + i}`,
     id: String(600000 + i),
-    key: `BST-${4000 + i}`,
+    key: `ABC-${4000 + i}`,
     expand: 'renderedFields,names',
     fields: {
       summary: `Do thing ${i}${f ? ` ${f}` : ''} ${pick(r, EMOJI)}`,
@@ -199,8 +226,8 @@ function inputFor(r: Rng, tool: string, i: number, secrets: string[]): Record<st
     case 'Grep': return { pattern: pick(r, ['foo', 'bar']), path: pick(r, ['src', '/repo/src']) };
     // Sometimes long, with an astral char straddling the INPUT_CHARS (120) cut.
     case 'Agent': return { prompt: chance(r, 0.3) ? `${'p'.repeat(int(r, 100, 125))}${pick(r, EMOJI)} look into it ${'q'.repeat(200)}` : 'look into it', subagent_type: 'Explore' };
-    case 'mcp__claude_ai_Atlassian__getJiraIssue': return { cloudId: 'x', issueIdOrKey: `BST-${4000 + i}` };
-    case 'mcp__claude_ai_Atlassian__editJiraIssue': return { cloudId: 'x', issueIdOrKey: `BST-${4000 + i}`, fields: { summary: 's' } };
+    case 'mcp__claude_ai_Atlassian__getJiraIssue': return { cloudId: 'x', issueIdOrKey: `ABC-${4000 + i}` };
+    case 'mcp__claude_ai_Atlassian__editJiraIssue': return { cloudId: 'x', issueIdOrKey: `ABC-${4000 + i}`, fields: { summary: 's' } };
     default: return { q: i };
   }
 }

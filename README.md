@@ -30,9 +30,12 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    exactly (integers past 2^53) is left alone.
 
    **Referenced-later pin.** A result that introduced a distinctive token (a sha, `#123`, `ABC-123`, a
-   path, a URL, a dollar amount, a long number or identifier) which later assistant text or a later tool
-   input quotes (edits excluded) is never dropped, whichever stage decided it: it is truncated only to a
-   head or head+tail window that still holds the token's first occurrence, or kept verbatim. Only text
+   path, a URL, a dollar amount, a long number, a long identifier or one with two or more underscores or
+   humps) which later assistant text or a later tool input quotes (edits excluded) is never dropped,
+   whichever stage decided it: it is truncated only to a head (stretched up to 4000 chars) or head+tail
+   window that still holds the token's first occurrence. When no such window does, it keeps its head and
+   tail plus an excerpt of the lines within 200 chars of each token they miss, each gap marked
+   `[… N chars omitted …]`; only when those pieces would exceed 4000 chars is it kept verbatim. Only text
    that is never pruned (user and assistant text, pinned results) counts as already having the token;
    an edit's input does not, because the edit itself can be dropped.
 2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
@@ -46,7 +49,8 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    chunks of `forkChunkSize` (60), one fork per chunk, all concurrent but never more than 8 (past that,
    chunks grow); each reuses the session's prompt cache, so three forks take about as long as one
    (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose fork fails or whose reply does not parse is
-   re-asked whole once, then as two halves; whatever still fails decides nothing, and its calls are kept.
+   re-asked whole once, then as two halves (a refused one goes straight to the halves); whatever still
+   fails decides nothing, and its calls are kept.
    The forks race the short `claudeTimeoutMs` only when the rules alone already clear
    `minReductionRatio`; otherwise they are the only way to clear it, so they may take up to 45 s.
    A subagent's own compaction uses the rules only (the fork can only fork the main session).
@@ -65,15 +69,41 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    on 3 of 4 first tries, while the same lines cut to 120 or 200 characters passed 16 of 16. So a call's input is
    shown up to 120 characters, after its secret-bearing parts are reduced to names: env assignment
    values (`TOKEN=…`), HTTP header values (`-H 'Authorization: …'`) and heredoc bodies (`<<EOF …>`).
-   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) is re-asked
-   whole once, then as two halves. A refusal that lands mid-reply leaves cut-off text, which shows
+   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) goes straight
+   to two halves: a whole re-ask of the same lines was refused again both times it was tried (live, 2.1.282),
+   while the halves mostly answered. A refusal that lands mid-reply leaves cut-off text, which shows
    as `unparseable` because the fork result does not say why the text stopped.
 
 If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
 thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
 runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
-`/compact` prunes.
+`/compact` prunes. Two exceptions keep a long session verbatim for longer:
+
+- **The plugin's own request** (at `compactAtPercent`) never ends in a summary. Below the gate it
+  leaves the transcript as it is and waits: nothing needs the room yet, and Claude Code's own
+  compaction still runs at its threshold, where the gate decides as above.
+- **Tier 2.** A long session compacts many times, and a later pass has less to cut: the old output
+  is already truncated, so only what arrived since can go. When a pass misses the gate on a
+  transcript an earlier compaction already truncated, it is tried once more with half the
+  `staleAfterMessages`, `truncateHeadChars` and `truncateTailChars`, and old truncations older than
+  that age are cut further (`stale_truncation`). The scorer is not asked again, and pins hold.
+
+A result truncated by an earlier pass is cut again within its own head and tail, with one note whose
+count still accounts for the original result. It is never truncated twice over (two notes).
+
+**How far verbatim compaction can go in a long session.** Replayed over the maintainers' corpus
+(`npm run eval:offline -- --replay`, a 400k window), tool results were under a fifth of the context at
+the first compaction and about a tenth at later ones. The rest was the system prompt and tools, user
+and assistant text, tool inputs, and context the hook never sees, which grows with the session (a fit
+to the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never
+touches. It is not the model's earlier thinking: leaving old turns' thinking rows out of a live
+compaction did not change the next request's input tokens. So a prune
+frees less each time, and on every long session replayed one of the later compactions still fell back
+to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
+sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
+most two points on four. A few passes late in a session freed under 5% of the context, leaving it at
+Claude Code's own threshold, so the fallback came a turn or two later instead.
 
 **Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
 refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,
@@ -125,6 +155,7 @@ debug log names the keys it looked for).
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested (1–100). After the plugin's own compaction it waits until context reads under this again before asking once more, so a prune that leaves context above it is not followed by a compaction on every turn |
+| `compactAtTokens` | 300000 | Context tokens at which compaction is requested, whatever the percent reads; either threshold triggers it. On a 1M-token window 60% waits until 600k tokens, too late to prune verbatim in time. 0 turns it off. When a turn is already running (a busy session: agent messages, task notices), the request is retried every 3 s for up to a minute |
 | `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
 | `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |
@@ -137,6 +168,7 @@ debug log names the keys it looked for).
 | `claudeTimeoutMs` | 30000 | Longest wait for the forks when the rules alone already clear the gate; past it the rules alone decide (otherwise the forks get the 45 s ceiling). 30 s lets most slow but healthy forks count (they measured up to about 31 s end to end, so the slowest can still miss it and fall back to the rules alone), and stays well under the 60 s a headless turn waits. Clamped to 500–45000 ms. The hook's ten-second budget counts only the hook's own time, and a pending fork stops that clock even while the timeout's `$.clock.sleep` runs beside it (measured on 2.1.281: a hook that raced a fork against a 30 s sleep ran 30 s and was not cut) |
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
+| `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
 
 ### Precompute
 

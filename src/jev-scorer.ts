@@ -61,6 +61,8 @@ function clip(text: string, limit: number): string {
 
 const ENV_ASSIGNMENT = /(^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|)]+)/g;
 const HEADER = /(-H|--header)(\s+)(["'])([A-Za-z0-9-]+):[^"']*\3/g;
+/** `scheme://user@` and `scheme://user:pass@`: a token or password in a URL. */
+const USERINFO = /(:\/\/)[^/\s@]+@/g;
 const HEREDOC = /<<-?\s*(["']?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g;
 
 /**
@@ -72,7 +74,134 @@ export function elideSecrets(command: string): string {
   return command
     .replace(HEREDOC, (_m, _q: string, tag: string) => `<<${tag} …>`)
     .replace(HEADER, (_m, flag: string, space: string, quote: string, name: string) => `${flag}${space}${quote}${name}: …${quote}`)
-    .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`);
+    .replace(ENV_ASSIGNMENT, (_m, lead: string, name: string) => `${lead}${name}=…`)
+    .replace(USERINFO, '$1…@');
+}
+
+/**
+ * Commands that reach another machine, the network, a container or a credentials file. Their
+ * arguments (hosts, URLs, inline remote scripts, request fields) are what an ops-heavy session's
+ * refused forks had in common, and the fork needs only what kind of command ran.
+ */
+const RISKY = /(?:^|[\s;&|(])(?:ssh|scp|curl|wget|docker|source)(?=\s|$)|\bgh\s+(?:api|pr\s+merge)\b|\bset\s+-a\b|(?:^|[;&|]\s*)\.\s+\S/;
+/** `$(…)` (two levels of nested parentheses) or a backtick substitution: one opaque unit. */
+const SUBST = String.raw`\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)|` + '`[^`]*`';
+const QUOTED = String.raw`'[^']*'|"(?:\\.|[^"\\])*"`;
+/** Characters of an unquoted word; a `$` only when it does not open a `$(`. */
+const PLAIN = String.raw`(?:[^\s;&|'"$` + '`' + String.raw`]|\$(?!\())+`;
+/** A substitution, a quoted string, a separator, or a word (which may embed quotes and substitutions). */
+const TOKEN = new RegExp(`${SUBST}|${QUOTED}|&&|\\|\\||[;|]|${PLAIN}(?:${SUBST}|${QUOTED}|${PLAIN})*`, 'g');
+/** How many subcommand words each program keeps (`gh pr merge`, `docker exec`). */
+const SUBCOMMANDS: Record<string, number> = { gh: 2, docker: 1, git: 1, npm: 1, kubectl: 1 };
+/** Words kept wherever they stand: the interpreter an inline script ran under. */
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'node', 'python', 'python3']);
+const HOST = /@|^\d{1,3}(?:\.\d{1,3}){3}(?::|$)|^\[[0-9A-Fa-f:.%\w]*\](?::\d+)?/;
+/** Words before the program: `env`, `sudo`, `timeout 5`, `nice -n 10`, `xargs -I{}`. */
+const PREFIXES = new Set(['env', 'sudo', 'timeout', 'nice', 'xargs']);
+/** A dotted name before `:`, `/` or the end (`api.corp.test/v1`, `box.corp.test:/srv`), or `box:/srv`. */
+const DOTTED_HOST = /^[\w-]+(?:\.[\w-]+)+(?=[:/]|$)|^[\w.-]+:/;
+/** A path that says it is one: absolute, `./`, `../` or `~`. */
+const EXPLICIT_PATH = /^(?:\/|\.{1,2}\/|~)/;
+const PATH_LIKE = /\/|\.[A-Za-z]\w{0,4}$/;
+
+interface SkeletonState {
+  first: boolean;
+  /** Subcommand words still to keep. */
+  sub: number;
+  program: string;
+  subcommands: string[];
+  /** A flag was seen in this segment: every positional after it is a value, unless an explicit path. */
+  flagged: boolean;
+  /** `gh api`'s endpoint was shown (as `<path>`). */
+  pathShown: boolean;
+  /** The prefix (`env`, `sudo`, `timeout`, ...) seen before the program, if any. */
+  prefix?: string;
+}
+
+/** A word before the program as shown: `VAR=…`, the prefix itself, `timeout`'s duration; undefined drops it. */
+function prefixWord(word: string, state: SkeletonState): string | null | undefined {
+  const assignment = /^([A-Za-z_]\w*)=/.exec(word);
+  if (assignment) return `${assignment[1]}=…`;
+  if (PREFIXES.has(word)) {
+    state.prefix = word;
+    return word;
+  }
+  if (state.prefix && word.startsWith('-')) return undefined;
+  if (state.prefix && /^\d+(?:\.\d+)?[smhd]?$/.test(word)) return state.prefix === 'timeout' ? word : undefined;
+  return null;
+}
+
+/** A flag's name alone: `-uadmin:pw` is `-u`, `--user=admin` is `--user`, `+a` stays. */
+function flagName(word: string): string {
+  return word.startsWith('--') ? word.split('=')[0]! : word.slice(0, 2);
+}
+
+/** One word of a risky command as shown, or undefined to leave it out. */
+function skeletonWord(word: string, state: SkeletonState): string | undefined {
+  if (word.includes('://')) return '<url>';
+  if (/^['"`]|^\$\(/.test(word)) return "'…'";
+  if (state.first) {
+    const prefix = prefixWord(word, state);
+    if (prefix !== null) return prefix;
+  }
+  if (!state.first && /^[-+]/.test(word)) {
+    state.sub = 0;
+    state.flagged = true;
+    return flagName(word);
+  }
+  if (HOST.test(word) || (!EXPLICIT_PATH.test(word) && DOTTED_HOST.test(word))) return '<host>';
+  if (state.first) {
+    state.first = false;
+    state.program = word;
+    state.sub = Object.hasOwn(SUBCOMMANDS, word) ? SUBCOMMANDS[word]! : 0;
+    return word;
+  }
+  if (state.sub > 0 && !state.flagged && /^[a-z][a-z-]*$/.test(word)) {
+    state.sub -= 1;
+    state.subcommands.push(word);
+    return word;
+  }
+  state.sub = 0;
+  if (INTERPRETERS.has(word)) return word;
+  // `gh api repos/org/repo/...` names a private org and repository.
+  if (state.program === 'gh' && state.subcommands[0] === 'api' && !state.pathShown && word.includes('/')) {
+    state.pathShown = true;
+    return '<path>';
+  }
+  if (EXPLICIT_PATH.test(word)) return word.split('?')[0];
+  // ssh's positionals are a host and an unquoted remote command; after a flag, a positional is its value.
+  if (state.program === 'ssh' || state.flagged) return undefined;
+  return PATH_LIKE.test(word) && !/['"]/.test(word) ? word.split('?')[0] : undefined;
+}
+
+/**
+ * A refusal-prone command (see RISKY) cut to its program, subcommand, flag names and file paths:
+ * quoted strings become `'…'`, URLs `<url>`, hosts (dotted names too) `<host>`, a `gh api` path
+ * `<path>`; a flag keeps only its name, and every positional after a flag goes unless it is an
+ * explicit path (`/`, `./`, `../`, `~`).
+ * `ssh -F /dev/null me@10.1.2.3 'docker exec …'` becomes `ssh -F /dev/null <host> '…'`. Any
+ * other command is returned unchanged.
+ */
+export function skeletonCommand(command: string): string {
+  if (!RISKY.test(command)) return command;
+  const fresh = (): SkeletonState => ({ first: true, sub: 0, program: '', subcommands: [], flagged: false, pathShown: false });
+  let state = fresh();
+  let out = '';
+  for (const [word] of command.matchAll(TOKEN)) {
+    if (word === ';') {
+      out += ';';
+      state = fresh();
+      continue;
+    }
+    if (word === '&&' || word === '||' || word === '|') {
+      out += ` ${word}`;
+      state = fresh();
+      continue;
+    }
+    const shown = skeletonWord(word, state);
+    if (shown !== undefined) out += `${out ? ' ' : ''}${shown}`;
+  }
+  return out.trim();
 }
 
 function valueText(value: unknown): string {
@@ -97,7 +226,7 @@ function inputText(call: ToolCall): string {
     const others = entries.filter(([k]) => k !== 'command' && k !== 'description');
     const rest = others.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
     // Leading `cd DIR &&`, `VAR=value` and `echo "..."` banners carry nothing for the scorer.
-    const command = elideSecrets(stripCommandPrefix(call.input['command']) || call.input['command']);
+    const command = skeletonCommand(elideSecrets(stripCommandPrefix(call.input['command']) || call.input['command']));
     return rest ? `${command} ${rest}` : command;
   }
   return entries.map(([k, v]) => `${k}=${valueText(v)}`).join(' ');
@@ -135,7 +264,7 @@ export function toWellFormed(text: string): string {
  */
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
   return toWellFormed([
-    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request.',
+    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request. Answer directly, without deliberating.',
     'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
     'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
@@ -146,14 +275,22 @@ export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): str
   ].join('\n'));
 }
 
+/** `t12` as written, or `12`: the prompt asks for bare numbers, which cost half the output tokens. */
+function idOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  return Number.isSafeInteger(value) ? `t${value as number}` : undefined;
+}
+
 function idList(value: unknown, ids: ReadonlySet<string>): Set<string> | undefined {
-  if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) return undefined;
-  return new Set((value as string[]).filter((id) => ids.has(id)));
+  if (!Array.isArray(value)) return undefined;
+  const read = value.map(idOf);
+  if (read.some((id) => id === undefined)) return undefined;
+  return new Set((read as string[]).filter((id) => ids.has(id)));
 }
 
 /**
  * Parses the reply's JSON object (first `{` to last `}`). `result_needed` and `call_matters`
- * must be string arrays, and `unsure` and `drop` too when present. Anything else, a cut-off reply
+ * must be arrays of ids (`"t12"` or `12`), and `unsure` and `drop` too when present. Anything else, a cut-off reply
  * included, is undefined and decides nothing, as is a reply whose lists cover fewer than
  * MIN_COVERAGE of `ids`. Unknown ids are ignored.
  */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  elideSecrets, buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
+  elideSecrets, skeletonCommand, buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
 } from '../src/index.js';
 
 function c(id: string, tool: string, input: Record<string, unknown>, extra: Partial<ToolCall> = {}): ToolCall {
@@ -20,6 +20,80 @@ describe('candidate command text', () => {
   it('keeps a command that is only a prefix, and a cd later in the command', () => {
     expect(line('cd /only')).toContain(' msg 16/5 cd /only → ');
     expect(line('npm test && cd /a')).toContain(' msg 16/5 npm test && cd /a → ');
+  });
+});
+
+describe('skeletonCommand (refusal-prone commands)', () => {
+  it('reduces remote, network, container and env-loading commands to program, subcommand, flags and paths', () => {
+    expect(skeletonCommand("ssh -F /dev/null deploy@10.1.2.3 'cd /srv/app && docker exec app node -e \"x\"'"))
+      .toBe("ssh -F /dev/null <host> '…'");
+    expect(skeletonCommand('curl -s -H "Accept: json" "https://api.example.test/v1/items?token=abc"')).toBe("curl -s -H '…' <url>");
+    expect(skeletonCommand('gh api -X PUT repos/o/r/pulls/922/merge -f merge_method=squash'))
+      .toBe('gh api -X <path> -f');
+    expect(skeletonCommand('set -a; . ./.env.local; set +a; gh pr merge 12 --squash'))
+      .toBe('set -a; . ./.env.local; set +a; gh pr merge --squash');
+    expect(skeletonCommand('ssh box.example.test uptime')).toBe('ssh <host>');
+    expect(skeletonCommand('scp ./build.tgz ops@host.example.test:/tmp/')).toBe('scp ./build.tgz <host>');
+    expect(skeletonCommand("docker exec app-server sh -c 'grep -rl foo /app'")).toBe("docker exec sh -c '…'");
+    expect(skeletonCommand('source ~/.profile && wget http://10.0.0.5:8080/x')).toBe('source ~/.profile && wget <url>');
+  });
+
+  it('shows no bracketed IPv6 host (re-review MEDIUM-A)', () => {
+    expect(skeletonCommand('curl [2001:db8::1]:8080/x')).toBe('curl <host>');
+    expect(skeletonCommand('ssh -6 [fe80::1%en0] uptime')).toBe('ssh -6 <host>');
+    expect(skeletonCommand('curl [2001:db8::1]:8080/x')).not.toContain('2001');
+  });
+
+  it('keeps the program behind env, sudo, timeout, nice, xargs and VAR= prefixes (re-review LOW-C)', () => {
+    expect(skeletonCommand('env TOKEN=abc curl -uadmin:pw x')).toBe('env TOKEN=… curl -u');
+    expect(skeletonCommand('sudo curl -HX-Key:abc x')).toBe('sudo curl -H');
+    expect(skeletonCommand('TOKEN=abc curl api.corp.test/v1')).toBe('TOKEN=… curl <host>');
+    expect(skeletonCommand('timeout 5 curl x')).toBe('timeout 5 curl');
+    expect(skeletonCommand('nice -n 10 docker login -p hunter2')).toBe('nice docker login -p');
+    expect(skeletonCommand('echo a | xargs -I{} curl {}')).toBe('echo | xargs curl');
+    for (const shown of [skeletonCommand('env TOKEN=abc curl x'), skeletonCommand('TOKEN=abc curl x')]) expect(shown).not.toContain('abc');
+  });
+
+  it('renders $(…) and backticks as one quoted unit (re-review LOW-D)', () => {
+    expect(skeletonCommand('curl -d $(cat /run/secret) x')).toBe("curl -d '…'");
+    expect(skeletonCommand('curl -H "$(cat /run/a) b" `cat /run/secret` x')).toBe("curl -H '…' '…'");
+    expect(skeletonCommand('curl $(printf "%s" "$(cat /run/secret)") x')).toBe("curl '…'");
+    expect(skeletonCommand('curl -d $(cat /run/secret) x')).not.toContain('secret');
+  });
+
+  it('never shows a flag value, attached or following, nor a bare host or a gh api path (review HIGH)', () => {
+    const cases: Array<[string, string]> = [
+      ['curl -uadmin:hunter2 x', 'curl -u'],
+      ['docker login -pS3cretPass', 'docker login -p'],
+      ['curl -HAuthorization:Bearer_abc123 x', 'curl -H'],
+      ['curl --user=admin:hunter2 --header=X-Key:abc x', 'curl --user --header'],
+      ['curl api.internal.example.test/v1', 'curl <host>'],
+      ['wget example-host.corp.test/file.tar', 'wget <host>'],
+      ['scp f box.corp.test:/srv/app/', 'scp <host>'],
+      ['scp ./f box:/srv/app/', 'scp ./f <host>'],
+      ['docker login -p s3cretPass registry.corp.test', 'docker login -p <host>'],
+      ['docker login -u robot -p s3cretPass', 'docker login -u -p'],
+      ['curl -d token=abc -X POST /tmp/sock', 'curl -d -X /tmp/sock'],
+      ['gh api repos/Org/private-repo/pulls/12', 'gh api <path>'],
+      ['gh api repos/Org/private-repo/pulls/12 --jq .title', 'gh api <path> --jq'],
+    ];
+    for (const [command, shown] of cases) expect(skeletonCommand(command)).toBe(shown);
+    for (const [command, shown] of cases) {
+      for (const secret of ['hunter2', 'S3cretPass', 's3cretPass', 'abc123', 'example.test', 'corp.test', 'Org', 'private-repo', 'robot', 'token=abc', 'box']) {
+        if (command.includes(secret)) expect(shown).not.toContain(secret);
+      }
+    }
+  });
+
+  it('leaves other commands alone', () => {
+    for (const cmd of ['npm test', 'git log --oneline -5', 'grep -n "foo bar" src/a.ts', 'gh pr view 12']) {
+      expect(skeletonCommand(cmd)).toBe(cmd);
+    }
+  });
+
+  it('is what a candidate line shows for such a command', () => {
+    const line = jevCandidateLine(c('t1', 'Bash', { command: 'ssh ops@10.9.8.7 "docker logs app | tail"' }), { messageCount: 5 });
+    expect(line).toContain(" msg 16/5 ssh <host> '…' → ");
   });
 });
 
@@ -95,6 +169,16 @@ describe('buildJevPrompt', () => {
     expect(prompt).toMatch(/drop.*one-line note/);
   });
 
+  it('asks for a direct answer without deliberation: thinking tokens are most of what a fork waits on', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).toMatch(/without deliberating/);
+  });
+
+  it('asks for the ids as written, not bare numbers (a first ask was refused with bare numbers asked for)', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).not.toMatch(/number alone/);
+  });
+
   it('tells the fork not to call tools and to reply with the JSON only', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).toContain('Do not call any tool');
@@ -132,7 +216,16 @@ describe('parseJevReply', () => {
     expect(parseJevReply('{"result_needed":["t1"],"call_matters":["t2"', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":["t1","t2","t3","t4"]}', ids)).toBeUndefined();
     expect(parseJevReply('{"result_needed":"t1","call_matters":[]}', ids)).toBeUndefined();
-    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[1]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[true]}', ids)).toBeUndefined();
+    expect(parseJevReply('{"result_needed":[],"call_matters":["t1","t2","t3","t4"],"drop":[1.5]}', ids)).toBeUndefined();
+  });
+
+  it('reads bare numbers as ids (12 is t12): half the output tokens of a quoted id', () => {
+    const out = parseJevReply('{"result_needed":[1],"call_matters":[2,9],"unsure":["t3"],"drop":[4,5]}', ids);
+    expect(out && [...out.resultNeeded]).toEqual(['t1']);
+    expect(out && [...out.callMatters]).toEqual(['t2']);
+    expect(out && [...out.unsure]).toEqual(['t3']);
+    expect(out && [...out.drop]).toEqual(['t4', 't5']);
   });
 });
 
@@ -220,6 +313,13 @@ describe('elideSecrets (data minimisation for the fork)', () => {
     expect(elideSecrets('set -a; GH_TOKEN=$GITHUB_TOKEN gh api repos/x')).toBe('set -a; GH_TOKEN=… gh api repos/x');
     expect(elideSecrets('FOO="a b" BAR=\'c\' make')).toBe('FOO=… BAR=… make');
     expect(elideSecrets('npm test --reporter=dot')).toBe('npm test --reporter=dot');
+  });
+
+  it('elides URL userinfo in every command, token or user:pass (re-review MEDIUM-B)', () => {
+    expect(elideSecrets('git push https://tok123@github.com/o/r main')).toBe('git push https://…@github.com/o/r main');
+    expect(elideSecrets('git clone https://user:pa55@host.test/r.git')).toBe('git clone https://…@host.test/r.git');
+    expect(elideSecrets('npm install git+ssh://git@github.com/o/r')).toBe('npm install git+ssh://…@github.com/o/r');
+    expect(elideSecrets('git push https://tok123@github.com/o/r')).not.toContain('tok123');
   });
   it('keeps header names, not their values', () => {
     expect(elideSecrets(`curl -H 'Authorization: Bearer abc.def' -H "X-Api-Key: k1" https://h/x`))
