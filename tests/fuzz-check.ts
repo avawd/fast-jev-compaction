@@ -183,7 +183,7 @@ function piecesFit(src: string, head: string, pieces: Array<{ gap: number; text:
   return undefined;
 }
 
-const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:') || text.includes('<teammate-message');
+const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:');
 const BLOCK_RE = /<teammate-message teammate_id="([^"]+)"[^>]*>\n([\s\S]*?)\n<\/teammate-message>/g;
 
 /** What a rebuilt teammate row may not do, written independently of user-rows.ts. */

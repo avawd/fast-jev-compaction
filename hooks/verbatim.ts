@@ -223,7 +223,7 @@ function claudeStage(stats: CompactResult['stats']): string {
 
 export function summarize(result: CompactResult): string {
   const s = result.stats;
-  return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
+  return `${Math.round(gateRatio(result) * 100)}% of tool output${s.userRows ? ' and cut teammate text' : ''} (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
     `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}` +
     `${s.userRows && s.userRows.rows > 0 ? `; teammate rows: ${s.userRows.rows} rebuilt, -${s.userRows.charsSaved} chars (${s.userRows.restated} restated, ${s.userRows.repeated} repeated, ${s.userRows.stale} stale, ${s.userRows.notices} notices)` : ''}`;

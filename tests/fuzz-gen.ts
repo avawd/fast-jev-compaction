@@ -363,6 +363,8 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
       }
       messages.push(row({ role: 'user', text: `${TEAMMATE_HEADER}${blocks.join('\n\n')}${chance(rt, 0.8) ? TEAMMATE_NOTICE : ''}`, toolUses: [] }));
       if (chance(rt, 0.1)) messages.push(row({ role: 'user', text: SUMMARY_TEXT, toolUses: [] }));
+      // A typed prompt pasting a teammate block (and sometimes the notice): never to be touched.
+      if (chance(rt, 0.1)) messages.push(row({ role: 'user', text: `See this:\n${blocks[0]}${chance(rt, 0.5) ? TEAMMATE_NOTICE : ''}\n\nWhat do you make of it?`, toolUses: [] }));
     }
   }
   // A call still in flight at the end: no result yet.

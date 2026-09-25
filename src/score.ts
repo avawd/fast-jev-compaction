@@ -53,6 +53,10 @@ export function rulesGate(
   /** The compact options, so the teammate-row pass counts as it will (user-rows.ts); absent: tool output only. */
   options?: ResolvedCompactOptions,
 ): GateFn {
+  // The teammate-row pass does not depend on the verdicts: run it once, not per evaluation.
+  const userSaved = options ? compactUserRows(messages, options).stats.charsSaved : 0;
+  const denominator = resultChars(messages) + userSaved;
+  const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
   return (calls, verdicts) => {
     const decisions: CallDecision[] = [];
     for (const call of calls) {
@@ -61,12 +65,8 @@ export function rulesGate(
         decisions.push({ id: call.id, tool: call.tool, action: verdict.action, source: verdict.source });
       }
     }
-    const pruned = applyDecisions(messages, decisions, calls, headChars);
-    const users = options ? compactUserRows(pruned, options) : undefined;
-    const denominator = resultChars(messages) + (users?.stats.charsSaved ?? 0);
-    if (denominator === 0 || (decisions.length === 0 && !users?.stats.rows)) return false;
-    const before = messages.reduce((sum, m) => sum + messageChars(m), 0);
-    const after = (users ? users.messages : pruned).reduce((sum, m) => sum + messageChars(m), 0);
+    if (denominator === 0 || (decisions.length === 0 && userSaved === 0)) return false;
+    const after = applyDecisions(messages, decisions, calls, headChars).reduce((sum, m) => sum + messageChars(m), 0) - userSaved;
     return Math.min(1, (before - after) / denominator) >= minRatio;
   };
 }

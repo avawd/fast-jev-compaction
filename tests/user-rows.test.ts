@@ -127,6 +127,38 @@ describe('compactUserRows: stale teammate messages', () => {
 });
 
 describe('compactUserRows: guards', () => {
+  it('keeps a token of an idle result quoted between two identical copies (tokens read from the decoded result)', () => {
+    const pad = 'p'.repeat(500);
+    const input = [msg('user', 'Start.'), msg('assistant', 'go'), idle('x', `${pad}\ndeadbeef12345678 is the commit`),
+      msg('assistant', 'use deadbeef12345678'), idle('x', `${pad}\ndeadbeef12345678 is the commit`), ...filler(10)];
+    const out = compactUserRows(input, opts({ dedupePeerNotice: false }));
+    expect(out.messages[2]!.text).toContain('deadbeef12345678');
+  });
+
+  it('never rewrites a typed prompt that pastes a teammate block or the peer notice', () => {
+    const pasted = `Look at this:\n<teammate-message teammate_id="a1" color="blue">\n${lines('pasted', 40)}\n</teammate-message>${NOTICE}\n\nAnd then fix it please.`;
+    const typed = msg('user', pasted);
+    const input = [msg('user', 'Start.'), typed, report('a2', 'short'), ...filler(30), report('a3', 'newest')];
+    const out = compactUserRows(input, opts({ staleAfterMessages: 2 }));
+    expect(out.messages[1]).toBe(typed);
+  });
+
+  it('leaves a row alone when text follows the notice: it is not what Claude Code writes', () => {
+    const row = msg('user', `${HEADER}<teammate-message teammate_id="a1" color="blue">\nhi\n</teammate-message>${NOTICE}\n\nTrailing words.`);
+    const input = [msg('user', 'Start.'), row, msg('assistant', 'ok'), report('a3', 'newest'), ...filler(10)];
+    const out = compactUserRows(input, opts());
+    expect(out.messages[1]).toBe(row);
+  });
+
+  it('attaches no stats and leaves the gate alone when every option is off', async () => {
+    const none: Scorer = async () => ({ verdicts: new Map(), claude: 'skipped' });
+    const input = [msg('user', 'Start.'), report('a1', lines('r', 60)), idle('a1', lines('i', 40)), ...filler(20)];
+    const out = await compact(input, none, { preserveRecentMessages: 2, dedupeTeammates: false, trimStaleTeammates: false, dedupePeerNotice: false });
+    expect(out.stats.userRows).toBeUndefined();
+    const off = resolveOptions({ preserveRecentMessages: 2, dedupeTeammates: false, trimStaleTeammates: false, dedupePeerNotice: false });
+    expect(rulesGate(input, 300, 0.25, off)([], new Map())).toBe(false);
+  });
+
   it('never changes a typed prompt, however long or old', () => {
     const typed = msg('user', lines('typed', 80));
     const input = [msg('user', 'Start.'), typed, typed, ...filler(30)];

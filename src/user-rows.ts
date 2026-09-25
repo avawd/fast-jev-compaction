@@ -93,8 +93,24 @@ function blocksOf(text: string, row: number): Block[] {
   return out;
 }
 
+/**
+ * A teammate row is exactly what Claude Code writes: the header, then teammate blocks and nothing
+ * else, then at most the notice paragraph. A typed prompt that pastes a block or the notice is not
+ * one, and is never touched.
+ */
 const isTeammateRow = (m: Message) =>
-  m.role === 'user' && (m.toolResults ?? []).length === 0 && (m.text.startsWith(TEAMMATE_HEADER) || m.text.includes('<teammate-message'));
+  m.role === 'user' && (m.toolResults ?? []).length === 0 && m.text.startsWith(TEAMMATE_HEADER) && onlyBlocks(m.text);
+
+function onlyBlocks(text: string): boolean {
+  let rest = text.slice(TEAMMATE_HEADER.length);
+  const notice = rest.indexOf(`\n\n${PEER_NOTICE}`);
+  if (notice >= 0) {
+    if (rest.indexOf('\n\n', notice + 2) >= 0) return false;
+    rest = rest.slice(0, notice);
+  }
+  const stripped = rest.replace(BLOCK, '');
+  return stripped.trim() === '' && rest.includes('<teammate-message');
+}
 const isUserText = (m: Message) => m.role === 'user' && (m.toolResults ?? []).length === 0 && m.text.trim().length > 0;
 
 /** Where each distinctive token is quoted: assistant text and non-authoring tool inputs, by row. */
@@ -207,12 +223,28 @@ export function compactUserRows(
   const editable = (b: Block) => !guarded.has(b.row) && !b.body.includes(USER_ROW_NOTE);
 
   if (dedupeTeammates) {
-    for (const [k, b] of blocks.entries()) {
+    // Linear lookups: the next identical copy of each block, and each sender's previous block.
+    const nextSame = new Map<Block, Block>();
+    const newest = new Map<string, Block>();
+    for (const b of [...blocks].reverse()) {
+      const key = `${b.from}\u0000${b.body}`;
+      const later = newest.get(key);
+      if (later) nextSame.set(b, later);
+      newest.set(key, b);
+    }
+    const previousOf = new Map<Block, Block>();
+    const lastFrom = new Map<string, Block>();
+    for (const b of blocks) {
+      const previous = lastFrom.get(b.from);
+      if (previous) previousOf.set(b, previous);
+      lastFrom.set(b.from, b);
+    }
+    for (const b of blocks) {
       if (!editable(b)) continue;
       // An exact repeat: the newer copy stays; the older goes unless a token of it is quoted in between.
-      const later = blocks.slice(k + 1).find((o) => o.from === b.from && o.body === b.body);
+      const later = nextSame.get(b);
       if (later && b.body.length >= MIN_BLOCK) {
-        const quoted = distinctiveTokens(b.body).some((t) => quotedBetween(quotes, t, b.row, later.row));
+        const quoted = distinctiveTokens(b.idle ? `${b.idle.result}\n${b.body}` : b.body).some((t) => quotedBetween(quotes, t, b.row, later.row));
         if (!quoted) {
           const note = `${USER_ROW_NOTE} repeated in a later message from ${b.from}]`;
           edits.set(b, b.idle ? idleBody(b.idle, note) : note);
@@ -222,7 +254,7 @@ export function compactUserRows(
       }
       // A restated idle: the same agent's previous block is a message (its report).
       if (!b.idle || b.idle.result.length < MIN_BLOCK) continue;
-      const previous = blocks.slice(0, k).reverse().find((o) => o.from === b.from);
+      const previous = previousOf.get(b);
       if (!previous || previous.idle) continue;
       const kept = keptLines(b.idle.result, (t) => quotedBetween(quotes, t, b.row) && !previous.body.includes(t), previous.body, 0);
       if (!kept) continue;
@@ -246,16 +278,20 @@ export function compactUserRows(
     }
   }
 
+  const byRow = new Map<number, Block[]>();
+  for (const b of blocks) byRow.set(b.row, [...(byRow.get(b.row) ?? []), b]);
   const newestTeammate = messages.reduce((last, m, row) => (isTeammateRow(m) ? row : last), -1);
   const out = messages.map((m, row) => {
     if (guarded.has(row) || !isTeammateRow(m)) return m;
     let text = m.text;
-    const rowEdits = blocks.filter((b) => b.row === row && edits.has(b)).sort((a, b) => b.start - a.start);
+    const rowEdits = (byRow.get(row) ?? []).filter((b) => edits.has(b)).sort((a, b) => b.start - a.start);
     for (const b of rowEdits) text = text.slice(0, b.start) + edits.get(b)! + text.slice(b.end);
     if (dedupePeerNotice && row !== newestTeammate) {
       const at = text.lastIndexOf(`\n\n${PEER_NOTICE}`);
       if (at >= 0 && text.lastIndexOf('</teammate-message>') < at) {
-        text = text.slice(0, at);
+        // The notice's own paragraph only.
+        const end = text.indexOf('\n\n', at + 2);
+        text = text.slice(0, at) + (end < 0 ? '' : text.slice(end));
         stats.notices += 1;
       }
     }
