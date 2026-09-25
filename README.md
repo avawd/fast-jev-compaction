@@ -198,6 +198,63 @@ session has had only one user prompt. This path is covered by harness tests only
 464k tokens against a 476k threshold, two user prompts) logged no `precomputed compact:` line of any
 kind, so a gate that no log line names was closed: most likely the server flag, which a user cannot set.
 
+## Resuming a compacted session
+
+**Claude Code 2.1.282 does not resume a session that this plugin has compacted correctly.** This is an
+engine bug. It affects every plugin whose `session.compact` hook keeps rows, and it does not affect the
+built-in summary. `claude --resume` and `--fork-session` rebuild the conversation from the transcript
+file, and for these sessions they splice pre-compaction rows back in. The first request then carries
+duplicated tool calls, the debug log shows `ensureToolResultPairing: repaired …`, and most of the
+compacted conversation is missing. The session you are in is not affected: only the file on disk is.
+Measured on one session compacted from 364k to 310k tokens: after `--resume` the first request held
+74k tokens, and after the repair below it held 316k.
+
+Two things in the written transcript cause it. In both, rows after the `compact_boundary` point back at
+rows before it:
+1. A kept tool_result row gets a fresh `uuid`, but its `sourceToolAssistantUUID` (and `parentUuid`)
+   still names the **pre-compaction** assistant row. The loader re-parents through it, and the chain
+   walk re-enters the old rows.
+2. A kept assistant row keeps its `message.id`. The loader groups assistant rows by `message.id`
+   across the whole file, so it also pulls in the old copies.
+
+`repro/resume-after-hook-compaction/` reproduces it with a ten-line hook, and it is reported upstream.
+Until the engine is fixed, repair the file before resuming:
+
+```sh
+node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl          # dry run: what it would change
+node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl --write  # repair it
+```
+
+- **What it changes.** For each boundary without the built-in compaction's preserved-segment metadata,
+  it points each stale tool_result row at the post-boundary copy of its assistant row. It gives each
+  post-boundary assistant row whose `message.id` also appears before the boundary a scoped id
+  (`<id>_vc<n>`, the same for every row of one message). Rows before a boundary and rows the model
+  wrote after it are left alone, and unchanged lines are written back byte for byte.
+- **Safety.** It is a dry run unless you pass `--write`. `--write` refuses in these cases:
+  - a live Claude Code process has the session open (`~/.claude/sessions/<pid>.json` with a live pid);
+  - the file was written in the last two minutes, unless you also pass `--force`;
+  - the file has more than one hard link, unless you pass `--force` (the rewrite replaces this name
+    only, and the other names keep the unfixed rows);
+  - the file is not a `<session-id>.jsonl`, such as a subagent's transcript under `subagents/`, which
+    is not supported.
+
+  Otherwise it copies the file to `<file>.<UTC timestamp to the ms>.bak` with the same mode. It writes
+  the new content to a temp file with the original mode and fsyncs it. Just before the rename it checks
+  the file again (inode, size, mtime and ctime). If anything changed since the read, it aborts and
+  removes the temp and the backup. After the rename it fsyncs the directory where the filesystem
+  supports that. It follows a symlink and rewrites the real file. A second run changes nothing, and a transcript
+  with no hook compaction is left untouched.
+- **Cost trackers.** A tool that totals usage per `message.id` (and `requestId`) sees each scoped id as
+  a new message. This does not inflate totals: the engine already writes the kept copies with all
+  usage counters at 0 (all 285 kept copies in the measured session), and the script leaves `usage` and
+  `requestId` as they are. A tracker that counts messages rather than tokens will count those rows
+  once more.
+- **Scope.** Run it only on a session that is closed. The checks catch a registered Claude Code
+  process and any change before the rename. A writer that is not registered but still holds the file
+  open can append after the rename, and those rows go to the old, unlinked file and are lost. The next
+  compaction writes new rows the same way, so run it again after that compaction, before the next
+  resume.
+
 ## Cost
 
 The fork reads your session's cached prefix at the model's cache-read rate plus a short JSON reply:
