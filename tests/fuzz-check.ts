@@ -283,15 +283,20 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
     for (const d of result.decisions) {
       if (d.source === 'claude' && d.action !== 'keep' && !run.decidable.has(d.id)) fail(`claude ${d.action} on ${d.id}, which no acceptable reply decided`);
     }
-    // Retries, where no deadline can cut them short: a refused, api-error, unparseable or empty
-    // first ask is re-asked whole once, a failed whole re-ask of 2+ calls splits into two halves,
-    // and nothing else is re-asked.
+    // Retries, where no deadline can cut them short: a refused first ask of 2+ calls splits into two
+    // halves at once; any other refused, api-error, unparseable or empty first ask is re-asked whole
+    // once, a failed whole re-ask of 2+ calls splits into two halves, and nothing else is re-asked.
     if (!setup.timed) {
       const retryable = (st: string) => st === 'refused' || st === 'api-error' || st === 'unparseable' || st === 'empty';
       const runs = result.stats.forks ?? [];
       for (let k = 0; k < runs.length; k += 1) {
         const first = runs[k]!;
         if (first.retry) continue;
+        if (first.status === 'refused' && first.candidates >= 2) {
+          const halves = runs.slice(k + 1, k + 3).filter((x) => x.retry === 'half');
+          if (runs[k + 1]?.retry === 'whole' || halves.length !== 2) fail(`fork ${k} (refused, ${first.candidates}) was not split at once`);
+          continue;
+        }
         const whole = runs[k + 1]?.retry === 'whole' ? runs[k + 1] : undefined;
         if (retryable(first.status) !== (whole !== undefined)) fail(`fork ${k} (${first.status}) ${whole ? 'was' : 'was not'} re-asked whole`);
         if (!whole) continue;

@@ -90,19 +90,30 @@ describe('scoreWithClaude', () => {
       .toEqual(['2 ran', '2 unparseable', '2 unparseable whole', '1 unparseable half', '1 unparseable half']);
   });
 
-  it('re-asks a refused chunk whole once, and splits it only when that fails too', async () => {
+  it('splits a refused chunk into halves at once: a whole re-ask of refused content was refused again', async () => {
     const many = Array.from({ length: 4 }, (_, i) => c(`t${i + 1}`, 'Bash', { command: `echo ${i}` }));
     const refused = { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' } as never;
-    let wholeAsks = 0;
+    const sizes: number[] = [];
     const fork: ForkFn = async ({ prompt }) => {
       const ids = idsIn(prompt);
-      if (ids.length === 4) return ++wholeAsks === 1 ? refused : { text: reply({ call_matters: ids }) };
-      return { text: reply({ call_matters: ids }) };
+      sizes.push(ids.length);
+      return ids.length === 4 ? refused : { text: reply({ call_matters: ids }) };
     };
     const out = await scoreWithClaude(fork, many, opts());
+    expect(sizes).toEqual([4, 2, 2]);
     expect(out.status).toBe('ran');
     expect(out.verdicts.size).toBe(4);
-    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ` ${f.retry}` : ''}`)).toEqual(['4 refused', '4 ran whole']);
+    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ` ${f.retry}` : ''}`))
+      .toEqual(['4 refused', '2 ran half', '2 ran half']);
+  });
+
+  it('re-asks a refused single call whole once, since it cannot be split', async () => {
+    const refused = { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request' } as never;
+    let asks = 0;
+    const fork: ForkFn = async ({ prompt }) => (++asks === 1 ? refused : { text: reply({ call_matters: idsIn(prompt) }) });
+    const out = await scoreWithClaude(fork, [c('t1', 'Bash', { command: 'a' })], opts());
+    expect(out.status).toBe('ran');
+    expect(out.forks.map((f) => `${f.candidates} ${f.status}${f.retry ? ` ${f.retry}` : ''}`)).toEqual(['1 refused', '1 ran whole']);
   });
 
   it('splits into two concurrent halves when the whole re-ask fails too, one level only', async () => {

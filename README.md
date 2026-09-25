@@ -46,7 +46,8 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    chunks of `forkChunkSize` (60), one fork per chunk, all concurrent but never more than 8 (past that,
    chunks grow); each reuses the session's prompt cache, so three forks take about as long as one
    (measured: 3 × ~5 s forks in ~5 s wall). A chunk whose fork fails or whose reply does not parse is
-   re-asked whole once, then as two halves; whatever still fails decides nothing, and its calls are kept.
+   re-asked whole once, then as two halves (a refused one goes straight to the halves); whatever still
+   fails decides nothing, and its calls are kept.
    The forks race the short `claudeTimeoutMs` only when the rules alone already clear
    `minReductionRatio`; otherwise they are the only way to clear it, so they may take up to 45 s.
    A subagent's own compaction uses the rules only (the fork can only fork the main session).
@@ -65,8 +66,9 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    on 3 of 4 first tries, while the same lines cut to 120 or 200 characters passed 16 of 16. So a call's input is
    shown up to 120 characters, after its secret-bearing parts are reduced to names: env assignment
    values (`TOKEN=…`), HTTP header values (`-H 'Authorization: …'`) and heredoc bodies (`<<EOF …>`).
-   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) is re-asked
-   whole once, then as two halves. A refusal that lands mid-reply leaves cut-off text, which shows
+   A refused chunk (status `refused` in the log: a status-less `invalid_request` frame) goes straight
+   to two halves: a whole re-ask of the same lines was refused again both times it was tried (live, 2.1.282),
+   while the halves mostly answered. A refusal that lands mid-reply leaves cut-off text, which shows
    as `unparseable` because the fork result does not say why the text stopped.
 
 If the result saves less than `minReductionRatio` of the transcript's tool-result characters (the only
