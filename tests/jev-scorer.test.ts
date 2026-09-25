@@ -95,10 +95,14 @@ describe('buildJevPrompt', () => {
     expect(prompt).toMatch(/drop.*one-line note/);
   });
 
-  it('asks for bare-number ids and no deliberation: output tokens are what a fork waits on', () => {
+  it('asks for bare-number ids: output tokens are what a fork waits on', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
     expect(prompt).toMatch(/each id as its number alone \(t12 is 12\)/);
-    expect(prompt).toMatch(/without deliberating/);
+  });
+
+  it('does not ask the fork to skip deliberation: live, that prompt was refused on 8 of 28 first asks (0 of 9 without)', () => {
+    const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
+    expect(prompt).not.toMatch(/deliberat|at once|directly/i);
   });
 
   it('tells the fork not to call tools and to reply with the JSON only', () => {

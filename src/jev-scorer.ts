@@ -135,7 +135,7 @@ export function toWellFormed(text: string): string {
  */
 export function buildJevPrompt(calls: readonly ToolCall[], ctx: JevContext): string {
   return toWellFormed([
-    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request. Answer directly, without deliberating.',
+    'Context maintenance request. Do not continue the task. Do not call any tool: none is available for this request.',
     'This conversation is about to be compacted. Below are earlier tool calls from it, one per line: id, tool, position (msg i/N), input, outcome and output size, ref-later:n when values its output introduced are used later, then the start of its output.',
     'Keep the call when its input still matters. Keep the result verbatim only when its exact text is still needed and re-running would not do. Prefer truncate over drop unless a later call superseded it.',
     'For every call answer two questions: must its RESULT stay verbatim, and does the CALL itself (knowing it was made, with its input) still matter? If you cannot tell, put it in unsure.',
