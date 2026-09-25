@@ -1,3 +1,4 @@
+import { excerptPlan } from './excerpt.js';
 import { pinnedWindow } from './pin.js';
 import { bashCommand, readonlyFamilyKey, sourceReadPaths, stripCommandPrefix } from './rules-bash.js';
 import type { CallDecision, ResolvedCompactOptions, ToolCall } from './types.js';
@@ -10,7 +11,7 @@ const TAIL_WORD =
 const VERDICT =
   /(\b\d+ (?:passed|failed|skipped|errors?)\b|Tests?:|Test Files|exit(?:ed)? (?:code|status)|✓|✗|×|\bPASS\b|\bFAIL\b|error TS\d+|Build (?:succeeded|failed)|Done in|Ran \d+ tests?)/;
 
-/** Longest head a pinned token may stretch a truncation to; past it the result is kept whole. */
+/** Longest head a pinned token may stretch a truncation to; past it the result is excerpted instead. */
 export const MAX_PINNED_HEAD = 4000;
 
 /** Files whose end is a verdict: logs and background-task outputs. */
@@ -49,7 +50,8 @@ export interface ShapePlan {
  * Decides the shape of every truncation: head only, or head + tail for
  * log-like results. A call whose result carries later-quoted tokens is never
  * dropped: it is truncated to a window holding all of them (a wider tail, or a
- * head stretched up to MAX_PINNED_HEAD), or kept. A decision's own `headChars`
+ * head stretched up to MAX_PINNED_HEAD), else to the head and tail plus an
+ * excerpt window around each token they miss (see `excerptPlan`), else kept. A decision's own `headChars`
  * is honoured; 0 (a drop turned truncation) keeps no tail unless a pin needs one.
  */
 export function planShapes(
@@ -79,7 +81,15 @@ export function planShapes(
       maxTail: options.truncateTailChars,
       maxHead: Math.max(head, MAX_PINNED_HEAD),
     });
-    if (!window) return { id: decision.id, tool: decision.tool, action: 'keep', source: 'pinned' };
+    if (!window) {
+      const plan = excerptPlan(text, tokens, head, preferred);
+      if (!plan) return { id: decision.id, tool: decision.tool, action: 'keep', source: 'pinned' };
+      if (plan.tail > 0) tails.set(call.tool_use_id, plan.tail);
+      const excerpted: CallDecision = { ...decision, action: 'drop_result' };
+      if (plan.head !== head) excerpted.headChars = plan.head;
+      if (plan.windows.length > 0) excerpted.windows = plan.windows;
+      return excerpted;
+    }
     if (window.tail > 0) tails.set(call.tool_use_id, window.tail);
     const truncated: CallDecision = { ...decision, action: 'drop_result' };
     return window.head === head ? truncated : { ...truncated, headChars: window.head };

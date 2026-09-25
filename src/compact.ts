@@ -3,7 +3,7 @@ import { collectToolCalls } from './calls.js';
 import { resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
-import { sliceWhole, sliceWholeEnd } from './text.js';
+import { renderTruncation } from './excerpt.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -25,8 +25,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   pinReferenced: true,
   stripMcpFurniture: true,
 };
-
-export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -65,15 +63,15 @@ function shrinks(resultChars: number, headChars: number, tailChars = 0): boolean
   return resultChars > headChars + tailChars + 120;
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
-  if (!shrinks(text.length, headChars, tailChars)) return text;
-  const kept = sliceWhole(text, headChars);
-  const end = sliceWholeEnd(text, tailChars);
-  const head = kept.length > 0 ? `${kept}\n` : '';
-  const tail = end.length > 0 ? `\n${end}` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length - end.length} chars of this tool result${
-    isError ? ' (error)' : ''
-  }; re-run the tool if needed]${tail}`;
+function truncatedResultText(
+  text: string,
+  isError: boolean,
+  headChars: number,
+  tailChars = 0,
+  windows: Array<[number, number]> = [],
+): string {
+  if (windows.length === 0 && !shrinks(text.length, headChars, tailChars)) return text;
+  return renderTruncation(text, isError, { head: headChars, tail: tailChars, windows });
 }
 
 /**
@@ -93,11 +91,13 @@ export function applyDecisions(
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
   const heads = new Map<string, number>();
+  const windows = new Map<string, Array<[number, number]>>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') continue;
     actions.set(call.tool_use_id, decision.action);
     if (decision.headChars !== undefined) heads.set(call.tool_use_id, decision.headChars);
+    if (decision.windows && decision.windows.length > 0) windows.set(call.tool_use_id, decision.windows);
   }
   const kept: Message[] = [];
   for (const message of messages) {
@@ -117,7 +117,13 @@ export function applyDecisions(
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
         const head = heads.get(result.tool_use_id) ?? headChars;
-        const text = truncatedResultText(result.text, result.isError ?? false, head, tails.get(result.tool_use_id));
+        const text = truncatedResultText(
+          result.text,
+          result.isError ?? false,
+          head,
+          tails.get(result.tool_use_id),
+          windows.get(result.tool_use_id),
+        );
         return text === result.text
           ? result
           : {
@@ -165,7 +171,8 @@ function preferTruncation(decision: CallDecision, call: ToolCall, messages: read
 
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
 function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
-  if (decision.action !== 'drop_result') return decision;
+  // Excerpt windows are planned only where they shrink the result (see excerptPlan).
+  if (decision.action !== 'drop_result' || (decision.windows?.length ?? 0) > 0) return decision;
   return shrinks(text.length, decision.headChars ?? headChars, tailChars) ? decision : { ...decision, action: 'keep' };
 }
 

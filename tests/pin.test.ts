@@ -30,6 +30,12 @@ describe('distinctiveTokens', () => {
     }
   });
 
+  it('finds short identifiers with two or more underscores or humps', () => {
+    const tokens = distinctiveTokens('const expiresAt = now + LOCK_TTL_MS; getUserName(); MAX_PIN; isOk; a_b_c');
+    expect(tokens).toEqual(expect.arrayContaining(['LOCK_TTL_MS', 'getUserName']));
+    for (const t of ['expiresAt', 'MAX_PIN', 'isOk', 'a_b_c']) expect(tokens).not.toContain(t);
+  });
+
   it('skips years, plain words, short numbers and hex-looking words without a digit', () => {
     const tokens = distinctiveTokens('in 2026 the implementation of 123 was defaced');
     expect(tokens).toEqual([]);

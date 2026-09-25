@@ -30,9 +30,12 @@ Upstream scores with TypeSafe's Jev API. This fork sends nothing to any third pa
    exactly (integers past 2^53) is left alone.
 
    **Referenced-later pin.** A result that introduced a distinctive token (a sha, `#123`, `ABC-123`, a
-   path, a URL, a dollar amount, a long number or identifier) which later assistant text or a later tool
-   input quotes (edits excluded) is never dropped, whichever stage decided it: it is truncated only to a
-   head or head+tail window that still holds the token's first occurrence, or kept verbatim. Only text
+   path, a URL, a dollar amount, a long number, a long identifier or one with two or more underscores or
+   humps) which later assistant text or a later tool input quotes (edits excluded) is never dropped,
+   whichever stage decided it: it is truncated only to a head (stretched up to 4000 chars) or head+tail
+   window that still holds the token's first occurrence. When no such window does, it keeps its head and
+   tail plus an excerpt of the lines within 200 chars of each token they miss, each gap marked
+   `[… N chars omitted …]`; only when those pieces would exceed 4000 chars is it kept verbatim. Only text
    that is never pruned (user and assistant text, pinned results) counts as already having the token;
    an edit's input does not, because the edit itself can be dropped.
 2. **Claude** (optional): tool-less `$.model.fork`s of your own session are asked Jev's two questions
