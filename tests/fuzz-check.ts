@@ -591,6 +591,34 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
       if (!before.includes(q.token)) fail(`later-quoted ${q.token} (quoted at row ${at}) is gone from the context before it`);
     }
   }
+  for (const f of checkLiveInstructions(input, session)) fail(f);
+  return failures;
+}
+
+/**
+ * 11. Live instructions are never shortened (shrink.ts liveInstructionIds, written independently):
+ *     a background or teammate spawn's prompt, and a SendMessage body until its recipient writes after it.
+ */
+function checkLiveInstructions(input: readonly Message[], session: readonly Message[]): string[] {
+  const failures: string[] = [];
+  const out = new Map(session.flatMap((m) => m.toolUses.map((u) => [u.tool_use_id, u] as const)));
+  const resultAt = new Map(input.flatMap((m, i) => (m.toolResults ?? []).map((r) => [r.tool_use_id, i] as const)));
+  input.forEach((m) => {
+    for (const u of m.toolUses) {
+      const now = out.get(u.tool_use_id);
+      if (!now || JSON.stringify(now.input) === JSON.stringify(u.input)) continue;
+      if (u.tool === 'Agent' && (u.input['run_in_background'] === true || typeof u.input['name'] === 'string')) {
+        failures.push(`live ${u.input['name'] ? 'teammate' : 'background'} agent ${u.tool_use_id}: prompt shortened`);
+      }
+      if (u.tool === 'SendMessage') {
+        const to = u.input['to'];
+        const after = resultAt.get(u.tool_use_id) ?? Infinity;
+        const answered = typeof to === 'string' && to !== '*' &&
+          input.some((x, k) => k > after && x.role === 'user' && x.text.includes(`teammate_id="${to}"`));
+        if (!answered) failures.push(`SendMessage ${u.tool_use_id} to ${String(to)}: body shortened before an answer`);
+      }
+    }
+  });
   return failures;
 }
 

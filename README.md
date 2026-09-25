@@ -183,6 +183,12 @@ and a note naming what went (`[verbatim-compaction shortened this old command: â
 every other field stay. A field is kept whole when its quoted lines would not fit, and one holding a note
 is never cut again. `AskUserQuestion`, `ExitPlanMode` and `TodoWrite` are never touched.
 
+Instructions something may still be acting on are never shortened either. A subagent prompt is cut only
+when its tool result is the agent's report: an agent spawned in the background or as a named teammate,
+or one whose result only says it was spawned, is still running (or reports later, elsewhere), and its
+prompt stays whole. A `SendMessage` body stays whole until its recipient has written after it; a
+broadcast (`*`) stays whole.
+
 A shortened call is handed back as a rebuilt row, and Claude Code merges every row of one reply into
 the place of its first row. So a reply's calls are rebuilt together as one row, and only when nothing
 but their results follows them; in a parallel reply Claude Code wrote as call, result, call, result,

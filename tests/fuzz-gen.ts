@@ -339,12 +339,32 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
   // seed stays what it was before they existed.
   const rl = rng(seed ^ 0x9e3779b9);
   const pendingQuotes: Array<{ token: string; carrier?: string }> = [];
+  // Live instructions (shrink.ts liveInstructionIds) draw from their own stream too: some Agent
+  // calls become background or teammate spawns, or SendMessages to a teammate, all with long text.
+  const ra = rng(seed ^ 0x5eed1ab5);
+  const live = new Map<string, 'background' | 'teammate' | 'send'>();
   let n = 0;
   const turns = int(r, 4, options.maxTurns ?? 60);
   for (let i = 0; i < turns; i += 1) {
     const uses: ToolUse[] = (chance(r, 0.2) ? [`u${i}a`, `u${i}b`] : [`u${i}`]).map((id) => {
       const tool = pick(r, TOOLS);
       const input = inputFor(r, tool, i, secrets);
+      if (tool === 'Agent') {
+        const k = ra();
+        const text = Array.from({ length: int(ra, 40, 90) }, (_, j) => `Instruction ${j} for step ${i}: keep going.`).join('\n');
+        if (k < 0.2) {
+          live.set(id, 'background');
+          return { tool_use_id: id, tool, input: { ...input, prompt: text, run_in_background: true } };
+        }
+        if (k < 0.35) {
+          live.set(id, 'teammate');
+          return { tool_use_id: id, tool, input: { ...input, prompt: text, name: pick(ra, ['a1', 'a2', 'a3']), team_name: 'team' } };
+        }
+        if (k < 0.55) {
+          live.set(id, 'send');
+          return { tool_use_id: id, tool: 'SendMessage', input: { to: pick(ra, ['a1', 'a2', 'a3', '*']), message: text } };
+        }
+      }
       if (!chance(rl, 0.25)) return { tool_use_id: id, tool, input };
       const planted: string[] = [];
       const long = lengthen(rl, tool, input, i, planted);
@@ -373,7 +393,13 @@ export function genTranscript(seed: number, options: GenOptions = {}): Transcrip
     if (!interleave) messages.push(...useRows);
     const results: ToolResult[] = uses.map((u) => {
       const f = chance(r, 0.6) ? fact(r, n++) : undefined;
-      const built = resultFor(r, u, i, f);
+      // A converted call draws what its Agent would have, so the rest of the seed is unchanged.
+      const kind = live.get(u.tool_use_id);
+      const drawn = resultFor(r, kind ? { ...u, tool: 'Agent' } : u, i, f);
+      const built = kind === 'send' ? { text: '{"success":true}', exotic: false }
+        : kind === 'background' ? { text: `Async agent launched successfully. agentId: a${i} (the agent is now running in the background)`, exotic: false }
+          : kind === 'teammate' ? { text: `Spawned successfully as ${String(u.input['name'])}. The agent is now running.`, exotic: false }
+            : drawn;
       if (built.exotic) exoticMcp.add(u.tool_use_id);
       const result: ToolResult = { tool_use_id: u.tool_use_id, text: built.text };
       const err = r();

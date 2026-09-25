@@ -51,6 +51,50 @@ const MAX_DEPTH = 3;
 
 /** Tools whose input is a decision record the model must keep reading whole. */
 const EXCLUDED_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode', 'TodoWrite']);
+/** Subagent tools: their input is the agent's instructions. */
+const AGENT_TOOLS = new Set(['Agent', 'Task']);
+/** A result that only says the agent started: it is running, and its instructions are live. */
+const SPAWN_ONLY = /Async agent launched|Spawned successfully|running in the background|is now running/i;
+/** How much of a result the spawn check reads: a spawn notice is short, a report may quote one later on. */
+const SPAWN_HEAD = 400;
+
+/**
+ * Calls whose input is instructions something may still be acting on, which shrinkOld never
+ * shortens (seen live: a background agent's prompt was cut while it ran, and the note told the
+ * parent the agent had already reported):
+ *  - an Agent/Task spawned in the background or as a named teammate, or whose result is only the
+ *    spawn notice (or empty): its report, if any, arrives later, not in this result;
+ *  - a SendMessage with no single recipient (`*`, none), or whose recipient has not written since
+ *    (no later `<teammate-message teammate_id="…">` or `from="…"` row from it): it may still be
+ *    working on the message.
+ */
+export function liveInstructionIds(calls: readonly ToolCall[], messages: readonly Message[]): Set<string> {
+  const live = new Set<string>();
+  // Where each sender last wrote: the index of its newest message row.
+  let lastFrom: Map<string, number> | undefined;
+  const senders = () => {
+    if (lastFrom) return lastFrom;
+    lastFrom = new Map();
+    messages.forEach((m, i) => {
+      if (m.role !== 'user') return;
+      for (const match of m.text.matchAll(/(?:teammate_id|from)="([^"]+)"/g)) lastFrom!.set(match[1]!, i);
+    });
+    return lastFrom;
+  };
+  for (const call of calls) {
+    if (AGENT_TOOLS.has(call.tool)) {
+      const result = (call.resultText ?? call.resultHead ?? '').slice(0, SPAWN_HEAD);
+      const named = typeof call.input['name'] === 'string' && call.input['name'].length > 0;
+      if (call.input['run_in_background'] === true || named || result.trim() === '' || SPAWN_ONLY.test(result)) live.add(call.tool_use_id);
+    } else if (call.tool === 'SendMessage') {
+      const to = call.input['to'];
+      const answered = typeof to === 'string' && to !== '*' && (senders().get(to) ?? -1) > call.resultIndex;
+      if (!answered) live.add(call.tool_use_id);
+    }
+  }
+  return live;
+}
+
 /** Tools whose result only confirms the input landed on disk: a quoted result needs none of the input. */
 const AUTHORING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
@@ -156,9 +200,10 @@ function specFor(tool: string): ShrinkSpec {
       return { head: 200, what: 'this old edit text', hint: ON_DISK };
     case 'Agent':
     case 'Task':
-      return { head: 600, what: 'this old subagent prompt', hint: 'the agent already ran; its report is in the tool result' };
+      // Only a call whose result is the agent's report is shortened (liveInstructionIds).
+      return { head: 600, what: 'this old subagent prompt', hint: "the tool result holds the agent's report" };
     case 'SendMessage':
-      return { head: 600, what: 'this old message', hint: 'it was already sent' };
+      return { head: 600, what: 'this old message', hint: 'it was sent, and the recipient has written since' };
     default:
       return { head: 400, what: `this old ${tool} input`, hint: 'the call already ran' };
   }
@@ -221,7 +266,8 @@ export function shrinkOld(
   original.forEach((m, i) => indexOf.set(m, i));
   const oldEnough = (i: number | undefined): i is number =>
     i !== undefined && i > 0 && i < total - options.preserveRecentMessages && total - 1 - i > options.staleAfterMessages;
-  const eligible = new Set(calls.filter((c) => !c.pinned && oldEnough(c.callIndex) && !EXCLUDED_TOOLS.has(c.tool)).map((c) => c.tool_use_id));
+  const live = liveInstructionIds(calls, original);
+  const eligible = new Set(calls.filter((c) => !c.pinned && oldEnough(c.callIndex) && !EXCLUDED_TOOLS.has(c.tool) && !live.has(c.tool_use_id)).map((c) => c.tool_use_id));
   // A result the work went on to quote is read with its call: its input keeps twice the head.
   const quotedResult = new Set(calls.filter((c) => (c.refLater ?? 0) > 0 && !AUTHORING_TOOLS.has(c.tool)).map((c) => c.tool_use_id));
   const callIndex = new Map(calls.map((c) => [c.tool_use_id, c.callIndex]));
