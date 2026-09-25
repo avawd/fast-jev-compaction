@@ -1,7 +1,8 @@
 /**
  * Rider DETECTION over seeded API views: the shapes 2.1.282's normalizer produces (riders folded into
  * a result's content or left as siblings, several reminders in one block, parallel results hoisted
- * to the front of a merged message, a typed prompt merged in with a trailing newline), each built
+ * to the front of a merged message, a typed prompt merged in with a trailing newline, a result whose
+ * row text ends in a newline the fold trims), each built
  * from a known ground truth. Every truly carried rider must be detected; a result may be protected
  * without one only when it shares an API message with a sibling rider (attribution is ambiguous
  * there by construction).
@@ -47,13 +48,17 @@ function viewCase(seed: number) {
     const siblings: Array<Record<string, unknown>> = [];
     let siblingReal = false;
     for (const id of ids) {
-      const out = `output of ${id} ${'x'.repeat(int(r, 0, 40))}`;
+      // The row's text may end in a newline the engine trims when it folds a rider into the content:
+      // then the row text is not a substring of the content, and detection takes its fallback.
+      const trailing = chance(r, 0.25) ? pick(r, ['\n', '\n\n', ' \n']) : '';
+      const out = `output of ${id} ${'x'.repeat(int(r, 0, 40))}${trailing}`;
       rows.push({ role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: id, text: out }] });
       let content: unknown = out;
       if (chance(r, 0.4)) {
         const rd = rider(r);
         if (rd.real) truthCalls.add(id);
-        if (chance(r, 0.6)) content = chance(r, 0.5) ? `${out}\n${rd.text}` : [{ type: 'text', text: out }, { type: 'text', text: rd.text }];
+        const shown = out.trimEnd();
+        if (chance(r, 0.6)) content = chance(r, 0.5) ? `${shown}\n${rd.text}` : [{ type: 'text', text: shown }, { type: 'text', text: rd.text }];
         else {
           siblings.push({ type: 'text', text: rd.text });
           siblingReal ||= rd.real;

@@ -72,10 +72,11 @@ function resultContent(block: Record<string, unknown>): { text: string; other: b
  */
 function foldedRider(block: Record<string, unknown>, rowText: string | undefined): boolean {
   const { text } = resultContent(block);
-  if (rowText !== undefined && text.includes(rowText)) return !ephemeralText(text.replace(rowText, ''));
-  const own = rowText ?? '';
+  // The fold trims the result's text: a row text ending in whitespace is found without it.
+  const own = rowText?.trimEnd();
+  if (own !== undefined && text.includes(own)) return !ephemeralText(text.replace(own, ''));
   for (const m of text.matchAll(REMINDER)) {
-    if (own.includes(m[0])) continue;
+    if ((rowText ?? '').includes(m[0])) continue;
     if (!EPHEMERAL.some((re) => re.test(m[1]!.trim()))) return true;
   }
   return false;

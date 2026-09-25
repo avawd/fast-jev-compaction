@@ -136,6 +136,33 @@ describe('riders', () => {
     expect(cut.messages[1]).not.toBe(input[1]);
   });
 
+  it('LOW 3: protected rows reach the teammate and task passes: each comes back as the same object', async () => {
+    const body = (tag: string) => Array.from({ length: 80 }, (_, i) => `- ${tag} line ${i} of a long stale report, long enough to cut`).join('\n');
+    const tm = (id: string) => `Another Claude session sent a message:\n<teammate-message teammate_id="${id}" color="blue">\n${body(id)}\n</teammate-message>`;
+    const task = (id: string) => `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_${id}</tool-use-id>\n<status>completed</status>\n<summary>Agent "${id}" finished</summary>\n<result>${body(id)}</result>\n</task-notification>`;
+    const input = [
+      m('user', 'Start.', { handle: 'h0' }),
+      m('user', tm('a1'), { handle: 'h1' }),
+      m('user', tm('b2'), { handle: 'h2' }),
+      m('user', task('t1'), { handle: 'h3' }),
+      m('user', task('t2'), { handle: 'h4' }),
+      ...Array.from({ length: 120 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`, { handle: `r${i}` })),
+    ];
+    const rider = { type: 'text', text: '<system-reminder>\nThe user sent a new message while you were working:\nTYPED\n</system-reminder>' };
+    const view = async () => [{ role: 'user', content: [
+      { type: 'text', text: 'Start.' }, { type: 'text', text: tm('a1') }, rider, { type: 'text', text: tm('b2') },
+      { type: 'text', text: task('t1') }, rider, { type: 'text', text: task('t2') },
+    ] }];
+    const h = harness({ userConfig: { useClaudeScorer: false, minReductionRatio: 0.01 }, apiMessages: view });
+    const out = (await h.compact({ trigger: 'manual', messages: input })) as { messages?: SessionMessage[] };
+    expect(out.messages).toBeDefined();
+    expect(out.messages![1]).toBe(input[1]);
+    expect(out.messages![2]).not.toBe(input[2]);
+    expect(out.messages![3]).toBe(input[3]);
+    expect(out.messages![4]).not.toBe(input[4]);
+    expect(h.debugLogs.join('\n')).toMatch(/2 messages kept whole: riders/);
+  });
+
   it('still truncates it when only an ephemeral reminder rides on it', async () => {
     const h = harness({ userConfig: { useClaudeScorer: false }, apiMessages: api('<total_tokens>5 tokens left</total_tokens>') });
     const input = transcript();
