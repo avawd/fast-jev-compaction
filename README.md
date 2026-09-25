@@ -95,8 +95,10 @@ count still accounts for the original result. It is never truncated twice over (
 **How far verbatim compaction can go in a long session.** Replayed over the maintainers' corpus
 (`npm run eval:offline -- --replay`, a 400k window), tool results were under a fifth of the context at
 the first compaction and about a tenth at later ones. The rest was the system prompt and tools, user
-and assistant text, tool inputs, and the model's earlier thinking, which stays in context (a fit to
-the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never touches. So a prune
+and assistant text, tool inputs, and context the hook never sees, which grows with the session (a fit
+to the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never
+touches. It is not the model's earlier thinking: leaving old turns' thinking rows out of a live
+compaction did not change the next request's input tokens. So a prune
 frees less each time, and on every long session replayed one of the later compactions still fell back
 to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
 sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
@@ -166,7 +168,6 @@ debug log names the keys it looked for).
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 | `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
-| `dropOldThinking` | false | Also leave out the thinking-only rows of completed earlier turns: never the last assistant turn's (an active tool loop needs its thinking), the first message or the preserved tail. Accepted live (3 forked runs, no API error, recall intact), but whether it lowers the next request's input tokens is not yet measured cleanly, so it is off (see eval/README.md, "Replay") |
 
 ### Precompute
 

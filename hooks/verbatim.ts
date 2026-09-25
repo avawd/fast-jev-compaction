@@ -39,8 +39,6 @@ export type HookConfig = {
    * candidates but at most 1.5% of the tool output. Whole number, at least 0 (0 asks about all).
    */
   minCandidateChars: number;
-  /** Leave out the thinking of completed earlier turns (src/thinking.ts). */
-  dropOldThinking: boolean;
 };
 
 /**
@@ -79,7 +77,6 @@ const DEFAULTS: HookConfig = {
   keepThreshold: 0.5,
   forkChunkSize: 60,
   minCandidateChars: 200,
-  dropOldThinking: false,
 };
 
 function num(options: PluginOptions, key: keyof HookConfig, fallback: number): number {
@@ -119,7 +116,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     keepThreshold: clamp(num(options, 'keepThreshold', DEFAULTS.keepThreshold), 0, 1),
     forkChunkSize: clamp(Math.floor(num(options, 'forkChunkSize', DEFAULTS.forkChunkSize)), 1, MAX_FORK_CHUNK_SIZE),
     minCandidateChars: Math.max(0, Math.floor(num(options, 'minCandidateChars', DEFAULTS.minCandidateChars))),
-    dropOldThinking: bool(options, 'dropOldThinking', DEFAULTS.dropOldThinking),
   };
 }
 
@@ -202,8 +198,7 @@ export function summarize(result: CompactResult): string {
   const s = result.stats;
   return `${Math.round(gateRatio(result) * 100)}% of tool output (${Math.round(reductionRatio(result) * 100)}% of transcript); rules ${s.byRule}, claude ${s.byClaude} (${claudeStage(s)}), ` +
     `untouched ${s.kept}, pinned ${s.pinned}; ${s.resultsDropped} truncated${s.callsDropped > 0 ? `, ${s.callsDropped} dropped` : ''}` +
-    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}` +
-    `${s.thinkingDropped ? `; ${s.thinkingDropped} old thinking blocks left out` : ''}`;
+    `${s.tier === 2 ? '; tier 2 (stricter: an earlier compaction had already cut the old output)' : ''}`;
 }
 
 /** Per-fork timings, for the debug log: which wait applied, each fork's size, time and outcome. */

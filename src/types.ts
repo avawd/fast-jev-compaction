@@ -163,11 +163,6 @@ export interface CompactOptions {
    * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
    */
   escalateBelow?: number;
-  /**
-   * Leave out the thinking-only rows of completed earlier turns (never the last assistant turn's,
-   * the first message or the preserved tail). See thinking.ts. Default false.
-   */
-  dropOldThinking?: boolean;
 }
 
 export interface ResolvedCompactOptions {
@@ -206,8 +201,6 @@ export interface CompactResult {
     wait?: 'race' | 'await';
     /** 2 when the stricter second tier produced this result (see CompactOptions.escalateBelow). */
     tier?: 2;
-    /** Thinking-only rows left out (CompactOptions.dropOldThinking); absent when that is off. */
-    thinkingDropped?: number;
     ms: number;
   };
 }

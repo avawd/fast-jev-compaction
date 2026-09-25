@@ -66,8 +66,6 @@ function setupFor(seed: number, transcript: Transcript): CaseSetup {
     stripMcpFurniture: chance(r, 0.85),
   };
   if (transcript.cwd) options.cwd = transcript.cwd;
-  // Its own stream, so adding it left every other option of every seed as it was.
-  if (chance(rng(Math.imul(seed, 11) + 3), 0.5)) options.dropOldThinking = true;
   return { options, scorerKind: chance(r, 0.7) ? 'claude' : 'raw', timed: chance(r, 0.75) };
 }
 
@@ -229,24 +227,8 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   const tailOut = preserve === 0 ? [] : session.slice(-preserve);
   tailIn.forEach((m, i) => { if (tailOut[i] !== m) fail(`preserved tail row ${i} (${m.handle}) replaced`); });
 
-  // 4a. A thinking-only row (assistant, no text, no tool blocks) may go only with dropOldThinking,
-  //     and only from a completed earlier turn: never the first row, the preserved tail, or anything
-  //     from the last typed prompt on (an active tool loop's thinking must stay). Written from the
-  //     README, independently of thinking.ts.
-  const isThink = (m: Message) => m.role === 'assistant' && m.text.trim() === '' && m.toolUses.length === 0 && (m.toolResults ?? []).length === 0;
-  let lastPrompt = 0;
-  input.forEach((m, i) => { if (m.role === 'user' && (m.toolResults ?? []).length === 0) lastPrompt = i; });
-  const sessionSet = new Set<Message>(session);
-  input.forEach((m, i) => {
-    if (!isThink(m) || sessionSet.has(m)) return;
-    if (setup.options.dropOldThinking !== true) fail(`thinking row ${i} dropped with dropOldThinking off`);
-    else if (i === 0 || i >= input.length - preserve || i >= lastPrompt) fail(`thinking row ${i} dropped from the first row, the tail or the last turn (prompt at ${lastPrompt})`);
-  });
-  const droppedThinking = input.filter((m) => isThink(m) && !sessionSet.has(m)).length;
-  if ((result.stats.thinkingDropped ?? 0) !== droppedThinking) fail(`stats.thinkingDropped ${result.stats.thinkingDropped} but ${droppedThinking} thinking rows went`);
-
-  // 4. Text never edited, and rows without tool blocks (other than old thinking, 4a) are never removed or rebuilt.
-  const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0 && !(isThink(m) && !sessionSet.has(m)));
+  // 4. Text never edited, and rows without tool blocks are never removed or rebuilt.
+  const plainIn = input.filter((m) => m.toolUses.length === 0 && (m.toolResults ?? []).length === 0);
   const plainSet = new Set<Message>(plainIn);
   const plainOut = session.filter((m) => plainSet.has(m));
   if (plainIn.length !== plainOut.length || plainIn.some((m, i) => plainOut[i] !== m)) fail('a plain text row was removed or rebuilt');

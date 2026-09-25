@@ -42,7 +42,7 @@ describe('resolveHookConfig', () => {
       compactAtPercent: 60, minReductionRatio: 0.25, preserveRecentMessages: 6,
       truncateHeadChars: 300, maxCandidates: 400, useClaudeScorer: true, claudeTimeoutMs: 30000,
       truncateTailChars: 1000, staleAfterMessages: 100, pinReferenced: true, stripMcpFurniture: true,
-      keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200, dropOldThinking: false,
+      keepThreshold: 0.5, forkChunkSize: 60, minCandidateChars: 200,
     });
     expect(resolveHookConfig({ claudeTimeoutMs: 2500 }).claudeTimeoutMs).toBe(2500);
     expect(resolveHookConfig({ useClaudeScorer: false, maxCandidates: 50 })).toMatchObject({
@@ -339,19 +339,6 @@ describe('register', () => {
       const escalated = await compactSession(old, resolveHookConfig({ useClaudeScorer: false }));
       expect(escalated.result.stats.tier).toBe(2);
       expect(summarize(escalated.result)).toMatch(/tier 2/);
-    });
-
-    it('leaves out old thinking only when dropOldThinking is set, and says so', async () => {
-      const turn = (i: number): SessionMessage[] => [
-        m('user', `prompt ${i}`), m('assistant', ''), m('assistant', `answer ${i}`),
-      ];
-      const input = [...turn(0), ...turn(1), ...turn(2), ...turn(3), ...transcript()];
-      expect(resolveHookConfig({}).dropOldThinking).toBe(false);
-      const off = await compactSession(input, resolveHookConfig({ useClaudeScorer: false }));
-      expect(off.messages.filter((x) => x.role === 'assistant' && x.text === '' && x.toolUses.length === 0)).toHaveLength(4);
-      const on = await compactSession(input, resolveHookConfig({ useClaudeScorer: false, dropOldThinking: true }));
-      expect(on.messages.filter((x) => x.role === 'assistant' && x.text === '' && x.toolUses.length === 0)).toHaveLength(0);
-      expect(summarize(on.result)).toMatch(/4 old thinking blocks left out/);
     });
 
     it('survives a throwing toast and log', async () => {

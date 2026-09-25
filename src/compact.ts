@@ -4,7 +4,6 @@ import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
 import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
-import { dropOldThinking } from './thinking.js';
 import { truncatedResultText } from './truncate.js';
 import type {
   CallDecision,
@@ -201,17 +200,12 @@ export async function compact(
     : { verdicts: new Map(), claude: 'skipped' };
   const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started);
   const gate = options.escalateBelow;
-  let result = first;
-  if (typeof gate === 'number' && gateRatio(first) < gate && wasCompacted(messages)) {
-    const strict = tier2Options(resolved);
-    const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
-    const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
-    if (gateRatio(second) > gateRatio(first)) result = { ...second, stats: { ...second.stats, tier: 2 } };
-  }
-  if (options.dropOldThinking !== true) return result;
-  // Thinking is invisible to the gate (its rows have no text), so it moves no ratio: only rows.
-  const thin = dropOldThinking(messages, result.messages, resolved.preserveRecentMessages);
-  return { ...result, messages: thin.messages, stats: { ...result.stats, messagesAfter: thin.messages.length, thinkingDropped: thin.dropped } };
+  if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
+  const strict = tier2Options(resolved);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
+  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
+  if (!(gateRatio(second) > gateRatio(first))) return first;
+  return { ...second, stats: { ...second.stats, tier: 2 } };
 }
 
 /** Decisions from verdicts, shaped (pins, tails), applied; the stats of what happened. */

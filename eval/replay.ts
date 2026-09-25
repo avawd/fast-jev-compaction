@@ -7,10 +7,12 @@
  *   npm run eval:offline -- --replay <label|file> [--whole] [--arms rules,trunc,floor]
  *       [--window 400000] [--compact-at 0.6] [--auto-at 0.92] [--options '<json>'] [--json <out>]
  *
- * Context tokens are modelled as overhead + a·visible chars + b·hidden (thinking) chars, fitted by
+ * Context tokens are modelled as overhead + a·visible chars + b·hidden chars, fitted by
  * least squares to the transcript's own API usage rows (`--fit none` uses the corpus-wide fit).
- * The hook never sees thinking, but the model's context carries it, and verbatim pruning never
- * removes it: only a built-in summary does. No model calls are made.
+ * "Hidden" is measured as the stored thinking (text and signature) chars, the best predictor of what
+ * the hook cannot see; it is a proxy, not the thinking itself. A live A/B (identical rules-only
+ * pruning, old-turn thinking rows left out or kept) gave the same next-request input tokens, so
+ * leaving thinking out does not shrink it. Pruning never touches the hidden part. No model calls.
  */
 import { contextBlob, factSets, survival, type Fact } from './facts.ts';
 import { carriedPrefix, type EvalMessage, type Segment } from './parse.ts';
@@ -27,7 +29,7 @@ export interface TokenModel {
 
 /**
  * Least-squares fit over this corpus's 5,897 assistant usage rows (median error 5.5%, p90 11.7%):
- * ~69k tokens of system prompt and tools, 1.54 visible chars per token, 0.16 tokens per thinking char.
+ * ~69k tokens of system prompt and tools, 1.54 visible chars per token, 0.16 tokens per hidden (thinking) char.
  */
 export const CORPUS_TOKEN_MODEL: TokenModel = { overhead: 69_465, perVisibleChar: 0.648, perHiddenChar: 0.162 };
 
@@ -154,7 +156,7 @@ export function idempotence(before: readonly EvalMessage[], after: readonly Eval
 
 export interface Stream {
   messages: EvalMessage[];
-  /** Hidden (thinking) chars per row. */
+  /** Hidden-context proxy per row: its stored thinking chars (see the header). */
   hidden: number[];
   /** API usage tokens per row (0 where none). */
   usage?: number[];

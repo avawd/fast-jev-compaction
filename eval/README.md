@@ -112,15 +112,17 @@ the compacted transcript forward and keeps appending the real later rows. No mod
 npm run eval:offline -- --replay coding-2                 # one corpus segment, all three arms
 npm run eval:offline -- --replay coding --whole           # every segment of the file, joined
 npm run eval:offline -- --replay long-ops --arms trunc --window 1000000 --compact-at 0.6 --auto-at 0.92
-npm run eval:offline -- --replay long-ops --options '{"dropOldThinking":true}'
 ```
 
-**Context model.** Tokens = overhead + a·visible chars + b·thinking chars (thinking text and
-signature, which the hook never sees), fitted by least squares to the transcript's own API usage rows
-before its first real compaction (`--fit corpus` uses the corpus-wide fit, `--fit visible` drops the
-thinking term). Per-transcript fits have a median error of 0.4-2.3%; the corpus-wide one 5.5%. The
-thinking term is not an artefact: without it the median error is two to four times higher, and the one live
-verbatim compaction in the corpus reported post-compaction message tokens that match thinking kept.
+**Context model.** Tokens = overhead + a·visible chars + b·hidden chars, fitted by least squares to
+the transcript's own API usage rows before its first real compaction (`--fit corpus` uses the
+corpus-wide fit, `--fit visible` drops the hidden term). Per-transcript fits have a median error of
+0.4-2.3%; the corpus-wide one 5.5%; without the hidden term, two to four times higher. The hidden term
+is measured by the stored thinking (text and signature) chars because they predict it best, but it is
+a proxy for context the hook never sees, not the thinking itself: in a live A/B (rules-only pruning,
+identical visible transcript, old turns' thinking rows left out in one run and kept in the other,
+334k thinking chars apart) the next request's input tokens were 523,656 and 523,571. Pruning never
+touches the hidden part, and neither did leaving thinking out.
 
 **Triggers.** The plugin requests a compaction at a turn end once context reaches `--compact-at`
 (default 0.6 of `--window`, default 400k), then waits for context to drop under it again, as the hook
@@ -135,14 +137,6 @@ context before→after (`OVER` = still at or above the auto-compact point), the 
 lost, and idempotence: results already truncated going in / cut again / holding more than one note /
 removed. The arm line adds the mean survival sampled every 25 rows, which says more than the final
 figure (that depends on where the last summary happens to fall).
-
-With `--options '{"dropOldThinking":true}'` a pass leaves out old thinking rows (src/thinking.ts),
-and the model counts their thinking out of the context from then on. That saving is only as real as
-the thinking term. Per API request (each message id once), the corpus says thinking costs ~0.28
-tokens per stored thinking+signature char in the next request, and none of it drops away at a new
-prompt. But in three forked live runs (one without, two with the option) the next request's input
-fell by what the visible pruning explains and not by the ~3k tokens the dropped thinking predicted.
-Those runs differed in their visible pruning too, so a rules-only back-to-back A/B is still owed.
 
 ## Live: `npm run eval:live`
 
