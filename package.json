@@ -1,6 +1,6 @@
 {
   "name": "verbatim-compaction",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Verbatim context compaction for Claude Code, scored by local rules and a session fork.",
   "type": "module",
   "license": "MIT",

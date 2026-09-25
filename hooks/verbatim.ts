@@ -376,7 +376,7 @@ function scheduleRetry($: EngineInterface, state: AutoCompactState, config: Hook
  * in its debug log (one ran 0.4.0 for days unnoticed). A test holds it equal to package.json and
  * .claude-plugin/plugin.json; bump all three together.
  */
-export const PLUGIN_VERSION = '0.6.0';
+export const PLUGIN_VERSION = '0.6.1';
 
 /** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
 const HEADLESS_REFUSAL = /not available in a headless/;
