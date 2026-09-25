@@ -265,6 +265,7 @@ function mayFork(event: SessionCompactInput): boolean {
 
 /** The engine's `next()` rejects empty `messages`, so an empty transcript is vetoed here. */
 const EMPTY_SKIP_REASON = 'nothing to compact yet';
+const ALREADY_RUNNING = 'a compaction of this transcript is already running';
 
 /**
  * `$.session.compact()` rejects in a headless (-p / SDK) session on 2.1.281, where compaction
@@ -367,6 +368,13 @@ function scheduleRetry($: EngineInterface, state: AutoCompactState, config: Hook
   });
 }
 
+/**
+ * This plugin's version, logged with the config so a session still running an old copy is obvious
+ * in its debug log (one ran 0.4.0 for days unnoticed). A test holds it equal to package.json and
+ * .claude-plugin/plugin.json; bump all three together.
+ */
+export const PLUGIN_VERSION = '0.5.2';
+
 /** The text 2.1.281's `$.session.compact()` rejects with in a -p / SDK session. */
 const HEADLESS_REFUSAL = /not available in a headless/;
 
@@ -393,17 +401,26 @@ export async function sessionCwd($: { session: { cwd: () => Promise<string> } })
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   const auto: AutoCompactState = { compacting: false, off: false, awaitingDrop: false, retriesLeft: 0 };
+  // Single flight, per transcript (main or a subagent's) and per kind (a background precompute does
+  // not hold up a foreground compaction). The engine dispatches again while the forks of the first
+  // run are still out (seen: 7 at once on a resumed 965k-token session, 7 summary requests). The
+  // extra ones are skipped, not handed to next(): next() would start a concurrent built-in summary
+  // of the same transcript, which is what produced the 7 summaries, and whichever installs last
+  // would overwrite the other. A skip leaves the conversation as it is; the running compaction
+  // installs, and if the engine still needs room it asks again after that.
+  const inFlight = new Set<string>();
   // register() has no `$`, so the effective config is logged by the first hook that runs.
   let configLogged = false;
 
   on('session.compact', async ($, event, next) => {
-    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
+    if (!configLogged) configLogged = debug($, `verbatim-compaction ${PLUGIN_VERSION} config ${JSON.stringify(config)}`);
     // Bounds the fork-timeout sleep: aborts it as soon as the race is decided (win, lose, or
     // error), instead of leaving it pending until claudeTimeoutMs elapses or the dispatch ends.
     const cancelSleep = new AbortController();
     // Once next() has been called the compaction is core's: a throw from it is rethrown, never
     // answered with a second next().
     let handedOff = false;
+    let flightKey: string | undefined;
     const handOff = () => {
       handedOff = true;
       return next(event);
@@ -424,6 +441,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // ceiling, and reports in the log only (nobody is looking at a toast for it).
       const background = event.trigger === 'precompute';
       const prefix = background ? 'precompute: ' : '';
+      flightKey = `${event.agentId ?? 'main'}:${background ? 'precompute' : 'foreground'}`;
+      if (inFlight.has(flightKey)) {
+        flightKey = undefined;
+        notify($, `skipped: ${ALREADY_RUNNING}`, false);
+        return { skip: ALREADY_RUNNING };
+      }
+      inFlight.add(flightKey);
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
@@ -454,11 +478,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
       return handOff();
     } finally {
       cancelSleep.abort();
+      if (flightKey) inFlight.delete(flightKey);
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (!configLogged) configLogged = debug($, `config ${JSON.stringify(config)}`);
+    if (!configLogged) configLogged = debug($, `verbatim-compaction ${PLUGIN_VERSION} config ${JSON.stringify(config)}`);
     if (event.agentId !== undefined || event.reason !== 'answer') return next(event);
     await autoCompact($, auto, config, false);
     return next(event);

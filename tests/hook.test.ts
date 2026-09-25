@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { compactSession, resolveHookConfig, summarize, toSessionMessages } from '../hooks/verbatim.ts';
+import { compactSession, PLUGIN_VERSION, resolveHookConfig, summarize, toSessionMessages } from '../hooks/verbatim.ts';
 import type { Message } from '../src/index.js';
 import { dropAll, harness, NEXT_RESULT } from './harness.ts';
 
@@ -20,6 +21,15 @@ function transcript(): SessionMessage[] {
     ...Array.from({ length: 6 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`, { handle: `r${i}` })),
   ];
 }
+
+describe('PLUGIN_VERSION', () => {
+  it('matches package.json and .claude-plugin/plugin.json (bump all three together)', () => {
+    for (const file of ['../package.json', '../.claude-plugin/plugin.json']) {
+      const { version } = JSON.parse(readFileSync(new URL(file, import.meta.url), 'utf8')) as { version: string };
+      expect(PLUGIN_VERSION).toBe(version);
+    }
+  });
+});
 
 describe('resolveHookConfig', () => {
   it('defaults minCandidateChars to 200 and clamps it to a whole number >= 0', () => {
@@ -102,6 +112,41 @@ describe('register', () => {
   ];
 
   describe('session.compact', () => {
+    it('single-flight: of 3 concurrent compactions one runs, the others skip (no built-in summary)', async () => {
+      // Seen on a resumed session at 965k tokens: 7 dispatches ran at once and 7 summary requests
+      // went out. The engine keeps asking while the forks run; a second answer must not be next().
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const h = harness({ fork: async ({ prompt }) => { await gate; return { text: dropAll(prompt) }; } });
+      const runs = [h.compact(prunable()), h.compact(prunable()), h.compact({ ...prunable(), trigger: 'manual' })];
+      await new Promise((r) => setImmediate(r));
+      release();
+      const outs = (await Promise.all(runs)) as Array<{ messages?: SessionMessage[]; skip?: string }>;
+      expect(outs.filter((o) => o.messages)).toHaveLength(1);
+      expect(outs.filter((o) => o.skip && /already running/.test(o.skip))).toHaveLength(2);
+      expect(h.nextCalls).toHaveLength(0);
+      // Only the running one scored: one fork request.
+      expect(h.forkCalls).toHaveLength(1);
+      // Once it settles, the next compaction runs normally.
+      const after = (await h.compact(prunable())) as { messages?: SessionMessage[] };
+      expect(after.messages).toBeDefined();
+    });
+
+    it('single-flight is released after a failure too, and a subagent\'s compaction is not blocked by the main one', async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const h = harness({ fork: async ({ prompt }) => { await gate; return { text: dropAll(prompt) }; } });
+      const main = h.compact(prunable());
+      await new Promise((r) => setImmediate(r));
+      const sub = (await h.compact({ ...prunable(), agentId: 'a1' })) as { messages?: SessionMessage[] };
+      expect(sub.messages).toBeDefined();
+      release();
+      await main;
+      const bad = { trigger: 'auto', get messages(): never { throw new Error('bad transcript'); } };
+      expect(await h.compact(bad)).toBe(NEXT_RESULT);
+      expect(((await h.compact(prunable())) as { messages?: unknown }).messages).toBeDefined();
+    });
+
     it('falls back to next(event) when the reduction is too small', async () => {
       const h = harness();
       const event = { trigger: 'auto', messages: claudeOnly() };
@@ -225,11 +270,11 @@ describe('register', () => {
       await h.compact(prunable());
       await h.compact(prunable());
       await h.turnComplete({ reason: 'answer', answer: 'x', durationMs: 1, isAborted: false, turnId: 'x' });
-      const lines = h.debugLogs.filter((line) => line.startsWith('config '));
+      const lines = h.debugLogs.filter((line) => /^verbatim-compaction \S+ config /.test(line));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('"claudeTimeoutMs":30000');
       expect(lines[0]).toContain('"compactAtPercent":60');
-      expect(h.logs.some((line) => line.startsWith('config '))).toBe(false);
+      expect(h.logs.some((line) => /^verbatim-compaction \S+ config /.test(line))).toBe(false);
     });
 
     it('reports a skipped Claude stage without a duration', async () => {
@@ -358,6 +403,13 @@ describe('register', () => {
       const h = harness({ percent: 59 });
       expect(await h.turnComplete(answered)).toBe(NEXT_RESULT);
       expect(h.compactCalls).toBe(0);
+    });
+
+    it('logs the plugin version with the config, so a stale session shows in the log', async () => {
+      const h = harness({ percent: 10 });
+      await h.turnComplete(answered);
+      const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+      expect(h.debugLogs.some((l) => l.startsWith(`verbatim-compaction ${pkg.version} config {`))).toBe(true);
     });
 
     it('logs the context percent against the threshold at debug level', async () => {

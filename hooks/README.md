@@ -7,6 +7,10 @@
   - **`trigger === 'precompute'`**: the full pipeline below, run in the background. It returns
     the pruned messages (kept by the engine for the compaction that comes) or `next(event)` below
     `minReductionRatio`. The forks always get the 45 s ceiling, and it reports in the log only.
+  - **A compaction of the same transcript already running** (single flight, per transcript and
+    per kind: a precompute does not hold up a foreground one): returns `{ skip }`. Handing it to
+    `next(event)` would start a concurrent built-in summary; on a resumed 965k-token session seven
+    dispatches arrived at once and seven summary requests went out.
   - **An empty transcript** (`event.messages` is empty): returns `{ skip: reason }` itself. The
     engine's `next()` rejects a compaction argument with empty `messages`, even one passed through
     unchanged, so handing it on would fail the hook.
