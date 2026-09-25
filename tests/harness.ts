@@ -28,6 +28,8 @@ export interface FakeOptions {
   nextWait?: () => Promise<void>;
   /** Hands the hook a `next` without a `signal`. */
   noSignal?: boolean;
+  /** Answers `$.session.messages({ as: 'api' })`; absent, the call rejects (an engine without it). */
+  apiMessages?: () => Promise<unknown>;
 }
 
 export interface Harness {
@@ -101,6 +103,10 @@ export function harness(options: FakeOptions = {}): Harness {
         const t = options.tokens;
         const tokens = typeof t === 'function' ? await t() : t;
         return { context: { percent: typeof p === 'function' ? await p() : (p ?? 0), window: 1_000_000, ...(tokens === undefined ? {} : { tokens }) } };
+      },
+      messages: async (args?: { as?: string }) => {
+        if (args?.as !== 'api' || !options.apiMessages) throw new Error('$.session.messages is not available');
+        return options.apiMessages();
       },
       compact: async () => {
         h.compactCalls += 1;

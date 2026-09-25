@@ -120,6 +120,16 @@ result is truncated, is rebuilt from its role, its text and its tool blocks only
 thinking blocks and the original order of its blocks are not preserved in that message. Truncation
 never rebuilds the assistant message that made the call.
 
+**Riders.** Claude Code records attachments (reminders, hook output, a prompt you type while a tool
+runs, a queued agent or task message) as entries of their own and hangs each on the message recorded
+before it; a hook sees only the messages. A message returned unchanged keeps what hangs on it, a
+rebuilt one loses it (measured on 2.1.282: truncating the result of a Bash call during which a prompt
+was typed removed that prompt from the conversation). So before pruning the hook reads the
+conversation as the model gets it (`$.session.messages({ as: "api" })`) and keeps whole every call
+whose result is followed by anything but an ephemeral reminder (token count, hook context, task and
+todo nags), together with every call sharing a message with it. If that view is unavailable the debug
+log says `riders unknown` and pruning goes on as before.
+
 A call whose assistant message has no text of its own is truncated to its note instead of dropped.
 Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
 dropping the call would leave a message holding only thinking.

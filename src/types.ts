@@ -165,6 +165,11 @@ export interface CompactOptions {
    * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
    */
   escalateBelow?: number;
+  /**
+   * tool_use_ids whose calls are kept whole (pinned): their rows carry riders a rebuild would lose
+   * (see riders.ts). Default none.
+   */
+  protectedResultIds?: readonly string[];
 }
 
 export interface ResolvedCompactOptions {

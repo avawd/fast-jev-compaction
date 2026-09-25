@@ -6,6 +6,7 @@ import type {
 import { compact, reductionRatio } from '../src/compact.js';
 import { gateOutcome, gateRatio } from '../src/gate.js';
 import { makeScorer, rulesGate } from '../src/score.js';
+import { riderProtectedIds, type ApiLike } from '../src/riders.js';
 import type { ForkFn, SleepFn } from '../src/claude-scorer.js';
 import type { CompactResult, Message, ToolResult, ToolUse } from '../src/types.js';
 
@@ -174,6 +175,8 @@ export async function compactSession(
   background = false,
   /** The session's working directory, so the rules resolve relative Bash paths. */
   cwd?: string,
+  /** Calls whose rows carry riders a rebuild would lose (src/riders.ts): kept whole. */
+  protectedResultIds: readonly string[] = [],
 ): Promise<{ result: CompactResult; messages: SessionMessage[] }> {
   const scorer = makeScorer({
     fork,
@@ -191,7 +194,7 @@ export async function compactSession(
       : rulesGate(messages, config.truncateHeadChars, config.minReductionRatio),
   });
   // escalateBelow: a pass that misses the gate on an already-compacted transcript tries tier 2.
-  const options = { ...config, escalateBelow: config.minReductionRatio };
+  const options = { ...config, escalateBelow: config.minReductionRatio, protectedResultIds };
   const result = await compact(messages, scorer, cwd ? { ...options, cwd } : options);
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
@@ -398,6 +401,25 @@ export async function sessionCwd($: { session: { cwd: () => Promise<string> } })
   }
 }
 
+/**
+ * The tool_use_ids whose rows carry a rider worth keeping (src/riders.ts), read from the API view
+ * of this transcript; an error string when the engine cannot give that view, and pruning then goes
+ * on as before. Top-level: the engine validates `$` use only in top-level functions of this module.
+ */
+export async function riderIds(
+  $: { session: { messages: (args: { as: 'api'; agentId?: string }) => Promise<unknown> } },
+  messages: readonly SessionMessage[],
+  agentId?: string,
+): Promise<string[] | string> {
+  try {
+    const api = await $.session.messages(agentId === undefined ? { as: 'api' } : { as: 'api', agentId });
+    if (!Array.isArray(api)) return `no API view (${JSON.stringify(api).slice(0, 120)})`;
+    return [...riderProtectedIds(api as ApiLike[], messages)];
+  } catch (error) {
+    return message(error);
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const config = resolveHookConfig(options);
   const auto: AutoCompactState = { compacting: false, off: false, awaitingDrop: false, retriesLeft: 0 };
@@ -454,7 +476,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (wantsSummary(event)) return await handOff();
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
-      const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
+      const riders = await riderIds($, event.messages, event.agentId);
+      if (typeof riders === 'string') debug($, `riders unknown (${riders}); pruning without that guard`);
+      else if (riders.length > 0) debug($, `${riders.length} result${riders.length === 1 ? '' : 's'} kept whole: riders (a queued prompt or message) hang on them`);
+      const { result, messages } = await compactSession(
+        event.messages, config, fork, sleep, background, await sessionCwd($), typeof riders === 'string' ? [] : riders,
+      );
       const forks = describeForks(result);
       if (forks) debug($, forks);
       const outcome = gateOutcome(gateRatio(result), config.minReductionRatio, event.trigger);

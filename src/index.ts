@@ -19,3 +19,4 @@ export * from './text.js';
 export * from './salient.js';
 export * from './truncate.js';
 export * from './escalate.js';
+export * from './riders.js';
