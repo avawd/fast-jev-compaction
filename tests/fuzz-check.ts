@@ -224,13 +224,20 @@ function inputShortenedBadly(src: unknown, out: unknown, depth: number): string 
   return undefined;
 }
 
-const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:');
+const isTaskText = (text: string) => text.startsWith('<task-notification>');
+const isTeammateText = (text: string) => text.startsWith('Another Claude session sent a message:') || isTaskText(text);
 const BLOCK_RE = /<teammate-message teammate_id="([^"]+)"[^>]*>\n([\s\S]*?)\n<\/teammate-message>/g;
 
 /** What a rebuilt teammate row may not do, written independently of user-rows.ts. */
 function teammateEdit(before: string, after: string): string[] {
   const fails: string[] = [];
   if (after.length >= before.length) fails.push('rebuilt without shrinking');
+  if (isTaskText(before)) {
+    const id = /<task-id>[^<]*<\/task-id>/.exec(before)?.[0] ?? '';
+    if (!after.startsWith('<task-notification>') || !after.endsWith('</result>\n</task-notification>') || !after.includes(id)) fails.push('task envelope changed');
+    if (after.split(USER_ROW_NOTE).length - 1 > 1) fails.push('task result holds nested notes');
+    return fails;
+  }
   const header = before.slice(0, before.indexOf('<teammate-message'));
   if (!after.startsWith(header)) fails.push('header changed');
   const from = (t: string) => [...t.matchAll(BLOCK_RE)].map((m) => m[1]);

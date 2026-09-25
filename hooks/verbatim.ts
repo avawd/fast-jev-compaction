@@ -53,6 +53,8 @@ export type HookConfig = {
   trimStaleTeammates: boolean;
   /** The peer-message notice stays on the newest teammate row only. */
   dedupePeerNotice: boolean;
+  /** Task notifications: stale agent results cut like teammate messages, the note kept once. */
+  trimStaleTasks: boolean;
   /** Head of a stale teammate message kept. Whole number, at least 0. */
   teammateHeadChars: number;
   /** User text rows, newest first, the teammate pass never rewrites, with every user row after them. Whole number, at least 0. */
@@ -100,6 +102,7 @@ const DEFAULTS: HookConfig = {
   dedupeTeammates: true,
   trimStaleTeammates: true,
   dedupePeerNotice: true,
+  trimStaleTasks: true,
   teammateHeadChars: 1000,
   keepRecentUserTurns: 3,
 };
@@ -146,6 +149,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     dedupeTeammates: bool(options, 'dedupeTeammates', DEFAULTS.dedupeTeammates),
     trimStaleTeammates: bool(options, 'trimStaleTeammates', DEFAULTS.trimStaleTeammates),
     dedupePeerNotice: bool(options, 'dedupePeerNotice', DEFAULTS.dedupePeerNotice),
+    trimStaleTasks: bool(options, 'trimStaleTasks', DEFAULTS.trimStaleTasks),
     teammateHeadChars: Math.max(0, Math.floor(num(options, 'teammateHeadChars', DEFAULTS.teammateHeadChars))),
     keepRecentUserTurns: Math.max(0, Math.floor(num(options, 'keepRecentUserTurns', DEFAULTS.keepRecentUserTurns))),
   };
