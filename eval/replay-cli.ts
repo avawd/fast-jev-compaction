@@ -106,7 +106,6 @@ export async function replayMain(api: PluginApi, a: Map<string, string[]>, corpu
     autoAt: num(a, 'auto-at', 0.92),
     minReduction: num(a, 'min-reduction', (options['minReductionRatio'] as number | undefined) ?? 0.25),
     options: cwd && options['cwd'] === undefined ? { ...options, cwd } : options,
-    ...(a.has('sim-drop-thinking') ? { simulateDropThinkingAfter: num(a, 'sim-drop-thinking', 100) } : {}),
   };
   const arms = (a.get('arms')?.[0]?.split(',') ?? [...ARMS]) as Arm[];
 

@@ -112,7 +112,7 @@ the compacted transcript forward and keeps appending the real later rows. No mod
 npm run eval:offline -- --replay coding-2                 # one corpus segment, all three arms
 npm run eval:offline -- --replay coding --whole           # every segment of the file, joined
 npm run eval:offline -- --replay long-ops --arms trunc --window 1000000 --compact-at 0.6 --auto-at 0.92
-npm run eval:offline -- --replay long-ops --sim-drop-thinking 100   # counterfactual, see below
+npm run eval:offline -- --replay long-ops --options '{"dropOldThinking":true}'
 ```
 
 **Context model.** Tokens = overhead + a·visible chars + b·thinking chars (thinking text and
@@ -136,8 +136,13 @@ lost, and idempotence: results already truncated going in / cut again / holding 
 removed. The arm line adds the mean survival sampled every 25 rows, which says more than the final
 figure (that depends on where the last summary happens to fall).
 
-`--sim-drop-thinking N` is a counterfactual the plugin does not do: a verbatim pass also drops
-thinking-only rows older than N rows. It shows how much of the remaining fallbacks thinking causes.
+With `--options '{"dropOldThinking":true}'` a pass leaves out old thinking rows (src/thinking.ts),
+and the model counts their thinking out of the context from then on. That saving is only as real as
+the thinking term. Per API request (each message id once), the corpus says thinking costs ~0.28
+tokens per stored thinking+signature char in the next request, and none of it drops away at a new
+prompt. But in three forked live runs (one without, two with the option) the next request's input
+fell by what the visible pruning explains and not by the ~3k tokens the dropped thinking predicted.
+Those runs differed in their visible pruning too, so a rules-only back-to-back A/B is still owed.
 
 ## Live: `npm run eval:live`
 

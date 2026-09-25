@@ -166,6 +166,7 @@ debug log names the keys it looked for).
 | `keepThreshold` | 0.5 | What the fork's `unsure` calls become: below 0.5 kept whole, 0.5–0.75 output truncated, above 0.75 removed |
 | `forkChunkSize` | 60 | Most calls per fork; more run as concurrent forks. 1–400 |
 | `minCandidateChars` | 200 | Results shorter than this are kept whole without asking the forks: every id asked about costs fork output time, and a short result saves little. 0 asks about every call |
+| `dropOldThinking` | false | Also leave out the thinking-only rows of completed earlier turns: never the last assistant turn's (an active tool loop needs its thinking), the first message or the preserved tail. Accepted live (3 forked runs, no API error, recall intact), but whether it lowers the next request's input tokens is not yet measured cleanly, so it is off (see eval/README.md, "Replay") |
 
 ### Precompute
 

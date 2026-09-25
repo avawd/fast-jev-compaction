@@ -195,8 +195,6 @@ export interface ReplayConfig {
   options: Record<string, unknown>;
   /** Size of a built-in summary, in tokens (the corpus's summaries were 13k-16k). */
   summaryTokens?: number;
-  /** Counterfactual: a verbatim pass also drops thinking-only rows older than this many rows. */
-  simulateDropThinkingAfter?: number;
   /** Rows a built-in summary keeps after itself (the corpus's boundaries preserved 6-7). */
   summaryKeeps?: number;
 }
@@ -243,16 +241,6 @@ const SAMPLE_EVERY = 25;
 function summaryMessage(tokens: number, model: TokenModel): EvalMessage {
   // Filler with no distinctive tokens: a summary's facts are not credited (a conservative bound).
   return { role: 'user', text: 'summary '.repeat(Math.max(1, Math.round(tokens / model.perVisibleChar / 8))), toolUses: [] };
-}
-
-/**
- * Counterfactual (harness only; the plugin never does this): drops thinking-only rows older than
- * `after` rows. The model's context keeps thinking, which verbatim pruning never touches.
- */
-function dropOldThinking(context: EvalMessage[], hidden: ReadonlyMap<EvalMessage, number>, after: number | undefined): EvalMessage[] {
-  if (after === undefined) return context;
-  const cut = context.length - after;
-  return context.filter((m, k) => !(k < cut && m.role === 'assistant' && m.text === '' && m.toolUses.length === 0 && (hidden.get(m) ?? 0) > 0));
 }
 
 function factSurvival(facts: readonly Fact[], upTo: number, context: readonly EvalMessage[]): { survived: number; total: number } {
@@ -305,7 +293,7 @@ export async function replay(api: PluginApi, stream: Stream, arm: Arm, cfg: Repl
     const priorPasses = verbatimPasses;
     const prefix = stream.messages.slice(0, at + 1);
     if (pass) {
-      context = dropOldThinking([...run.result.messages], hidden, cfg.simulateDropThinkingAfter);
+      context = [...run.result.messages];
       verbatimPasses += 1;
     } else {
       verbatimPasses = 0;
