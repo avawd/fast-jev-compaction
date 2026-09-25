@@ -9,7 +9,7 @@
       "name": "verbatim-compaction",
       "source": "./",
       "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
-      "version": "0.5.2",
+      "version": "0.6.0",
       "license": "MIT"
     }
   ]
