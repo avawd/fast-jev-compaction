@@ -1,0 +1,1 @@
+{ "name": "resume-repro", "version": "0.0.1", "description": "A session.compact hook that hands the transcript back unchanged." }
