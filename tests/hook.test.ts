@@ -127,9 +127,46 @@ describe('register', () => {
       expect(h.nextCalls).toHaveLength(0);
       // Only the running one scored: one fork request.
       expect(h.forkCalls).toHaveLength(1);
+      // The typed /compact is told (a toast), not skipped silently; the automatic one only logs.
+      expect(h.toasts.filter((t) => /already running/.test(t))).toHaveLength(1);
       // Once it settles, the next compaction runs normally.
       const after = (await h.compact(prunable())) as { messages?: SessionMessage[] };
       expect(after.messages).toBeDefined();
+    });
+
+    it('single-flight holds while a handed-off built-in summary runs, and clears only when it settles', async () => {
+      // `return next(event)` without await let the finally clear the flight the moment next() was
+      // called: a dispatch during the summary ran again and called next() again (the 7 summaries).
+      for (const rejects of [false, true]) {
+        let release: () => void = () => {};
+        const pending = new Promise<void>((resolve) => { release = resolve; });
+        const h = harness({ nextWait: () => pending, ...(rejects ? { nextThrows: new Error('summary failed') } : {}) });
+        const first = h.compact({ trigger: 'auto', messages: claudeOnly() });
+        const settled = first.then(() => 'resolved', () => 'rejected');
+        for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+        expect(h.nextCalls).toHaveLength(1);
+        const second = (await h.compact(prunable())) as { skip?: string };
+        expect(second.skip).toMatch(/already running/);
+        expect(h.nextCalls).toHaveLength(1);
+        release();
+        expect(await settled).toBe(rejects ? 'rejected' : 'resolved');
+        // A rejection from next() is rethrown, never answered with a second next().
+        expect(h.nextCalls).toHaveLength(1);
+        const third = (await h.compact(prunable())) as { messages?: unknown };
+        expect(third.messages).toBeDefined();
+      }
+    });
+
+    it('single-flight covers the direct hand-offs too (/compact <instructions>, oversized transcripts)', async () => {
+      let release: () => void = () => {};
+      const pending = new Promise<void>((resolve) => { release = resolve; });
+      const h = harness({ nextWait: () => pending });
+      const focused = h.compact({ ...prunable(), trigger: 'manual', instructions: 'keep the plan' });
+      for (let i = 0; i < 3; i += 1) await new Promise((r) => setImmediate(r));
+      expect(((await h.compact(prunable())) as { skip?: string }).skip).toMatch(/already running/);
+      release();
+      expect(await focused).toBe(NEXT_RESULT);
+      expect(h.nextCalls).toHaveLength(1);
     });
 
     it('single-flight is released after a failure too, and a subagent\'s compaction is not blocked by the main one', async () => {

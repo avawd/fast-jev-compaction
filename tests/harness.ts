@@ -24,6 +24,8 @@ export interface FakeOptions {
   nextThrows?: Error;
   /** Makes `next()` throw synchronously, as a validating engine may. */
   nextThrowsSync?: Error;
+  /** Awaited inside `next()` before it settles (e.g. a pending built-in summary). */
+  nextWait?: () => Promise<void>;
   /** Hands the hook a `next` without a `signal`. */
   noSignal?: boolean;
 }
@@ -143,6 +145,7 @@ export function harness(options: FakeOptions = {}): Harness {
       if (name === 'session.compact' && Array.isArray(msgs) && msgs.length === 0) {
         throw new Error('next() passed an argument with an empty messages (a compaction leaves at least one)');
       }
+      if (options.nextWait) await options.nextWait();
       if (options.nextThrows) throw options.nextThrows;
       return NEXT_RESULT;
     };

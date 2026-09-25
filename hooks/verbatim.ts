@@ -431,23 +431,27 @@ export const register: Register = (on: On, options: PluginOptions) => {
         notify($, EMPTY_SKIP_REASON, false);
         return { skip: EMPTY_SKIP_REASON };
       }
-      if (event.messages.length >= MAX_MESSAGES) {
-        notify($, `${event.messages.length} messages: handed to the built-in compaction untouched`, false);
-        return handOff();
-      }
-      if (wantsSummary(event)) return handOff();
       // A precompute runs in the background ahead of the threshold; what it returns is kept and
       // installed by the compaction that comes, so it runs the real pipeline, gives the forks the
       // ceiling, and reports in the log only (nobody is looking at a toast for it).
       const background = event.trigger === 'precompute';
       const prefix = background ? 'precompute: ' : '';
-      flightKey = `${event.agentId ?? 'main'}:${background ? 'precompute' : 'foreground'}`;
-      if (inFlight.has(flightKey)) {
-        flightKey = undefined;
-        notify($, `skipped: ${ALREADY_RUNNING}`, false);
+      // Taken before any hand-off, and held until the hand-off settles (every path returns
+      // `await handOff()`): a built-in summary started by next() is part of this flight.
+      const key = `${event.agentId ?? 'main'}:${background ? 'precompute' : 'foreground'}`;
+      if (inFlight.has(key)) {
+        // A typed /compact is told why nothing happened; an automatic one only logs it.
+        notify($, `skipped: ${ALREADY_RUNNING}${event.trigger === 'manual' ? '; /compact again once it finishes if you still need room' : ''}`,
+          event.trigger === 'manual');
         return { skip: ALREADY_RUNNING };
       }
-      inFlight.add(flightKey);
+      inFlight.add(key);
+      flightKey = key;
+      if (event.messages.length >= MAX_MESSAGES) {
+        notify($, `${event.messages.length} messages: handed to the built-in compaction untouched`, false);
+        return await handOff();
+      }
+      if (wantsSummary(event)) return await handOff();
       const fork: ForkFn | undefined = mayFork(event) ? (request) => $.model.fork(request) : undefined;
       const sleep: SleepFn = (ms) => $.clock.sleep(ms, { signal });
       const { result, messages } = await compactSession(event.messages, config, fork, sleep, background, await sessionCwd($));
@@ -468,14 +472,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       if (outcome === 'summary') {
         notify($, `${prefix}fallback to built-in summary (below ${Math.round(config.minReductionRatio * 100)}%: ${summarize(result)})`, !background);
-        return handOff();
+        return await handOff();
       }
       notify($, `${prefix}kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, !background);
       return { messages };
     } catch (error) {
       if (handedOff) throw error;
       notify($, `fallback to built-in summary (${message(error)})`, event.trigger !== 'precompute');
-      return handOff();
+      return await handOff();
     } finally {
       cancelSleep.abort();
       if (flightKey) inFlight.delete(flightKey);
