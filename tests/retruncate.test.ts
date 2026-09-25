@@ -22,9 +22,9 @@ function res(id: string, text: string, isError = false): Message {
 }
 const tail = () => ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((t) => msg(t === 'a' ? 'user' : 'assistant', `later ${t}`));
 
-const dropAll = (action: 'drop_result' | 'drop_call' = 'drop_result'): Scorer => async (calls) => ({
+const dropAll = (action: 'drop_result' | 'drop_call' = 'drop_result', source: 'claude' | 'rule' = 'claude'): Scorer => async (calls) => ({
   claude: 'ran',
-  verdicts: new Map(calls.filter((c) => !c.pinned).map((c) => [c.id, { action, source: 'claude' as const }])),
+  verdicts: new Map(calls.filter((c) => !c.pinned).map((c) => [c.id, { action, source }])),
 });
 
 function notes(text: string): number {
@@ -59,13 +59,21 @@ describe('re-truncating a result an earlier pass already truncated', () => {
     expect(out.decisions[0]).toMatchObject({ action: 'keep' });
   });
 
-  it('shrinks an old truncation to its note alone on a drop, with the whole count', async () => {
+  it('shrinks an old truncation to its note alone on a rule drop, with the whole count', async () => {
     const before = `${'h'.repeat(300)}\n${note(9000, true)}`;
-    // A drop_call on a call whose row has no text becomes a note-only truncation.
+    // A rule's drop_call on a call whose row has no text becomes a note-only truncation.
+    const input = [msg('user', 'go'), use('u1', 'Read', { file_path: '/srv/app/a.ts' }, ''), res('u1', before, true), ...tail()];
+    const out = await compact(input, dropAll('drop_call', 'rule'), { preserveRecentMessages: 6 });
+    const text = out.messages.find((m) => m.toolResults?.length)?.toolResults?.[0]?.text;
+    expect(text).toBe(note(9300, true));
+  });
+
+  it("leaves an old head-only truncation as it is on Claude's drop, which keeps the default head", async () => {
+    const before = `${'h'.repeat(300)}\n${note(9000, true)}`;
     const input = [msg('user', 'go'), use('u1', 'Read', { file_path: '/srv/app/a.ts' }, ''), res('u1', before, true), ...tail()];
     const out = await compact(input, dropAll('drop_call'), { preserveRecentMessages: 6 });
     const text = out.messages.find((m) => m.toolResults?.length)?.toolResults?.[0]?.text;
-    expect(text).toBe(note(9300, true));
+    expect(text).toBe(before);
   });
 
   it('leaves a result alone when a pinned window reaches past the old note', async () => {

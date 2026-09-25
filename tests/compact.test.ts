@@ -70,7 +70,7 @@ describe('compact', () => {
     expect(out.messages[2]?.toolResults?.[0]?.text.length).toBeLessThan(600);
   });
 
-  it('truncates to nothing instead of dropping a call whose assistant row has no text (M4)', async () => {
+  it("truncates to its head (no tail) instead of dropping a call whose assistant row has no text (M4)", async () => {
     // Claude Code hands over one row per content block: a thinking block is an assistant row
     // with no text and no tool use, sharing its message with the tool_use row after it.
     const thinking = msg('assistant', '');
@@ -87,8 +87,10 @@ describe('compact', () => {
     expect(out.stats).toMatchObject({ callsDropped: 0, resultsDropped: 1 });
     expect(out.messages[1]).toBe(thinking);
     expect(out.messages[2]).toBe(input[2]);
+    // Claude's drop keeps the default head and, even for `npm test`, no tail (a rule's drop keeps
+    // the note alone: see recall-fixes.test.ts).
     const note = out.messages[3]?.toolResults?.[0]?.text ?? '';
-    expect(note.startsWith('[verbatim-compaction truncated 4000 chars')).toBe(true);
+    expect(note).toBe(`${'x'.repeat(300)}\n[verbatim-compaction truncated 3700 chars of this tool result; re-run the tool if needed]`);
   });
 
   it('keeps everything and skips the scorer when there are no unpinned calls', async () => {
