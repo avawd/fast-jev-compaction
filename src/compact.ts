@@ -144,15 +144,21 @@ export function applyDecisions(
 }
 
 /**
- * A drop_call on a call whose assistant row has no text becomes a drop_result that keeps
- * nothing but the note. Claude Code hands over one row per content block, so that row's
- * thinking block is a sibling row with no text of its own: removing the tool_use row would
- * leave an assistant message holding only thinking. Keeping the call costs its input alone.
+ * A drop_call on a call whose assistant row has no text becomes a drop_result. Claude Code
+ * hands over one row per content block, so that row's thinking block is a sibling row with no
+ * text of its own: removing the tool_use row would leave an assistant message holding only
+ * thinking. Keeping the call costs its input alone.
+ *
+ * A rule's drop keeps nothing but the note: a later call superseded the result (the repeated
+ * search, the retry that worked), so its head is a copy. Claude's `drop` keeps the default head
+ * and no tail. It used to keep no head either, and the recall eval measured that as the largest
+ * single loss: 9 of the 15 live misses Claude caused sat within the first 300 characters.
  */
 function preferTruncation(decision: CallDecision, call: ToolCall, messages: readonly Message[]): CallDecision {
   if (decision.action !== 'drop_call') return decision;
   if ((messages[call.callIndex]?.text ?? '').trim().length > 0) return decision;
-  return { ...decision, action: 'drop_result', headChars: 0 };
+  if (decision.source === 'rule') return { ...decision, action: 'drop_result', headChars: 0 };
+  return { ...decision, action: 'drop_result', headOnly: true };
 }
 
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */

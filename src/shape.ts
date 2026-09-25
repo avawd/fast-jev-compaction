@@ -1,8 +1,12 @@
-import { excerptPlan } from './excerpt.js';
+import { excerptPlan, renderTruncation } from './excerpt.js';
 import { pinnedWindow } from './pin.js';
 import { bashCommand, readonlyFamilyKey, sourceReadPaths, stripCommandPrefix } from './rules-bash.js';
+import { salientWindows } from './salient.js';
 import { isTruncated, priorTruncation } from './truncate.js';
 import type { CallDecision, ResolvedCompactOptions, ToolCall } from './types.js';
+
+/** A truncation must save at least this much over the text; mirrors excerpt.ts. */
+const TRUNCATION_SLACK = 120;
 
 /** A command word that marks a run whose verdict is printed last. */
 const TAIL_WORD =
@@ -71,11 +75,11 @@ export function planShapes(
     // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either. Nor
     // does a result an earlier pass cut to its head: its end is already gone.
     const headOnly = priorTruncation(text)?.tail === '';
-    const preferred = decision.headChars !== 0 && !headOnly && wantsTail(call) ? options.truncateTailChars : 0;
+    const preferred = decision.headChars !== 0 && !decision.headOnly && !headOnly && wantsTail(call) ? options.truncateTailChars : 0;
     const tokens = options.pinReferenced ? (call.refTokens ?? []) : [];
     if (tokens.length === 0) {
       if (decision.action === 'drop_result' && preferred > 0) tails.set(call.tool_use_id, preferred);
-      return decision;
+      return decision.rule === 'stale_age' && decision.action === 'drop_result' ? withSalientLines(decision, text, options, preferred) : decision;
     }
     const head = decision.headChars ?? options.truncateHeadChars;
     const window = pinnedWindow(text, tokens, {
@@ -99,4 +103,18 @@ export function planShapes(
     return window.head === head ? truncated : { ...truncated, headChars: window.head };
   });
   return { decisions: planned, tails };
+}
+
+/**
+ * A stale read's truncation also keeps its salient lines (salient.ts) as excerpt windows: one
+ * note, a gap marker before each line. A result an earlier pass truncated gets none, since an
+ * excerpt around its note would nest it; nor does one the windows would not shrink.
+ */
+function withSalientLines(decision: CallDecision, text: string, options: ResolvedCompactOptions, tail: number): CallDecision {
+  if (isTruncated(text)) return decision;
+  const head = decision.headChars ?? options.truncateHeadChars;
+  const windows = salientWindows(text, head, tail);
+  if (windows.length === 0) return decision;
+  if (renderTruncation(text, false, { head, tail, windows }).length > text.length - TRUNCATION_SLACK) return decision;
+  return { ...decision, windows };
 }
