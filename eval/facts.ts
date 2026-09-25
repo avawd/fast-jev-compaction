@@ -83,6 +83,8 @@ export interface LaterRef {
 
 export interface FactSets {
   neverEchoed: Fact[];
+  /** Introduced by an unpinned result, of a recall-worthy kind, and repeated by later assistant text: the control set. */
+  echoed: Fact[];
   laterReferenced: LaterRef[];
 }
 
@@ -133,14 +135,17 @@ export function factSets(messages: readonly EvalMessage[], calls: readonly Unpin
   const assistantBlob = messages.filter((m) => m.role === 'assistant').map((m) => m.text).join('\n');
 
   const neverEchoed: Fact[] = [];
+  const echoed: Fact[] = [];
   const laterReferenced: LaterRef[] = [];
   for (const c of calls) {
     const toks = resultTokens.get(c.tool_use_id);
     if (!toks) continue;
     for (const [token, kind] of toks) {
       if (firstSeen.get(token) !== c.resultIndex) continue;
-      if (FACT_KINDS.has(kind) && !assistantText.has(token) && !assistantBlob.includes(token)) {
-        neverEchoed.push({ token, kind, tool_use_id: c.tool_use_id, tool: c.tool, resultIndex: c.resultIndex });
+      if (FACT_KINDS.has(kind)) {
+        const fact = { token, kind, tool_use_id: c.tool_use_id, tool: c.tool, resultIndex: c.resultIndex };
+        if (!assistantText.has(token) && !assistantBlob.includes(token)) neverEchoed.push(fact);
+        else if ((quoted.get(token) ?? []).some((i) => i > c.resultIndex && messages[i]!.role === 'assistant' && messages[i]!.text.includes(token))) echoed.push(fact);
       }
       const later = (quoted.get(token) ?? []).find((i) => i > c.resultIndex);
       if (later !== undefined) {
@@ -148,7 +153,7 @@ export function factSets(messages: readonly EvalMessage[], calls: readonly Unpin
       }
     }
   }
-  return { neverEchoed, laterReferenced };
+  return { neverEchoed, echoed, laterReferenced };
 }
 
 /** Every string a model would see in a message list, joined (text, tool inputs, outputs). */

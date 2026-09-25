@@ -6,6 +6,8 @@
  *                           [--options '<plugin options json>'] [--min-reduction 0.25]
  *   npm run eval:offline -- --compare <a.json> <b.json>
  *   npm run eval:offline -- --facts <label> [--limit 40]   (prints never-echoed facts; private data, stdout only)
+ *   npm run eval:offline -- --facts <label|file> --recall-out eval/recall-x.local.json [--ne 25 --echoed 10 --batch 10 --seed 1]
+ *                           (writes a stratified recall set; same as `npm run eval:recall -- gen`)
  *
  * See eval/README.md for what every column means.
  */
@@ -277,6 +279,17 @@ async function main(): Promise<void> {
     const label = a.get('facts')![0];
     const entry = corpus.find((c) => c.label === label) ?? (label && existsSync(label) ? { label: basename(label), file: label, segment: Number(a.get('segment')?.[0] ?? -1) } : undefined);
     if (!entry) throw new Error(`--facts ${label}: not a corpus label or a file`);
+    if (a.has('recall-out')) {
+      // A full recall set (eval/recall.ts gen): always the file's LAST segment, the one a live --resume compacts.
+      const { writeRecallSet } = await import('./recall.ts');
+      await writeRecallSet(api, entry.file, a.get('recall-out')![0] ?? '', {
+        ne: Number(a.get('ne')?.[0] ?? 25),
+        echoed: Number(a.get('echoed')?.[0] ?? 10),
+        batch: Number(a.get('batch')?.[0] ?? 10),
+        seed: Number(a.get('seed')?.[0] ?? 1),
+      });
+      return;
+    }
     if (entry.segment < 0) entry.segment = (await loadSegments(entry.file)).length - 1;
     await printFacts(api, entry, Number(a.get('limit')?.[0] ?? 40));
     return;

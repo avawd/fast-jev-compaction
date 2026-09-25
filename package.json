@@ -26,6 +26,7 @@
     "validate:plugin": "claude plugin validate .claude-plugin/plugin.json",
     "eval:offline": "tsx eval/offline.ts",
     "eval:live": "bash eval/live.sh",
+    "eval:recall": "tsx eval/recall.ts",
     "typecheck:eval": "tsc -p eval/tsconfig.json"
   },
   "devDependencies": {

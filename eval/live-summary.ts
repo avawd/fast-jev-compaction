@@ -12,13 +12,18 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { strataLines } from './diagnose.ts';
 import { contextBlob } from './facts.ts';
+import { liveFactRows, type LiveFactRow } from './live-facts.ts';
 import { carriedPrefix, loadSegments } from './parse.ts';
+import type { RecallFact } from './recall-gen.ts';
 
 interface RecallSet {
   name: string;
   question: string;
   expected: string[];
+  /** Per-fact metadata, when the config came from recall.ts gen. */
+  facts?: RecallFact[];
 }
 interface RecallConfig {
   session: string;
@@ -194,7 +199,9 @@ async function retention(transcript: string, tokens: string[]): Promise<Retentio
 async function main(): Promise<void> {
   const dir = resolve(process.argv[2] ?? '');
   if (!process.argv[2] || !existsSync(dir)) throw new Error('usage: live-summary.ts <out-dir> [--config <recall.json>]');
-  const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as { pluginDir: string; sets: string; config: string; session: string };
+  const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as { pluginDir: string; noPlugin?: boolean; sets: string; config: string; session: string };
+  // A --no-plugin baseline loads neither copy: any enabled load is the wrong copy.
+  const expectedDir = meta.noPlugin ? undefined : meta.pluginDir;
   const ci = process.argv.indexOf('--config');
   const config = JSON.parse(readFileSync(ci > 0 ? process.argv[ci + 1]! : meta.config, 'utf8')) as RecallConfig;
   const sets = meta.sets === 'all' ? config.sets : config.sets.filter((s) => meta.sets.split(',').includes(s.name));
@@ -207,11 +214,14 @@ async function main(): Promise<void> {
     const log = parseDebugLog(existsSync(logPath) ? readFileSync(logPath, 'utf8') : '');
     const stream = parseStream(readFileSync(join(dir, file), 'utf8'));
     const loaded = log.pluginLoads.filter((p) => p.enabled).map((p) => dirname(dirname(p.hooksJson)));
-    const wrongCopy = loaded.some((d) => resolve(d) !== resolve(meta.pluginDir));
+    const wrongCopy = loaded.some((d) => !expectedDir || resolve(d) !== resolve(expectedDir));
     const recall = scoreRecall(stream.answers, sets, stream.recallToolUses);
     const transcript = stream.sessionId ? join(homedir(), '.claude', 'projects', projectSlug(config.cwd), `${stream.sessionId}.jsonl`) : '';
     const ret = transcript ? await retention(transcript, sets.flatMap((s) => s.expected)) : undefined;
     const fallback = (log.outcome?.startsWith('fallback') ?? false) || log.coreRan || !log.hookAnswered;
+    const facts = transcript && existsSync(transcript)
+      ? await liveFactRows(transcript, sets, stream.answers.join('\n'), stream.recallToolUses.length > 0, expectedDir)
+      : undefined;
     rows.push({
       run: Number(n),
       forkedSession: stream.sessionId,
@@ -238,14 +248,15 @@ async function main(): Promise<void> {
           : { parsed: ret.preMessages, ok: null }
         : undefined,
       retention: ret?.byToken,
+      ...(facts ? { facts } : {}),
     });
   }
 
-  console.log(`\nlive eval ${dir}\nplugin-dir ${meta.pluginDir}; session ${meta.session}; sets ${sets.map((s) => s.name).join(',')}`);
+  console.log(`\nlive eval ${dir}\nplugin-dir ${meta.noPlugin ? 'NONE (baseline: built-in summary)' : meta.pluginDir}; session ${meta.session}; sets ${sets.map((s) => s.name).join(',')}`);
   console.log('| run | loaded from | forks (ms) | outcome | fork api-err | fallback | pre→post tok | hook ms (incl. next) | ' + sets.map((s) => `recall ${s.name}`).join(' | ') + ' | ' + sets.map((s) => `ctx ${s.name} before→after`).join(' | ') + ' | parser |');
   console.log('|' + '---|'.repeat(8 + sets.length * 2 + 1));
   for (const r of rows as Array<Record<string, any>>) {
-    const loaded = (r.pluginLoaded as string[]).map((d) => (d === meta.pluginDir ? 'plugin-dir' : d)).join(',') || 'NONE';
+    const loaded = (r.pluginLoaded as string[]).map((d) => (d === meta.pluginDir ? 'plugin-dir' : d)).join(',') || (meta.noPlugin ? 'none (baseline)' : 'NONE');
     const forks = `${r.forks.length}: ${r.forks.map((f: { ms?: number; line: string }) => f.ms ?? f.line.slice(0, 30)).join('/')}`;
     const recall = (r.recall as RecallScore[]).map((x) => (x.failed ? `FAILED (tool use) 0/${x.miss.length}` : `${x.hit.length}/${x.hit.length + x.miss.length}`));
     const ctx = sets.map((s) => {
@@ -267,9 +278,36 @@ async function main(): Promise<void> {
     if (r.hookErrors.length) console.log(`  run${r.run} hook errors: ${r.hookErrors.join(' || ')}`);
     if (r.recallToolUses.length) console.log(`  run${r.run} WARNING recall turn used tools: ${r.recallToolUses.join(',')}`);
   }
+  printFacts(all.filter((r) => r.facts).map((r) => ({ run: r.run as number, facts: r.facts as LiveFactRow[] })));
   const summaryPath = join(dir, 'summary.json');
   writeFileSync(summaryPath, JSON.stringify({ meta, rows }, null, 2) + '\n');
   console.log(`\nJSON: ${summaryPath}\nforked transcripts left behind: ${all.map((r) => r.forkedSession).filter(Boolean).join(' ')}`);
+}
+
+/** Per-fact recall and retention over all runs, by stratum, and every missed never-echoed fact with its cause. */
+export function printFacts(runs: ReadonlyArray<{ run: number; facts: LiveFactRow[] }>): void {
+  if (runs.length === 0) return;
+  const rows = runs.flatMap((r) => r.facts.map((f) => ({ fact: f, ok: { recalled: f.hit, 'in ctx after': f.after, 'in ctx before': f.before } })));
+  const cols = ['recalled', 'in ctx after', 'in ctx before'];
+  console.log(`\nper-fact results over ${runs.length} run(s) (${rows.length} fact-runs)`);
+  for (const [title, key, subset] of [
+    ['set', (f: LiveFactRow) => (f.echoed ? 'echoed (control)' : 'never-echoed'), rows],
+    ['tool category (never-echoed)', (f: LiveFactRow) => f.category, rows.filter((r) => !r.fact.echoed)],
+    ['age bucket (never-echoed)', (f: LiveFactRow) => f.bucket, rows.filter((r) => !r.fact.echoed)],
+    ['kind (never-echoed)', (f: LiveFactRow) => f.kind, rows.filter((r) => !r.fact.echoed)],
+  ] as const) {
+    console.log(`\nby ${title}`);
+    for (const l of strataLines(subset, cols, key)) console.log(l);
+  }
+  const causes = new Map<string, number>();
+  for (const { fact } of rows) if (!fact.hit && !fact.echoed) {
+    const k = fact.verdict.replace(/ \(at .*\)$/, '');
+    causes.set(k, (causes.get(k) ?? 0) + 1);
+  }
+  console.log('\nnever-echoed misses by cause');
+  for (const [k, n] of [...causes].sort((x, y) => y[1] - x[1])) console.log(`  ${n}  ${k}`);
+  console.log('\nmissed facts');
+  for (const r of runs) for (const f of r.facts) if (!f.hit) console.log(`  run${r.run} ${f.echoed ? 'E' : 'N'} ${f.category}/${f.bucket}(${f.age}) ${f.kind} ${f.token.slice(0, 60)} — ${f.verdict}`);
 }
 
 if (process.argv[1]?.endsWith('live-summary.ts')) {

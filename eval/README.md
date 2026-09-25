@@ -159,6 +159,69 @@ Stream-json coalesces queued prompts. In the validation run, both recall questio
 one reply. So each set is scored against all post-compaction answers joined together. The expected
 tokens are specific to each set, so they cannot cross-match.
 
+### Large recall sets: `npm run eval:recall`
+
+Four hand-picked facts from one session cannot tell a 70% arm from a 90% one. `eval/recall.ts`
+generates a set per session and diagnoses it offline:
+
+```
+npm run eval:recall -- gen <corpus-label|session.jsonl> --out eval/recall-<name>.local.json \
+                       [--ne 25] [--echoed 10] [--batch 10] [--seed 1]
+npm run eval:recall -- diagnose eval/recall-<name>.local.json      # rules / trunc / floor, per fact
+npm run eval:live -- --plugin-dir <dir> -n 2 --config eval/recall-<name>.local.json
+npm run eval:live -- --no-plugin -n 1 --config eval/recall-<name>.local.json   # built-in summary baseline
+```
+
+`gen` reads the transcript's **last** segment, the one a live `--resume` compacts, and picks:
+
+- **never-echoed facts** (the test): a sha, #PR, ticket key, URL, dollar amount or 5+ digit number
+  that exactly **one** unpinned tool result carries. No other result, user or assistant text, or tool
+  input in the segment holds it. A miss therefore has one place to look.
+- **echoed facts** (the control): introduced by a tool result and repeated in later assistant text,
+  so a summary can keep them too.
+
+It skips what nobody would ask about: uuid fragments, transport ids (`invocationId`, `msg_id`,
+`agentId`...), MCP `"self"` links (furniture the plugin strips on purpose), and links that end in a
+number the assistant quoted (`…/pull/912` after "#912"). Those could be rebuilt from a summary.
+
+Selection takes one fact per call. It is stratified round-robin by tool category
+(Bash/Read/Grep/MCP/Agent/Other) and by age bucket (the result's position quartile in the segment).
+It is deterministic for `--seed`. The output's `pool` field says how many candidate calls each
+category had before and after the filters, so an empty stratum reads as rare or filtered, not as
+lost.
+
+Each fact becomes a cloze item: the call, then ~48 characters each side of the token, with the token
+blanked (`⏎` marks a line break). Every chosen token is masked in every question, and `recallSets`
+throws if any question still carries an expected token. The questions go out in batches of `--batch`
+(≤10), with never-echoed and echoed items mixed. The config holds private values, so `gen` refuses an
+`--out` that is not `*.local.json` or under `eval/out/`.
+
+`diagnose` (and, per run, `live-summary`) classifies each fact (`eval/diagnose.ts`):
+
+| how | meaning |
+|---|---|
+| `whole` | the result is untouched |
+| `truncated-kept` / `truncated-cut` | the truncation note is there, and the token is inside / outside the kept head + tail (`at <offset>/<len>; kept head H + tail T`) |
+| `dropped` | no result for the call remains |
+| `stripped` | gone without a truncation cut. MCP furniture stripping removed it, even when it sat inside a kept head |
+| `summary-kept` / `summary-lost` | the context is a built-in summary |
+
+`by` names the decision: `rule:<name>`, `claude`, `pinned`. A live run does not log its decisions, so
+`live-summary` re-runs the plugin's rules arm over the forked pre-compact messages. It credits a live
+cut to the rule when the rules arm made one for that call, and otherwise to `claude`, the only other
+source of cuts. Each live fact then gets a verdict. The first that applies wins:
+
+1. `recalled`
+2. `not in pre-compact context` (the set is stale)
+3. `in context, model missed`
+4. the cut: `<how> by <by>`
+
+The per-fact tables group the verdicts by set, tool category, age bucket and kind.
+
+A hit is a case-insensitive substring of the joined answers, as for the hand-written sets. A recall
+turn that used a tool still scores 0. `live.sh --no-plugin` loads neither plugin copy, so `/compact`
+runs the built-in summary. Any enabled load of the plugin is then reported as `WRONG COPY`.
+
 ## Baselines (2026-09-24)
 
 `laterRef lost` uses the definition above; earlier tables in this file's history over-counted it.

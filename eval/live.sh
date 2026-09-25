@@ -7,7 +7,10 @@
 #
 #   npm run eval:live -- --plugin-dir <dir> [-n 8] [--session <id>] [--sets basic,hard]
 #                        [--options '<plugin options json>'] [--out <dir>] [--config <recall.json>]
+#   npm run eval:live -- --no-plugin [-n 2] [--config <recall.json>]   (baseline: built-in summary)
 #
+# --no-plugin loads NEITHER copy (no --plugin-dir; the global copy disabled), so /compact runs the
+# built-in summary: the comparison arm for recall.
 # --config defaults to $VC_EVAL_RECALL, then the gitignored eval/recall.local.json (copy
 # eval/recall.example.json). Recall configs name private sessions, so they are never tracked.
 #
@@ -25,6 +28,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 TSX="$REPO/node_modules/.bin/tsx"
 
 PLUGIN_DIR=""
+NO_PLUGIN=0
 N=1
 SESSION=""
 SETS=""
@@ -41,6 +45,7 @@ usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --plugin-dir) PLUGIN_DIR="$2"; shift 2 ;;
+    --no-plugin) NO_PLUGIN=1; shift ;;
     -n|--runs) N="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
     --sets) SETS="$2"; shift 2 ;;
@@ -52,10 +57,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$PLUGIN_DIR" ] || { echo "--plugin-dir is required" >&2; exit 2; }
 [ -f "$CONFIG" ] || { echo "$CONFIG not found: copy eval/recall.example.json to eval/recall.local.json or pass --config" >&2; exit 2; }
-PLUGIN_DIR="$(cd "$PLUGIN_DIR" && pwd)"
-[ -f "$PLUGIN_DIR/hooks/hooks.json" ] || { echo "$PLUGIN_DIR has no hooks/hooks.json" >&2; exit 2; }
+PLUGIN_ARGS=()
+if [ "$NO_PLUGIN" = 1 ]; then
+  [ -z "$PLUGIN_DIR" ] || { echo "--no-plugin and --plugin-dir are exclusive" >&2; exit 2; }
+  [ -z "$OPTIONS" ] || { echo "--options has no plugin to reach under --no-plugin" >&2; exit 2; }
+else
+  [ -n "$PLUGIN_DIR" ] || { echo "--plugin-dir (or --no-plugin) is required" >&2; exit 2; }
+  PLUGIN_DIR="$(cd "$PLUGIN_DIR" && pwd)"
+  [ -f "$PLUGIN_DIR/hooks/hooks.json" ] || { echo "$PLUGIN_DIR has no hooks/hooks.json" >&2; exit 2; }
+  PLUGIN_ARGS=(--plugin-dir "$PLUGIN_DIR")
+fi
 [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -ge 1 ] || { echo "-n must be a positive integer" >&2; exit 2; }
 command -v claude >/dev/null || { echo "claude CLI not on PATH" >&2; exit 2; }
 
@@ -72,6 +84,9 @@ CWD="$CFG_CWD"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="${OUT:-$REPO/eval/out/live-$STAMP}"
 mkdir -p "$OUT"
+# Each run cd's into the session's cwd, so every path it uses must be absolute.
+OUT="$(cd "$OUT" && pwd)"
+CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 
 SETTINGS="$(node -e '
   const [options] = process.argv.slice(1);
@@ -99,16 +114,16 @@ node -e '
 ' "$CONFIG" "$SETS" "$RECALL_PREFIX" > "$OUT/input.jsonl"
 
 cat > "$OUT/meta.json" <<EOF
-{"pluginDir": "$PLUGIN_DIR", "session": "$SESSION", "cwd": "$CWD", "runs": $N, "sets": "${SETS:-all}", "config": "$CONFIG", "started": "$STAMP", "settings": $SETTINGS}
+{"pluginDir": "$PLUGIN_DIR", "noPlugin": $([ "$NO_PLUGIN" = 1 ] && echo true || echo false), "session": "$SESSION", "cwd": "$CWD", "runs": $N, "sets": "${SETS:-all}", "config": "$CONFIG", "started": "$STAMP", "settings": $SETTINGS}
 EOF
 
-echo "live eval: $N run(s), plugin $PLUGIN_DIR, session $SESSION -> $OUT"
+echo "live eval: $N run(s), plugin ${PLUGIN_DIR:-NONE (built-in summary)}, session $SESSION -> $OUT"
 for i in $(seq 1 "$N"); do
   start=$(date +%s)
   echo "run$i start $(date -u +%FT%TZ)"
   set +e
   (cd "$CWD" && claude -p --resume "$SESSION" --fork-session \
-      --plugin-dir "$PLUGIN_DIR" --settings "$SETTINGS" \
+      ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} --settings "$SETTINGS" \
       --input-format stream-json --output-format stream-json --verbose \
       --debug --debug-file "$OUT/run$i.debug.log" \
       < "$OUT/input.jsonl" > "$OUT/run$i.jsonl" 2> "$OUT/run$i.stderr")
