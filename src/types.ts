@@ -182,6 +182,13 @@ export interface CompactOptions {
   teammateHeadChars?: number;
   /** User text rows, newest first, the teammate pass never rewrites, with every user row after them. Default 3. */
   keepRecentUserTurns?: number;
+  /**
+   * tool_use_ids whose calls are kept whole (pinned): their rows carry riders a rebuild would lose
+   * (see riders.ts). Default none.
+   */
+  protectedResultIds?: readonly string[];
+  /** Input rows (user text rows) carrying riders (riders.ts): every pass returns them unchanged. */
+  protectedRows?: readonly Message[];
 }
 
 export interface ResolvedCompactOptions {

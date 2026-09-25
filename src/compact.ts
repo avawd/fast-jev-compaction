@@ -3,6 +3,7 @@ import { collectToolCalls } from './calls.js';
 import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
 import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
+import { protectRows } from './riders.js';
 import { planShapes } from './shape.js';
 import { shrinkOld } from './shrink.js';
 import { truncatedResultText } from './truncate.js';
@@ -213,17 +214,19 @@ export async function compact(
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages), messages, resolved);
+  const protectedIds = protectRows(messages, options.protectedResultIds ?? []);
+  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages, protectedIds), messages, resolved);
   const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
   const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
     ? await scorer(calls)
     : { verdicts: new Map(), claude: 'skipped' };
-  const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started);
+  const protectedRows = new Set(options.protectedRows ?? []);
+  const first = build(messages, source, calls, outcome.verdicts, resolved, outcome, started, protectedRows);
   const gate = options.escalateBelow;
   if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
   const strict = tier2Options(resolved);
-  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
-  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages, protectedIds), messages, strict);
+  const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started, protectedRows);
   if (!(gateRatio(second) > gateRatio(first))) return first;
   return { ...second, stats: { ...second.stats, tier: 2 } };
 }
@@ -237,6 +240,8 @@ function build(
   resolved: ResolvedCompactOptions,
   outcome: ScoreOutcome,
   started: number,
+  /** Rows carrying riders (riders.ts): returned unchanged by every pass. */
+  protectedRows: ReadonlySet<Message> = new Set(),
 ): CompactResult {
   const scored: CallDecision[] = calls.map((call) => {
     if (call.pinned) return { id: call.id, tool: call.tool, action: 'keep', source: 'pinned' };
@@ -259,7 +264,7 @@ function build(
     return unlessNoop(decision, texts.get(call.tool_use_id) ?? '', resolved.truncateHeadChars, shaped.tails.get(call.tool_use_id));
   });
   const applied = applyDecisions(source, decisions, calls, resolved.truncateHeadChars, shaped.tails);
-  const users = compactUserRows(applied, resolved);
+  const users = compactUserRows(applied, resolved, protectedRows);
   const shrunk = shrinkOld(users.messages, source, calls, resolved);
   const kept = shrunk.messages;
   const by = (pred: (d: CallDecision) => boolean) => decisions.filter(pred).length;

@@ -145,9 +145,22 @@ sees, more than its tool output. Typed prompts are never changed; teammate messa
 The notice Claude Code appends to every teammate message stays on the newest one (`dedupePeerNotice`).
 A cut must save 30% of its block. A block holding a note is never cut again. The gate
 (`minReductionRatio`) counts what this pass saves on both sides of its ratio, so it can only help a
-compaction clear the gate, never make it harder than tool output alone would. This pass never rewrites: the first
+compaction clear the gate, never make it harder than tool output alone would. A prompt you type that pastes a whole teammate message, header and all, and nothing else, looks exactly
+like one and may be cut like one; a paste with any text of your own around it is never touched.
+A teammate message a prompt rides on (typed right after it arrived) is kept whole (see Riders).
+This pass never rewrites: the first
 message, the preserved tail, the newest `keepRecentUserTurns` user messages and everything after them,
 and the first user message after a summary (it carries the re-sent instructions, see above).
+
+**Riders.** Claude Code records attachments (reminders, hook output, a prompt you type while a tool
+runs, a queued agent or task message) as entries of their own and hangs each on the message recorded
+before it; a hook sees only the messages. A message returned unchanged keeps what hangs on it, a
+rebuilt one loses it (measured on 2.1.282: truncating the result of a Bash call during which a prompt
+was typed removed that prompt from the conversation). So before pruning the hook reads the
+conversation as the model gets it (`$.session.messages({ as: "api" })`) and keeps whole every call
+whose result is followed by anything but an ephemeral reminder (token count, hook context, task and
+todo nags), together with every call sharing a message with it. If that view is unavailable the debug
+log says `riders unknown` and pruning goes on as before.
 
 A call whose assistant message has no text of its own is truncated to its note instead of dropped.
 Claude Code hands each content block over as its own message, so a thinking block sits beside the call;
