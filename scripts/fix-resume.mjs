@@ -16,10 +16,15 @@
  *   2. gives post-boundary assistant rows whose message.id also appears before the boundary a
  *      scoped id (`<id>_vc<n>`, n = the boundary's ordinal), the same for every row of one message.
  * Nothing before a boundary changes, unchanged lines are written back byte for byte, and a second
- * run is a no-op. It refuses to write while a live Claude Code process has the session open.
+ * run is a no-op. It refuses to write while a live Claude Code process has the session open, when the
+ * file changed in the last two minutes (unless --force), and to a subagent's transcript. The rewrite
+ * keeps the file's mode, follows a symlink, and aborts if the file changes before the rename.
  * No dependencies.
  */
-import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fsyncSync, openSync, readdirSync, readFileSync,
+  realpathSync, renameSync, statSync, unlinkSync, writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -128,18 +133,44 @@ function defaultConfigDir() {
   return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 }
 
-function stamp(date = new Date()) {
-  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+
+/** `20260925T061155123Z`: UTC to the millisecond. */
+function stamp(date) {
+  return date.toISOString().replace(/[-:.]/g, '');
 }
 
+/** A backup path that does not exist yet: `<file>.<stamp>.bak`, else `<file>.<stamp>-<n>.bak`. */
+function copyToBackup(path, date, mode) {
+  for (let n = 0; ; n += 1) {
+    const backup = `${path}.${stamp(date)}${n === 0 ? '' : `-${n}`}.bak`;
+    try {
+      copyFileSync(path, backup, constants.COPYFILE_EXCL);
+    } catch (error) {
+      if (error?.code === 'EEXIST') continue;
+      throw error;
+    }
+    chmodSync(backup, mode);
+    return backup;
+  }
+}
+
+const unchanged = (a, b) => a.size === b.size && a.mtimeMs === b.mtimeMs;
+
 /**
- * Plans (and with `write`, applies) the repair of one transcript. Throws when asked to write a
- * session that a live process has open.
+ * Plans (and with `write`, applies) the repair of one transcript. With `write` it throws, leaving the
+ * file as it was, when: a live process has the session open; the file was written in the last two
+ * minutes (unless `force`); it is not a `<session-id>.jsonl` (a subagent's transcript, a renamed
+ * copy); or it changed between the read and the rename. A symlink is followed and the real file is
+ * rewritten. `beforeRename` is a test seam: it runs after the new content is on disk.
  */
-export function fixFile(file, { write = false, configDir = defaultConfigDir() } = {}) {
-  const path = resolve(file);
-  const sessionId = basename(path).replace(/\.jsonl$/, '');
+export function fixFile(file, { write = false, force = false, configDir = defaultConfigDir(), now = new Date(), beforeRename } = {}) {
+  const path = realpathSync(resolve(file));
+  const name = basename(path);
+  const sessionId = name.replace(/\.jsonl$/, '');
+  const before = statSync(path);
   const text = readFileSync(path, 'utf8');
+  if (!unchanged(before, statSync(path))) throw new Error(`${path} changed while it was being read; try again once its session has exited`);
   const lines = text.split('\n');
   const rows = lines.map((l) => {
     if (!l.trim()) return null;
@@ -151,7 +182,7 @@ export function fixFile(file, { write = false, configDir = defaultConfigDir() } 
   });
   const plan = planFix(rows);
   const pid = runningSession(sessionId, configDir);
-  const recentlyModified = Date.now() - statSync(path).mtimeMs < RECENT_MS;
+  const recentlyModified = Date.now() - before.mtimeMs < RECENT_MS;
   const report = {
     file: path,
     relinks: plan.relinks.filter((r) => r.field === 'sourceToolAssistantUUID').length,
@@ -159,39 +190,66 @@ export function fixFile(file, { write = false, configDir = defaultConfigDir() } 
     renames: plan.renames.length,
     running: pid,
     recentlyModified,
+    sessionFile: SESSION_FILE.test(name),
     plan,
     written: false,
     backup: undefined,
   };
   if (!write || (plan.relinks.length === 0 && plan.renames.length === 0)) return report;
+  if (!report.sessionFile) {
+    throw new Error(`${name} is not a session transcript (<session-id>.jsonl); subagent transcripts are not supported`);
+  }
   if (pid !== undefined) throw new Error(`session ${sessionId} is running (pid ${pid}); exit it first`);
+  if (recentlyModified && !force) {
+    throw new Error(`${name} was written in the last two minutes; make sure its session has exited, then pass --force`);
+  }
 
   const fixed = applyPlan(rows, plan);
   const out = lines.map((l, i) => (fixed[i] !== rows[i] ? JSON.stringify(fixed[i]) : l)).join('\n');
-  const backup = `${path}.${stamp()}.bak`;
-  copyFileSync(path, backup);
-  const temp = `${path}.fix-resume-${process.pid}.tmp`;
-  writeFileSync(temp, out);
-  renameSync(temp, path);
+  const mode = before.mode & 0o777;
+  const temp = `${path}.fix-resume-${process.pid}-${now.getTime()}.tmp`;
+  let backup;
+  try {
+    const fd = openSync(temp, 'wx', mode);
+    try {
+      fchmodSync(fd, mode);
+      writeSync(fd, out);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    backup = copyToBackup(path, now, mode);
+    beforeRename?.();
+    if (!unchanged(before, statSync(path))) {
+      throw new Error(`${path} changed while it was being fixed (is its session running?); nothing was written`);
+    }
+    renameSync(temp, path);
+  } catch (error) {
+    if (existsSync(temp)) unlinkSync(temp);
+    if (backup !== undefined && existsSync(backup)) unlinkSync(backup);
+    throw error;
+  }
   return { ...report, written: true, backup };
 }
 
 function main(argv) {
   const args = argv.filter((a) => !a.startsWith('--'));
   const write = argv.includes('--write');
+  const force = argv.includes('--force');
   if (args.length !== 1 || argv.includes('--help')) {
-    console.error('usage: node scripts/fix-resume.mjs <session.jsonl> [--write]');
+    console.error('usage: node scripts/fix-resume.mjs <session.jsonl> [--write [--force]]');
     return 2;
   }
   let report;
   try {
-    report = fixFile(args[0], { write });
+    report = fixFile(args[0], { write, force });
   } catch (error) {
     console.error(`fix-resume: ${error.message}`);
     return 1;
   }
   if (report.running !== undefined) console.error(`warning: a live process (pid ${report.running}) has this session open`);
-  else if (report.recentlyModified) console.error('warning: the file changed in the last two minutes; make sure its session is not running');
+  else if (report.recentlyModified) console.error('warning: the file changed in the last two minutes; --write needs --force');
+  if (!report.sessionFile) console.error('warning: not a <session-id>.jsonl (a subagent transcript?); --write refuses it');
   console.log(`${report.file}`);
   console.log(`  tool_result rows to re-link: ${report.relinks} (parentUuid too: ${report.parentRelinks})`);
   console.log(`  assistant rows whose message.id to scope: ${report.renames}`);

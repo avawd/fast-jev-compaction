@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -55,12 +55,24 @@ function builtinCompaction(before: Row[]): Row[] {
 const toText = (rows: Row[]) => rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
 const parse = (text: string): Row[] => text.split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
+const SID = '0f0e0d0c-0b0a-4908-8706-050403020100';
+const NAME = `${SID}.jsonl`;
+
+/** A transcript file named like a session, last written ten minutes ago (not "recently"). */
 function tmp(rows: Row[]): string {
   const dir = mkdtempSync(join(tmpdir(), 'fix-resume-'));
-  const file = join(dir, 'session.jsonl');
+  const file = join(dir, NAME);
   writeFileSync(file, toText(rows));
+  age(file);
   return file;
 }
+
+function age(file: string): void {
+  const old = new Date(Date.now() - 10 * 60_000);
+  utimesSync(file, old, old);
+}
+
+const backups = (file: string) => readdirSync(join(file, '..')).filter((f) => f.endsWith('.bak'));
 
 function staleAfterLastBoundary(rows: Row[]): number {
   const b = rows.map((r) => r.subtype === 'compact_boundary').lastIndexOf(true);
@@ -147,32 +159,96 @@ describe('fix-resume file handling', () => {
     expect(report.renames).toBeGreaterThan(0);
     expect(report.written).toBe(false);
     expect(readFileSync(file, 'utf8')).toBe(before);
-    expect(readdirSync(join(file, '..'))).toEqual(['session.jsonl']);
+    expect(readdirSync(join(file, '..'))).toEqual([NAME]);
   });
 
-  it('--write makes a timestamped .bak of the original, then rewrites; unchanged lines stay byte-identical', () => {
+  it('--write makes a unique timestamped .bak of the original, then rewrites; unchanged lines stay byte-identical', () => {
     const file = tmp(rows);
     const before = readFileSync(file, 'utf8').replace('"do f"', '"do  f"'); // odd spacing survives in unchanged rows
     writeFileSync(file, before);
+    age(file);
     const report = fixFile(file, { write: true, configDir: noSessions() });
     expect(report.written).toBe(true);
-    const baks = readdirSync(join(file, '..')).filter((f) => f.endsWith('.bak'));
-    expect(baks).toHaveLength(1);
-    expect(baks[0]).toMatch(/^session\.jsonl\.\d{8}T\d{6}Z?\.bak$/);
-    expect(readFileSync(join(file, '..', baks[0]!), 'utf8')).toBe(before);
+    expect(backups(file)).toHaveLength(1);
+    expect(backups(file)[0]).toMatch(new RegExp(`^${NAME.replace('.', '\\.')}\\.\\d{8}T\\d{9}Z(-\\d+)?\\.bak$`));
+    expect(readFileSync(join(file, '..', backups(file)[0]!), 'utf8')).toBe(before);
     const after = readFileSync(file, 'utf8');
     expect(after.split('\n')[0]).toBe(before.split('\n')[0]);
     expect(staleAfterLastBoundary(parse(after))).toBe(0);
     // A second run changes nothing and makes no second backup.
+    age(file);
     const again = fixFile(file, { write: true, configDir: noSessions() });
     expect(again.written).toBe(false);
-    expect(readdirSync(join(file, '..')).filter((f) => f.endsWith('.bak'))).toHaveLength(1);
+    expect(backups(file)).toHaveLength(1);
     expect(readFileSync(file, 'utf8')).toBe(after);
+    expect(readdirSync(join(file, '..')).some((f) => f.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('two writes in the same millisecond never share a backup name', () => {
+    const file = tmp(rows);
+    const at = new Date('2026-01-02T03:04:05.678Z');
+    fixFile(file, { write: true, configDir: noSessions(), now: at });
+    writeFileSync(file, toText(rows));
+    age(file);
+    fixFile(file, { write: true, configDir: noSessions(), now: at });
+    expect(backups(file)).toHaveLength(2);
+  });
+
+  it('keeps the file mode (a 0600 transcript stays 0600)', () => {
+    const file = tmp(rows);
+    chmodSync(file, 0o600);
+    fixFile(file, { write: true, configDir: noSessions() });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(join(file, '..', backups(file)[0]!)).mode & 0o777).toBe(0o600);
+  });
+
+  it('aborts, leaving the file intact, when a writer appends between the read and the rename', () => {
+    const file = tmp(rows);
+    const row = JSON.stringify({ type: 'user', uuid: 'late', message: { role: 'user', content: 'late' } }) + '\n';
+    expect(() => fixFile(file, { write: true, configDir: noSessions(), beforeRename: () => appendFileSync(file, row) })).toThrow(/changed/);
+    expect(readFileSync(file, 'utf8')).toBe(toText(rows) + row);
+    expect(backups(file)).toEqual([]);
+    expect(readdirSync(join(file, '..'))).toEqual([NAME]);
+  });
+
+  it('refuses a file written in the last two minutes unless forced', () => {
+    const file = tmp(rows);
+    writeFileSync(file, toText(rows));
+    expect(() => fixFile(file, { write: true, configDir: noSessions() })).toThrow(/two minutes/);
+    expect(fixFile(file, { write: false, configDir: noSessions() }).recentlyModified).toBe(true);
+    expect(fixFile(file, { write: true, force: true, configDir: noSessions() }).written).toBe(true);
+  });
+
+  it('follows a symlink: the real file is fixed, the link stays a link, the id comes from the real name', () => {
+    const file = tmp(rows);
+    const linkDir = mkdtempSync(join(tmpdir(), 'fix-resume-link-'));
+    const link = join(linkDir, 'current.jsonl');
+    symlinkSync(file, link);
+    const cfg = noSessions();
+    mkdirSync(join(cfg, 'sessions'));
+    writeFileSync(join(cfg, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: SID }));
+    expect(() => fixFile(link, { write: true, configDir: cfg })).toThrow(/running/);
+    const report = fixFile(link, { write: true, configDir: noSessions() });
+    expect(report.written).toBe(true);
+    expect(staleAfterLastBoundary(parse(readFileSync(file, 'utf8')))).toBe(0);
+    expect(readdirSync(linkDir)).toEqual(['current.jsonl']);
+    expect(readFileSync(link, 'utf8')).toBe(readFileSync(file, 'utf8'));
+  });
+
+  it('refuses to write a subagent transcript or any file not named <session-id>.jsonl', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fix-resume-sub-'));
+    mkdirSync(join(dir, SID, 'subagents'), { recursive: true });
+    const sub = join(dir, SID, 'subagents', 'agent-a1b2c3.jsonl');
+    writeFileSync(sub, toText(rows));
+    age(sub);
+    expect(() => fixFile(sub, { write: true, configDir: noSessions() })).toThrow(/session transcript/);
+    expect(fixFile(sub, { write: false, configDir: noSessions() }).relinks).toBe(2);
   });
 
   it('keeps lines it cannot parse', () => {
     const file = tmp(rows);
     writeFileSync(file, readFileSync(file, 'utf8') + '{not json\n');
+    age(file);
     fixFile(file, { write: true, configDir: noSessions() });
     expect(readFileSync(file, 'utf8').endsWith('{not json\n')).toBe(true);
   });
@@ -181,13 +257,13 @@ describe('fix-resume file handling', () => {
     const file = tmp(rows);
     const cfg = noSessions();
     mkdirSync(join(cfg, 'sessions'));
-    writeFileSync(join(cfg, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'session' }));
-    expect(runningSession('session', cfg)).toBe(process.pid);
+    writeFileSync(join(cfg, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: SID }));
+    expect(runningSession(SID, cfg)).toBe(process.pid);
     expect(() => fixFile(file, { write: true, configDir: cfg })).toThrow(/running/);
-    expect(readdirSync(join(file, '..')).some((f) => f.endsWith('.bak'))).toBe(false);
+    expect(backups(file)).toEqual([]);
     // A registry entry whose process is gone does not block.
-    writeFileSync(join(cfg, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: 999999, sessionId: 'session' }));
-    expect(runningSession('session', cfg)).toBeUndefined();
+    writeFileSync(join(cfg, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: 999999, sessionId: SID }));
+    expect(runningSession(SID, cfg)).toBeUndefined();
     expect(existsSync(file)).toBe(true);
   });
 });

@@ -217,11 +217,22 @@ node scripts/fix-resume.mjs ~/.claude/projects/<project>/<session-id>.jsonl --wr
   post-boundary assistant row whose `message.id` also appears before the boundary a scoped id
   (`<id>_vc<n>`, the same for every row of one message). Rows before a boundary and rows the model
   wrote after it are left alone, and unchanged lines are written back byte for byte.
-- **Safety.** It is a dry run unless you pass `--write`. `--write` first copies the file to
-  `<file>.<UTC timestamp>.bak`, then replaces it atomically (a temp file and a rename). It refuses to
-  write while a live Claude Code process has the session open (`~/.claude/sessions/<pid>.json`), and it
-  warns when the file changed in the last two minutes. A second run changes nothing. A transcript with
-  no hook compaction is left untouched.
+- **Safety.** It is a dry run unless you pass `--write`. `--write` refuses in these cases:
+  - a live Claude Code process has the session open (`~/.claude/sessions/<pid>.json` with a live pid);
+  - the file was written in the last two minutes, unless you also pass `--force`;
+  - the file is not a `<session-id>.jsonl`, such as a subagent's transcript under `subagents/`, which
+    is not supported.
+
+  Otherwise it copies the file to `<file>.<UTC timestamp to the ms>.bak` with the same mode. It writes
+  the new content to a temp file with the original mode and fsyncs it. Just before the rename it checks
+  the file again, and aborts (removing the temp and the backup) if anything appended to it since the
+  read. It follows a symlink and rewrites the real file. A second run changes nothing, and a transcript
+  with no hook compaction is left untouched.
+- **Cost trackers.** A tool that totals usage per `message.id` (and `requestId`) sees each scoped id as
+  a new message. This does not inflate totals: the engine already writes the kept copies with all
+  usage counters at 0 (all 285 kept copies in the measured session), and the script leaves `usage` and
+  `requestId` as they are. A tracker that counts messages rather than tokens will count those rows
+  once more.
 - **Scope.** Run it only on a session that has exited. The next compaction writes new rows the same
   way, so run it again after that compaction, before the next resume.
 
