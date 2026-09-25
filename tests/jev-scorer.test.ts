@@ -29,13 +29,37 @@ describe('skeletonCommand (refusal-prone commands)', () => {
       .toBe("ssh -F /dev/null <host> '…'");
     expect(skeletonCommand('curl -s -H "Accept: json" "https://api.example.test/v1/items?token=abc"')).toBe("curl -s -H '…' <url>");
     expect(skeletonCommand('gh api -X PUT repos/o/r/pulls/922/merge -f merge_method=squash'))
-      .toBe('gh api -X repos/o/r/pulls/922/merge -f');
+      .toBe('gh api -X <path> -f');
     expect(skeletonCommand('set -a; . ./.env.local; set +a; gh pr merge 12 --squash'))
       .toBe('set -a; . ./.env.local; set +a; gh pr merge --squash');
-    expect(skeletonCommand('ssh box.example.test uptime')).toBe('ssh');
-    expect(skeletonCommand('scp build.tgz ops@host.example.test:/tmp/')).toBe('scp build.tgz <host>');
+    expect(skeletonCommand('ssh box.example.test uptime')).toBe('ssh <host>');
+    expect(skeletonCommand('scp ./build.tgz ops@host.example.test:/tmp/')).toBe('scp ./build.tgz <host>');
     expect(skeletonCommand("docker exec app-server sh -c 'grep -rl foo /app'")).toBe("docker exec sh -c '…'");
     expect(skeletonCommand('source ~/.profile && wget http://10.0.0.5:8080/x')).toBe('source ~/.profile && wget <url>');
+  });
+
+  it('never shows a flag value, attached or following, nor a bare host or a gh api path (review HIGH)', () => {
+    const cases: Array<[string, string]> = [
+      ['curl -uadmin:hunter2 x', 'curl -u'],
+      ['docker login -pS3cretPass', 'docker login -p'],
+      ['curl -HAuthorization:Bearer_abc123 x', 'curl -H'],
+      ['curl --user=admin:hunter2 --header=X-Key:abc x', 'curl --user --header'],
+      ['curl api.internal.example.test/v1', 'curl <host>'],
+      ['wget example-host.corp.test/file.tar', 'wget <host>'],
+      ['scp f box.corp.test:/srv/app/', 'scp <host>'],
+      ['scp ./f box:/srv/app/', 'scp ./f <host>'],
+      ['docker login -p s3cretPass registry.corp.test', 'docker login -p <host>'],
+      ['docker login -u robot -p s3cretPass', 'docker login -u -p'],
+      ['curl -d token=abc -X POST /tmp/sock', 'curl -d -X /tmp/sock'],
+      ['gh api repos/Org/private-repo/pulls/12', 'gh api <path>'],
+      ['gh api repos/Org/private-repo/pulls/12 --jq .title', 'gh api <path> --jq'],
+    ];
+    for (const [command, shown] of cases) expect(skeletonCommand(command)).toBe(shown);
+    for (const [command, shown] of cases) {
+      for (const secret of ['hunter2', 'S3cretPass', 's3cretPass', 'abc123', 'example.test', 'corp.test', 'Org', 'private-repo', 'robot', 'token=abc', 'box']) {
+        if (command.includes(secret)) expect(shown).not.toContain(secret);
+      }
+    }
   });
 
   it('leaves other commands alone', () => {

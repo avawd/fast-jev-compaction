@@ -109,6 +109,16 @@ function secretCommand(r: Rng, i: number, secrets: string[]): string {
     `set -a; . ./.env.local; set +a; gh pr merge 12 --subject ${s}`,
     `scp build.tgz ${s}@host.example.test:/tmp/`,
     `docker exec work sh -c 'grep -rl ${s} /app'`,
+    // Values attached to or following a flag, bare dotted hosts, and gh api paths (review HIGH).
+    `curl -uadmin:${s} x`,
+    `docker login -p${s}`,
+    `curl -HAuthorization:Bearer_${s} x`,
+    `curl --user=admin:${s} https://api.example.test/`,
+    `curl api.${s}.example.test/v1`,
+    `wget ${s}.corp.test/file.tar`,
+    `scp f box.${s}.test:/srv/app/`,
+    `docker login -p ${s} registry.corp.test`,
+    `gh api repos/${s}/private-repo/pulls/12`,
   ]);
 }
 
