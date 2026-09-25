@@ -102,6 +102,37 @@ prints `kept X/Y` (column `parser`).
   turn, so it sees two more rows.
 - Byte counts use JS string length (UTF-16 units), the same as the plugin's `messageChars`.
 
+### Categories: `npm run eval:offline -- --categories`
+
+Prints, per segment, the hook-visible characters by category (`eval/categories.ts`) and what each arm
+removed from each. The JSON always holds them (`categories` per segment, `categoriesRemoved` per arm).
+
+| category | what |
+|---|---|
+| `tool_result` | result text |
+| `input:<tool>` | JSON of a tool_use input: `Bash`, `Write`, `Edit`, `MultiEdit`, `SendMessage`, `Agent` (and `Task`), else `other` |
+| `user:teammate` | a `<teammate-message>` / `<agent-message>` block with content |
+| `user:idle` | a teammate block whose body is a JSON notification (`idle_notification`, whose `result` can hold the agent's whole report) |
+| `user:boilerplate` | text around teammate blocks ("Another Claude session sent a message: …") |
+| `user:task`, `user:reminder`, `user:command`, `user:summary`, `user:typed` | task notifications, `<system-reminder>`, command rows, the built-in summary, the rest |
+| `assistant_text` | assistant text |
+
+The categories sum to the plugin's `messageChars` over the segment. `est tok` multiplies by
+`TOKENS_PER_CHAR`, which comes from a regression. Across ten local sessions (6,978 requests), the change
+in API usage between consecutive requests was fitted by least squares on the characters each category
+added. Results: tool results 0.44 tokens/char, tool inputs 0.41–0.43 (`SendMessage` 0.34), teammate
+text 0.39, assistant text 0.35.
+
+**What the hook does not see.** On the last segments of seven large sessions, hook-visible text was
+41–64% of the real context. Two other parts made up the rest:
+- **Thinking** was 13–31%. It costs 0.28 tokens/char. A regressor for the thinking a new turn would
+  strip came out at 0.000, so thinking is carried, not stripped. The engine keeps it whatever rows the
+  hook returns, which is why leaving thinking rows out changed nothing in the A/B above.
+- **The system prompt, tools and attachment riders** were 17–39%.
+
+`duplicateUserCharsByCategory` counts user-row lines (≥ 40 chars) that repeat a line already in context,
+reading an idle notification's JSON so an escaped repeat still counts.
+
 ## Replay: `npm run eval:offline -- --replay`
 
 A long session compacts many times, and each pass is handed the previous one's output. The replay
@@ -176,7 +207,8 @@ The inline copy registers as `verbatim-compaction@inline`, and the global copy l
 | forks (ms) | every `$.model.fork (verbatim-compaction): Nms …` line, plus the count of `source=hook_prompt` requests |
 | fork api-err | fork lines reporting `API error …`. The target is 0 |
 | outcome, fallback | the plugin's `$.ui.log` `kept …` / `fallback …` line. Fallback also counts when core ran or no "a hook's N messages stand" line appears |
-| pre→post tok | the `compact_boundary` event's `compact_metadata` |
+| pre→post tok | the `compact_boundary` event's `compact_metadata`. `post` UNDERCOUNTS the real context by 100–230k |
+| real ctx before→after | API usage (input + cache read + cache creation) of the last request before the boundary and the first one after it: the real context |
 | hook ms (incl. next) | `session.compact settled in`. On a fallback this includes the built-in summary |
 | recall `<set>` | expected tokens found (case-insensitive substring) in the post-compaction answers. `FAILED (tool use)` if the recall turn called any tool |
 | ctx `<set>` before→after | expected tokens present in the forked transcript before compaction, and in the context after it (the carried rows, or the summary message). This measures retention without depending on the model's answer. `before` < all means the recall set no longer fits the session and must be refreshed |
