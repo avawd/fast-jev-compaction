@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDebugLog, parseStream, scoreAnswer, scoreRecall } from './live-summary.ts';
+import { parseDebugLog, parseStream, realCtx, scoreAnswer, scoreRecall } from './live-summary.ts';
 
 // Lines in the shape 2.1.281 writes them (copied from a validation run's debug log, paths generic).
 const LOG = [
@@ -43,6 +43,43 @@ describe('parseStream', () => {
     ].map((o) => JSON.stringify(o));
     const s = parseStream(lines.join('\n'));
     expect(s).toMatchObject({ sessionId: 's1', preTokens: 100, postTokens: 10, answers: ['Set 1: 922 Set 2: unknown'], recallToolUses: [] });
+  });
+});
+
+describe('real context from API usage', () => {
+  const usage = (input: number, read: number, create: number) => ({ input_tokens: input, cache_read_input_tokens: read, cache_creation_input_tokens: create, output_tokens: 5 });
+  it('takes the last request before the boundary and the first one after it', () => {
+    const lines = [
+      { type: 'assistant', message: { id: 'm0', usage: usage(1, 100, 10), content: [] } },
+      { type: 'assistant', message: { id: 'm1', usage: usage(2, 200_000, 66_000), content: [{ type: 'text', text: 'ok' }] } },
+      { type: 'result', result: 'ok', session_id: 's1' },
+      { type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 100, post_tokens: 10 } },
+      { type: 'result', result: '', num_turns: 0 },
+      { type: 'assistant', message: { id: 'm2', usage: usage(3, 0, 231_000), content: [{ type: 'text', text: 'a' }] } },
+      { type: 'assistant', message: { id: 'm3', usage: usage(4, 231_000, 900), content: [{ type: 'text', text: 'b' }] } },
+      { type: 'result', result: 'a b' },
+    ].map((o) => JSON.stringify(o));
+    const s = parseStream(lines.join('\n'));
+    expect(s.realBefore).toBe(266_002);
+    expect(s.realAfter).toBe(231_003);
+  });
+
+  it('ignores zero-usage and synthetic messages', () => {
+    const lines = [
+      { type: 'assistant', message: { id: 'm1', usage: usage(1, 10, 0), content: [] } },
+      { type: 'system', subtype: 'compact_boundary', compact_metadata: {} },
+      { type: 'assistant', message: { id: 'x', model: '<synthetic>', usage: usage(0, 0, 0), content: [] } },
+      { type: 'assistant', message: { id: 'm2', usage: usage(5, 0, 0), content: [] } },
+    ].map((o) => JSON.stringify(o));
+    const s = parseStream(lines.join('\n'));
+    expect([s.realBefore, s.realAfter]).toEqual([11, 5]);
+  });
+});
+
+describe('realCtx', () => {
+  it('prints before→after with the relative change', () => {
+    expect(realCtx(266_000, 231_000)).toBe('266k→231k (-13%)');
+    expect(realCtx(undefined, 5)).toBe('-→5');
   });
 });
 
