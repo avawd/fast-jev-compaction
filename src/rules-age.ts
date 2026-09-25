@@ -30,7 +30,7 @@ export function ageRule(calls: readonly ToolCall[], decided: ReadonlySet<string>
 }
 
 /**
- * `stale_truncation` (tier 2 only, see compact.ts `escalate`): a result an earlier compaction
+ * `stale_truncation` (tier 2 only, see escalate.ts): a result an earlier compaction
  * already truncated, older than the tier's `staleAfterMessages`, whatever its tool. Its head is cut
  * further; the note's count keeps accounting for the original result.
  */

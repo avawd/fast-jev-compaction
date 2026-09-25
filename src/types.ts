@@ -155,7 +155,7 @@ export interface CompactOptions {
   cwd?: string;
   /**
    * The caller's gate (`gateRatio`). When set and missed on a transcript an earlier compaction
-   * already truncated, compact() tries a stricter tier 2 (see compact.ts `escalate`). Unset: off.
+   * already truncated, compact() tries a stricter tier 2 (see escalate.ts). Unset: off.
    */
   escalateBelow?: number;
 }
