@@ -308,6 +308,39 @@ describe('register', () => {
       expect(out).not.toBe(NEXT_RESULT);
     });
 
+    it('skips, not summarises, when its own early request (trigger plugin) misses the gate', async () => {
+      // Replayed over the corpus: a summary at the plugin's own 60% request lost every verbatim
+      // fact while nothing needed the room yet. Claude Code's own compaction still decides later.
+      const h = harness();
+      const out = (await h.compact({ trigger: 'plugin', messages: claudeOnly() })) as { skip?: string };
+      expect(out.skip).toMatch(/only \d+% of tool output/);
+      expect(h.nextCalls).toHaveLength(0);
+      expect(h.logs.join('\n')).toMatch(/skipped/);
+      expect(await h.compact({ trigger: 'auto', messages: claudeOnly() })).toBe(NEXT_RESULT);
+    });
+
+    it('after skipping, waits for context to drop before asking again', async () => {
+      const h = harness({ percent: 70 });
+      await h.compact({ trigger: 'plugin', messages: claudeOnly() });
+      await h.turnComplete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 'x' });
+      expect(h.compactCalls).toBe(0);
+    });
+
+    it('asks compact() for tier 2 at its own gate', async () => {
+      const { result } = await compactSession(transcript(), resolveHookConfig({ minReductionRatio: 0.4 }));
+      expect(result.stats.tier).toBeUndefined();
+      const stub = `${'s'.repeat(300)}\n[verbatim-compaction truncated 9000 chars of this tool result; re-run the tool if needed]`;
+      const old = [
+        m('user', 'go'),
+        m('assistant', '', { toolUses: [{ tool_use_id: 'o1', tool: 'Bash', input: { command: 'make deploy' } }] }),
+        m('user', '', { toolResults: [{ tool_use_id: 'o1', text: stub }] }),
+        ...Array.from({ length: 120 }, (_, i) => m(i % 2 ? 'user' : 'assistant', `turn ${i}`)),
+      ];
+      const escalated = await compactSession(old, resolveHookConfig({ useClaudeScorer: false }));
+      expect(escalated.result.stats.tier).toBe(2);
+      expect(summarize(escalated.result)).toMatch(/tier 2/);
+    });
+
     it('survives a throwing toast and log', async () => {
       const boom = () => { throw new Error('ui gone'); };
       const h = harness({ toast: boom, log: boom });

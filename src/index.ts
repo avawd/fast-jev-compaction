@@ -16,3 +16,5 @@ export * from './annotate.js';
 export * from './gate.js';
 export * from './shell.js';
 export * from './text.js';
+export * from './truncate.js';
+export * from './escalate.js';

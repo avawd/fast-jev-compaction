@@ -78,7 +78,30 @@ If the result saves less than `minReductionRatio` of the transcript's tool-resul
 thing pruning can shrink; user text and attachments are out of its reach), Claude Code's built-in summary
 runs instead. So does
 `/compact <instructions>`: instructions ask for a focused summary, which pruning cannot give. A plain
-`/compact` prunes.
+`/compact` prunes. Two exceptions keep a long session verbatim for longer:
+
+- **The plugin's own request** (at `compactAtPercent`) never ends in a summary. Below the gate it
+  leaves the transcript as it is and waits: nothing needs the room yet, and Claude Code's own
+  compaction still runs at its threshold, where the gate decides as above.
+- **Tier 2.** A long session compacts many times, and a later pass has less to cut: the old output
+  is already truncated, so only what arrived since can go. When a pass misses the gate on a
+  transcript an earlier compaction already truncated, it is tried once more with half the
+  `staleAfterMessages`, `truncateHeadChars` and `truncateTailChars`, and old truncations older than
+  that age are cut further (`stale_truncation`). The scorer is not asked again, and pins hold.
+
+A result truncated by an earlier pass is cut again within its own head and tail, with one note whose
+count still accounts for the original result. It is never truncated twice over (two notes).
+
+**How far verbatim compaction can go in a long session.** Replayed over the maintainers' corpus
+(`npm run eval:offline -- --replay`, a 400k window), tool results were under a fifth of the context at
+the first compaction and about a tenth at later ones. The rest was the system prompt and tools, user
+and assistant text, tool inputs, and the model's earlier thinking, which stays in context (a fit to
+the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never touches. So a prune
+frees less each time, and on every long session replayed one of the later compactions still fell back
+to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
+sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
+most two points on four. A few passes late in a session freed under 5% of the context, leaving it at
+Claude Code's own threshold, so the fallback came a turn or two later instead.
 
 **Headless (`claude -p`, the SDK):** the automatic trigger does not work there. Claude Code 2.1.281
 refuses `$.session.compact()` outside an interactive session (compaction there runs only inside a turn,

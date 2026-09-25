@@ -17,8 +17,12 @@
   - **Everything else**: rules, then Jev-style `$.model.fork` calls over the calls the rules leave
     undecided (and not cited as a rule's evidence), one per `forkChunkSize` chunk, run concurrently
     against one shared `$.clock.sleep` deadline: `claudeTimeoutMs` when the rules alone already
-    clear `minReductionRatio`, else the 45 s ceiling. Below `minReductionRatio` (characters saved over tool-result characters, `gateRatio`), or on any
-    unexpected error, the result goes to `next(event)` instead of replacing the transcript. A debug
+    clear `minReductionRatio`, else the 45 s ceiling. `compact()` gets `escalateBelow:
+    minReductionRatio`, so a pass that misses it on an already-compacted transcript tries tier 2
+    (README, "Tier 2"). Below `minReductionRatio` (characters saved over tool-result characters,
+    `gateRatio`), or on any unexpected error, the result goes to `next(event)` instead of replacing
+    the transcript, except on the plugin's own request (`trigger === 'plugin'`, `gateOutcome`): that
+    returns `{ skip }` and waits for context to drop, as after a compaction. A debug
     log line records the wait mode and each fork's size, time and status.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and
   calls `$.session.compact()` once `context.percent` reaches `compactAtPercent`, guarded against

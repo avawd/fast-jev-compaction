@@ -1,6 +1,7 @@
 import { excerptPlan } from './excerpt.js';
 import { pinnedWindow } from './pin.js';
 import { bashCommand, readonlyFamilyKey, sourceReadPaths, stripCommandPrefix } from './rules-bash.js';
+import { isTruncated, priorTruncation } from './truncate.js';
 import type { CallDecision, ResolvedCompactOptions, ToolCall } from './types.js';
 
 /** A command word that marks a run whose verdict is printed last. */
@@ -66,14 +67,16 @@ export function planShapes(
   const planned = decisions.map((decision): CallDecision => {
     const call = byId.get(decision.id);
     if (!call || decision.action === 'keep') return decision;
-    // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either.
-    const preferred = decision.headChars !== 0 && wantsTail(call) ? options.truncateTailChars : 0;
+    const text = texts.get(call.tool_use_id) ?? call.resultText ?? '';
+    // headChars 0 is a drop in all but name (see preferTruncation): it keeps no tail either. Nor
+    // does a result an earlier pass cut to its head: its end is already gone.
+    const headOnly = priorTruncation(text)?.tail === '';
+    const preferred = decision.headChars !== 0 && !headOnly && wantsTail(call) ? options.truncateTailChars : 0;
     const tokens = options.pinReferenced ? (call.refTokens ?? []) : [];
     if (tokens.length === 0) {
       if (decision.action === 'drop_result' && preferred > 0) tails.set(call.tool_use_id, preferred);
       return decision;
     }
-    const text = texts.get(call.tool_use_id) ?? call.resultText ?? '';
     const head = decision.headChars ?? options.truncateHeadChars;
     const window = pinnedWindow(text, tokens, {
       head,
@@ -82,7 +85,8 @@ export function planShapes(
       maxHead: Math.max(head, MAX_PINNED_HEAD),
     });
     if (!window) {
-      const plan = excerptPlan(text, tokens, head, preferred);
+      // An earlier pass's truncation is never excerpted: that would nest its note inside the excerpt.
+      const plan = isTruncated(text) ? undefined : excerptPlan(text, tokens, head, preferred);
       if (!plan) return { id: decision.id, tool: decision.tool, action: 'keep', source: 'pinned' };
       if (plan.tail > 0) tails.set(call.tool_use_id, plan.tail);
       const excerpted: CallDecision = { ...decision, action: 'drop_result' };
