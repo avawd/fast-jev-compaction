@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  elideSecrets, buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
+  elideSecrets, skeletonCommand, buildJevPrompt, chunk, collectToolCalls, decide, jevCandidateLine, parseJevReply, type ToolCall,
 } from '../src/index.js';
 
 function c(id: string, tool: string, input: Record<string, unknown>, extra: Partial<ToolCall> = {}): ToolCall {
@@ -20,6 +20,33 @@ describe('candidate command text', () => {
   it('keeps a command that is only a prefix, and a cd later in the command', () => {
     expect(line('cd /only')).toContain(' msg 16/5 cd /only → ');
     expect(line('npm test && cd /a')).toContain(' msg 16/5 npm test && cd /a → ');
+  });
+});
+
+describe('skeletonCommand (refusal-prone commands)', () => {
+  it('reduces remote, network, container and env-loading commands to program, subcommand, flags and paths', () => {
+    expect(skeletonCommand("ssh -F /dev/null deploy@10.1.2.3 'cd /srv/app && docker exec app node -e \"x\"'"))
+      .toBe("ssh -F /dev/null <host> '…'");
+    expect(skeletonCommand('curl -s -H "Accept: json" "https://api.example.test/v1/items?token=abc"')).toBe("curl -s -H '…' <url>");
+    expect(skeletonCommand('gh api -X PUT repos/o/r/pulls/922/merge -f merge_method=squash'))
+      .toBe('gh api -X repos/o/r/pulls/922/merge -f');
+    expect(skeletonCommand('set -a; . ./.env.local; set +a; gh pr merge 12 --squash'))
+      .toBe('set -a; . ./.env.local; set +a; gh pr merge --squash');
+    expect(skeletonCommand('ssh box.example.test uptime')).toBe('ssh');
+    expect(skeletonCommand('scp build.tgz ops@host.example.test:/tmp/')).toBe('scp build.tgz <host>');
+    expect(skeletonCommand("docker exec app-server sh -c 'grep -rl foo /app'")).toBe("docker exec sh -c '…'");
+    expect(skeletonCommand('source ~/.profile && wget http://10.0.0.5:8080/x')).toBe('source ~/.profile && wget <url>');
+  });
+
+  it('leaves other commands alone', () => {
+    for (const cmd of ['npm test', 'git log --oneline -5', 'grep -n "foo bar" src/a.ts', 'gh pr view 12']) {
+      expect(skeletonCommand(cmd)).toBe(cmd);
+    }
+  });
+
+  it('is what a candidate line shows for such a command', () => {
+    const line = jevCandidateLine(c('t1', 'Bash', { command: 'ssh ops@10.9.8.7 "docker logs app | tail"' }), { messageCount: 5 });
+    expect(line).toContain(" msg 16/5 ssh <host> '…' → ");
   });
 });
 
@@ -95,14 +122,14 @@ describe('buildJevPrompt', () => {
     expect(prompt).toMatch(/drop.*one-line note/);
   });
 
-  it('asks for bare-number ids: output tokens are what a fork waits on', () => {
+  it('asks for a direct answer without deliberation: thinking tokens are most of what a fork waits on', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
-    expect(prompt).toMatch(/each id as its number alone \(t12 is 12\)/);
+    expect(prompt).toMatch(/without deliberating/);
   });
 
-  it('does not ask the fork to skip deliberation: live, that prompt was refused on 8 of 28 first asks (0 of 9 without)', () => {
+  it('asks for the ids as written, not bare numbers (a first ask was refused with bare numbers asked for)', () => {
     const prompt = buildJevPrompt([c('t1', 'Read', { file_path: 'a' })], { messageCount: 5 });
-    expect(prompt).not.toMatch(/deliberat|at once|directly/i);
+    expect(prompt).not.toMatch(/number alone/);
   });
 
   it('tells the fork not to call tools and to reply with the JSON only', () => {
