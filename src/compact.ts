@@ -3,6 +3,7 @@ import { collectToolCalls } from './calls.js';
 import { tier2Options, tier2Verdicts, wasCompacted } from './escalate.js';
 import { gateRatio, resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
+import { protectRows } from './riders.js';
 import { planShapes } from './shape.js';
 import { shrinkOld } from './shrink.js';
 import { truncatedResultText } from './truncate.js';
@@ -213,7 +214,8 @@ export async function compact(
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages), messages, resolved);
+  const protectedIds = protectRows(messages, options.protectedResultIds ?? []);
+  const calls = annotateCalls(collectToolCalls(messages, resolved.preserveRecentMessages, protectedIds), messages, resolved);
   const source = resolved.stripMcpFurniture ? stripFurnitureInMessages(messages, calls) : messages;
   const outcome: ScoreOutcome = calls.some((c) => !c.pinned)
     ? await scorer(calls)
@@ -222,7 +224,7 @@ export async function compact(
   const gate = options.escalateBelow;
   if (typeof gate !== 'number' || !(gateRatio(first) < gate) || !wasCompacted(messages)) return first;
   const strict = tier2Options(resolved);
-  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages), messages, strict);
+  const strictCalls = annotateCalls(collectToolCalls(messages, strict.preserveRecentMessages, protectedIds), messages, strict);
   const second = build(messages, source, strictCalls, tier2Verdicts(strictCalls, outcome.verdicts), strict, outcome, started);
   if (!(gateRatio(second) > gateRatio(first))) return first;
   return { ...second, stats: { ...second.stats, tier: 2 } };

@@ -21,3 +21,4 @@ export * from './truncate.js';
 export * from './escalate.js';
 export * from './shrink.js';
 export * from './user-rows.js';
+export * from './riders.js';

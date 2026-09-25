@@ -6,7 +6,7 @@
  */
 import { toSessionMessages } from '../hooks/verbatim.ts';
 import {
-  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE,
+  annotateCalls, applyRules, INPUT_CHARS, MIN_SHRINK_FIELD_CHARS, SHRINK_NOTE_PREFIX, MAX_CONCURRENT_FORKS, PREVIEW_CHARS, collectToolCalls, compact, makeScorer, resolveOptions, rulesGate, TRUNCATION_NOTE_PREFIX, USER_ROW_NOTE, protectRows,
   type CompactOptions, type CompactResult, type Message, type RuleName, type Scorer, type ScorerOptions, type Verdict,
 } from '../src/index.js';
 import { chance, fakeFork, genTranscript, int, pick, promptIds, rng, wellFormed, type Row, type Transcript } from './fuzz-gen.ts';
@@ -66,6 +66,11 @@ function setupFor(seed: number, transcript: Transcript): CaseSetup {
     stripMcpFurniture: chance(r, 0.85),
   };
   if (transcript.cwd) options.cwd = transcript.cwd;
+  // Rider-carrying calls (riders.ts): a random share of the calls, kept whole.
+  if (chance(r, 0.4)) {
+    const ids = transcript.messages.flatMap((m) => m.toolUses.map((u) => u.tool_use_id));
+    options.protectedResultIds = ids.filter(() => chance(r, 0.2));
+  }
   return { options, scorerKind: chance(r, 0.7) ? 'claude' : 'raw', timed: chance(r, 0.75) };
 }
 
@@ -370,6 +375,14 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
     }
   });
 
+  // 4b. A protected call's rows (its tool_use and its tool_result) come back as the input's own objects.
+  for (const id of setup.options.protectedResultIds ?? []) {
+    for (const m of input) {
+      const holds = m.toolUses.some((u) => u.tool_use_id === id) || (m.toolResults ?? []).some((x) => x.tool_use_id === id);
+      if (holds && !session.includes(m as SessionRow)) fail(`protected call ${id}: its row ${m.handle} was rebuilt or dropped`);
+    }
+  }
+
   // 5. Well-formed UTF-16 everywhere the engine will serialise; rebuilt results carry a boolean isError.
   session.forEach((m, k) => {
     if (!wellFormed(rowText(m))) fail(`lone surrogate in row ${k}`);
@@ -388,7 +401,7 @@ export function checkCase(transcript: Transcript, run: CaseRun): string[] {
   }
 
   // 7. Decisions agree with the output.
-  const calls = annotateCalls(collectToolCalls(input, preserve), input, resolved);
+  const calls = annotateCalls(collectToolCalls(input, preserve, protectRows(input, setup.options.protectedResultIds ?? [])), input, resolved);
   const byId = new Map(calls.map((c) => [c.id, c]));
   const after = new Map<string, string>();
   for (const m of session) for (const res of m.toolResults ?? []) after.set(res.tool_use_id, res.text);

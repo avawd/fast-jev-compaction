@@ -15,6 +15,8 @@ export function isPinned(index: number, total: number, preserveRecentMessages: n
 export function collectToolCalls(
   messages: readonly Message[],
   preserveRecentMessages: number,
+  /** Calls kept whole whatever their position (riders.ts). */
+  protectedIds: ReadonlySet<string> = new Set(),
 ): ToolCall[] {
   const results = new Map<string, { index: number; result: ToolResult }>();
   messages.forEach((message, index) => {
@@ -38,6 +40,7 @@ export function collectToolCalls(
         resultHead: sliceWhole(found.result.text, RESULT_HEAD_CHARS),
         isError: found.result.isError ?? false,
         pinned:
+          protectedIds.has(tool.tool_use_id) ||
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
           isPinned(found.index, messages.length, preserveRecentMessages),
       });

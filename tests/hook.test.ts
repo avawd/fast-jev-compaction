@@ -103,6 +103,37 @@ describe('compactSession', () => {
   });
 });
 
+describe('riders', () => {
+  const api = (rider: string) => async () => [
+    { role: 'user', content: [{ type: 'text', text: 'Refactor the parser.' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'u1', name: 'Read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', content: big }, { type: 'text', text: `<system-reminder>\n${rider}\n</system-reminder>` }] },
+  ];
+
+  it('keeps a result whole when a prompt typed during its call rides on it', async () => {
+    const h = harness({ fork: async ({ prompt }) => ({ isAnswered: true, text: dropAll(prompt) }), apiMessages: api('The user sent a new message while you were working:\nQUEUED') });
+    const input = transcript();
+    const out = (await h.compact({ trigger: 'manual', messages: input })) as { messages: SessionMessage[] };
+    expect(out.messages[2]).toBe(input[2]);
+    expect(h.debugLogs.join('\n')).toMatch(/1 result kept whole: riders/);
+  });
+
+  it('still truncates it when only an ephemeral reminder rides on it', async () => {
+    const h = harness({ userConfig: { useClaudeScorer: false }, apiMessages: api('<total_tokens>5 tokens left</total_tokens>') });
+    const input = transcript();
+    const out = (await h.compact({ trigger: 'manual', messages: input })) as { messages: SessionMessage[] };
+    expect(out.messages[2]).not.toBe(input[2]);
+  });
+
+  it('prunes as before, and says so in the debug log, when the API view is unavailable', async () => {
+    const h = harness({ userConfig: { useClaudeScorer: false } });
+    const input = transcript();
+    const out = (await h.compact({ trigger: 'manual', messages: input })) as { messages: SessionMessage[] };
+    expect(out.messages[2]).not.toBe(input[2]);
+    expect(h.debugLogs.join('\n')).toMatch(/riders unknown/);
+  });
+});
+
 describe('register', () => {
   const prunable = () => ({ trigger: 'auto', messages: transcript() });
   // Only Claude can prune this one: no rule applies to a single Bash call.
