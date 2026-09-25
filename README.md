@@ -95,8 +95,10 @@ count still accounts for the original result. It is never truncated twice over (
 **How far verbatim compaction can go in a long session.** Replayed over the maintainers' corpus
 (`npm run eval:offline -- --replay`, a 400k window), tool results were under a fifth of the context at
 the first compaction and about a tenth at later ones. The rest was the system prompt and tools, user
-and assistant text, tool inputs, and the model's earlier thinking, which stays in context (a fit to
-the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never touches. So a prune
+and assistant text, tool inputs, and context the hook never sees, which grows with the session (a fit
+to the sessions' API usage puts it at a quarter to nearly half of the tokens) and which pruning never
+touches. It is not the model's earlier thinking: leaving old turns' thinking rows out of a live
+compaction did not change the next request's input tokens. So a prune
 frees less each time, and on every long session replayed one of the later compactions still fell back
 to the summary. The two exceptions above cut those fallbacks by about a fifth (19 to 15 over four
 sessions and three scorer bounds). Mean fact survival rose on seven of those twelve runs, held on one and fell by at
@@ -153,6 +155,7 @@ debug log names the keys it looked for).
 | Option | Default | |
 | --- | --- | --- |
 | `compactAtPercent` | 60 | Context % at which compaction is requested (1–100). After the plugin's own compaction it waits until context reads under this again before asking once more, so a prune that leaves context above it is not followed by a compaction on every turn |
+| `compactAtTokens` | 300000 | Context tokens at which compaction is requested, whatever the percent reads; either threshold triggers it. On a 1M-token window 60% waits until 600k tokens, too late to prune verbatim in time. 0 turns it off. When a turn is already running (a busy session: agent messages, task notices), the request is retried every 3 s for up to a minute |
 | `minReductionRatio` | 0.25 | Characters saved over tool-result characters; below this, fall back to the built-in summary |
 | `preserveRecentMessages` | 6 | Newest messages never touched (the first is always kept). Counted as Claude Code hands them over: one per content block, so a turn with a thinking block, some text and two tool calls, and the results of those calls, is several messages, not one |
 | `truncateHeadChars` | 300 | Characters kept from a truncated result |

@@ -7,10 +7,12 @@
  *   npm run eval:offline -- --replay <label|file> [--whole] [--arms rules,trunc,floor]
  *       [--window 400000] [--compact-at 0.6] [--auto-at 0.92] [--options '<json>'] [--json <out>]
  *
- * Context tokens are modelled as overhead + a·visible chars + b·hidden (thinking) chars, fitted by
+ * Context tokens are modelled as overhead + a·visible chars + b·hidden chars, fitted by
  * least squares to the transcript's own API usage rows (`--fit none` uses the corpus-wide fit).
- * The hook never sees thinking, but the model's context carries it, and verbatim pruning never
- * removes it: only a built-in summary does. No model calls are made.
+ * "Hidden" is measured as the stored thinking (text and signature) chars, the best predictor of what
+ * the hook cannot see; it is a proxy, not the thinking itself. A live A/B (identical rules-only
+ * pruning, old-turn thinking rows left out or kept) gave the same next-request input tokens, so
+ * leaving thinking out does not shrink it. Pruning never touches the hidden part. No model calls.
  */
 import { contextBlob, factSets, survival, type Fact } from './facts.ts';
 import { carriedPrefix, type EvalMessage, type Segment } from './parse.ts';
@@ -27,7 +29,7 @@ export interface TokenModel {
 
 /**
  * Least-squares fit over this corpus's 5,897 assistant usage rows (median error 5.5%, p90 11.7%):
- * ~69k tokens of system prompt and tools, 1.54 visible chars per token, 0.16 tokens per thinking char.
+ * ~69k tokens of system prompt and tools, 1.54 visible chars per token, 0.16 tokens per hidden (thinking) char.
  */
 export const CORPUS_TOKEN_MODEL: TokenModel = { overhead: 69_465, perVisibleChar: 0.648, perHiddenChar: 0.162 };
 
@@ -154,7 +156,7 @@ export function idempotence(before: readonly EvalMessage[], after: readonly Eval
 
 export interface Stream {
   messages: EvalMessage[];
-  /** Hidden (thinking) chars per row. */
+  /** Hidden-context proxy per row: its stored thinking chars (see the header). */
   hidden: number[];
   /** API usage tokens per row (0 where none). */
   usage?: number[];
@@ -195,8 +197,6 @@ export interface ReplayConfig {
   options: Record<string, unknown>;
   /** Size of a built-in summary, in tokens (the corpus's summaries were 13k-16k). */
   summaryTokens?: number;
-  /** Counterfactual: a verbatim pass also drops thinking-only rows older than this many rows. */
-  simulateDropThinkingAfter?: number;
   /** Rows a built-in summary keeps after itself (the corpus's boundaries preserved 6-7). */
   summaryKeeps?: number;
 }
@@ -243,16 +243,6 @@ const SAMPLE_EVERY = 25;
 function summaryMessage(tokens: number, model: TokenModel): EvalMessage {
   // Filler with no distinctive tokens: a summary's facts are not credited (a conservative bound).
   return { role: 'user', text: 'summary '.repeat(Math.max(1, Math.round(tokens / model.perVisibleChar / 8))), toolUses: [] };
-}
-
-/**
- * Counterfactual (harness only; the plugin never does this): drops thinking-only rows older than
- * `after` rows. The model's context keeps thinking, which verbatim pruning never touches.
- */
-function dropOldThinking(context: EvalMessage[], hidden: ReadonlyMap<EvalMessage, number>, after: number | undefined): EvalMessage[] {
-  if (after === undefined) return context;
-  const cut = context.length - after;
-  return context.filter((m, k) => !(k < cut && m.role === 'assistant' && m.text === '' && m.toolUses.length === 0 && (hidden.get(m) ?? 0) > 0));
 }
 
 function factSurvival(facts: readonly Fact[], upTo: number, context: readonly EvalMessage[]): { survived: number; total: number } {
@@ -305,7 +295,7 @@ export async function replay(api: PluginApi, stream: Stream, arm: Arm, cfg: Repl
     const priorPasses = verbatimPasses;
     const prefix = stream.messages.slice(0, at + 1);
     if (pass) {
-      context = dropOldThinking([...run.result.messages], hidden, cfg.simulateDropThinkingAfter);
+      context = [...run.result.messages];
       verbatimPasses += 1;
     } else {
       verbatimPasses = 0;

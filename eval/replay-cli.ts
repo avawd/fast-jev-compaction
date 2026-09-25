@@ -93,7 +93,7 @@ export async function replayMain(api: PluginApi, a: Map<string, string[]>, corpu
   if (!whole && !seg) throw new Error(`${entry.label}: segment ${index} absent (${segs.length} segments)`);
   const stream = whole ? buildStream(segs) : buildStream([seg!]);
 
-  // --fit corpus: the corpus-wide model; --fit visible: thinking not carried (a sensitivity run).
+  // --fit corpus: the corpus-wide model; --fit visible: no hidden term (a sensitivity run).
   const fit = a.get('fit')?.[0];
   const fitted = fit === 'corpus' ? undefined : fitTokenModel(usagePoints(stream), fit === 'visible');
   const model = fitted ?? (fit === 'visible' ? { ...CORPUS_TOKEN_MODEL, perHiddenChar: 0 } : CORPUS_TOKEN_MODEL);
@@ -106,14 +106,13 @@ export async function replayMain(api: PluginApi, a: Map<string, string[]>, corpu
     autoAt: num(a, 'auto-at', 0.92),
     minReduction: num(a, 'min-reduction', (options['minReductionRatio'] as number | undefined) ?? 0.25),
     options: cwd && options['cwd'] === undefined ? { ...options, cwd } : options,
-    ...(a.has('sim-drop-thinking') ? { simulateDropThinkingAfter: num(a, 'sim-drop-thinking', 100) } : {}),
   };
   const arms = (a.get('arms')?.[0]?.split(',') ?? [...ARMS]) as Arm[];
 
   console.log(`verbatim-compaction replay — src ${api.srcDir} (${api.head}); ${entry.label}${whole ? ` (whole file, ${segs.length} segments)` : ` [${index}]`}: ${stream.messages.length} rows`);
   console.log(
     `token model (${fitted ? 'fitted to this transcript' : 'corpus fit'}): ${Math.round(model.overhead)} + ${model.perVisibleChar.toFixed(3)}·visible + ` +
-      `${model.perHiddenChar.toFixed(3)}·thinking chars; ${modelError(stream, model)}`,
+      `${model.perHiddenChar.toFixed(3)}·hidden (thinking-char proxy); ${modelError(stream, model)}`,
   );
   console.log(`window ${k(cfg.window)}; plugin requests at ${cfg.compactAt * 100}% (${k(cfg.window * cfg.compactAt)}), Claude Code auto-compacts at ${cfg.autoAt * 100}%; gate ${cfg.minReduction}; options ${JSON.stringify(options)}`);
 

@@ -1,10 +1,11 @@
 {
   "name": "verbatim-compaction",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Verbatim compaction for Claude Code: stale tool output pruned by local rules and one session fork; no summary, no third-party API.",
   "license": "MIT",
   "userConfig": {
     "compactAtPercent": { "type": "number", "title": "Compaction percentage", "description": "Context percentage at which turn.complete requests compaction. 1–100.", "default": 60 },
+    "compactAtTokens": { "type": "number", "title": "Compaction token count", "description": "Context tokens at which turn.complete requests compaction, whatever the percentage reads (on a 1M window 60% is 600k tokens). 0 turns it off.", "default": 300000 },
     "minReductionRatio": { "type": "number", "title": "Minimum reduction ratio", "description": "Minimum characters saved, as a share of the transcript's tool-result characters, required to replace history; below it the built-in summary runs. 0.01–0.95.", "default": 0.25 },
     "preserveRecentMessages": { "type": "number", "title": "Recent messages to preserve", "description": "Number of newest messages never touched, counted one per content block (text, thinking, tool call, tool result) as Claude Code hands them over.", "default": 6 },
     "truncateHeadChars": { "type": "number", "title": "Truncated tool result head", "description": "Characters kept from a truncated tool result.", "default": 300 },

@@ -7,6 +7,10 @@
   - **`trigger === 'precompute'`**: the full pipeline below, run in the background. It returns
     the pruned messages (kept by the engine for the compaction that comes) or `next(event)` below
     `minReductionRatio`. The forks always get the 45 s ceiling, and it reports in the log only.
+  - **A compaction of the same transcript already running** (single flight, per transcript and
+    per kind: a precompute does not hold up a foreground one): returns `{ skip }`. Handing it to
+    `next(event)` would start a concurrent built-in summary; on a resumed 965k-token session seven
+    dispatches arrived at once and seven summary requests went out.
   - **An empty transcript** (`event.messages` is empty): returns `{ skip: reason }` itself. The
     engine's `next()` rejects a compaction argument with empty `messages`, even one passed through
     unchanged, so handing it on would fail the hook.
@@ -25,10 +29,13 @@
     returns `{ skip }` and waits for context to drop, as after a compaction. A debug
     log line records the wait mode and each fork's size, time and status.
 - **`turn.complete`** — after a top-level turn ends in an answer, reads `$.session.usage()` and
-  calls `$.session.compact()` once `context.percent` reaches `compactAtPercent`, guarded against
-  overlapping runs. The headless rejection of `$.session.compact()` (every `-p` / SDK session
-  on 2.1.281, "not available in a headless … session") turns the trigger off for the rest of the
-  session, reported once by toast and log; any other rejection is logged and retried next turn.
+  calls `$.session.compact()` once `context.percent` reaches `compactAtPercent` or
+  `context.tokens` reaches `compactAtTokens`, guarded against overlapping runs. The headless
+  rejection of `$.session.compact()` (every `-p` / SDK session on 2.1.281, "not available in a
+  headless … session") turns the trigger off for the rest of the session, reported once by toast
+  and log. Any other rejection (a queued turn already running) goes to the debug log and is
+  retried by a `$.clock.after` timer every 3 s, up to 20 times, so a busy session still compacts
+  in a gap between turns; a turn end while a retry is pending leaves it to the timer.
   A transcript of 4096 messages or more goes to `next(event)` untouched. Once `next(event)` has
   been called, a throw from it is rethrown rather than answered with a second `next(event)`.
 
