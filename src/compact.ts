@@ -3,7 +3,7 @@ import { collectToolCalls } from './calls.js';
 import { resultChars } from './gate.js';
 import { stripFurnitureInMessages } from './rules-mcp.js';
 import { planShapes } from './shape.js';
-import { sliceWhole, sliceWholeEnd } from './text.js';
+import { truncatedResultText } from './truncate.js';
 import type {
   CallDecision,
   CompactOptions,
@@ -26,7 +26,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   stripMcpFurniture: true,
 };
 
-export const TRUNCATION_NOTE_PREFIX = '[verbatim-compaction truncated';
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -58,22 +57,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     stripMcpFurniture: flag(options.stripMcpFurniture, DEFAULT_OPTIONS.stripMcpFurniture),
     ...(typeof options.cwd === 'string' && options.cwd.startsWith('/') ? { cwd: options.cwd } : {}),
   };
-}
-
-/** A result this short is left whole: the note would cost about as much as it saves. */
-function shrinks(resultChars: number, headChars: number, tailChars = 0): boolean {
-  return resultChars > headChars + tailChars + 120;
-}
-
-function truncatedResultText(text: string, isError: boolean, headChars: number, tailChars = 0): string {
-  if (!shrinks(text.length, headChars, tailChars)) return text;
-  const kept = sliceWhole(text, headChars);
-  const end = sliceWholeEnd(text, tailChars);
-  const head = kept.length > 0 ? `${kept}\n` : '';
-  const tail = end.length > 0 ? `\n${end}` : '';
-  return `${head}${TRUNCATION_NOTE_PREFIX} ${text.length - kept.length - end.length} chars of this tool result${
-    isError ? ' (error)' : ''
-  }; re-run the tool if needed]${tail}`;
 }
 
 /**
@@ -166,7 +149,8 @@ function preferTruncation(decision: CallDecision, call: ToolCall, messages: read
 /** A drop_result that would leave the result unchanged is a keep, so the stats count what happened. */
 function unlessNoop(decision: CallDecision, text: string, headChars: number, tailChars = 0): CallDecision {
   if (decision.action !== 'drop_result') return decision;
-  return shrinks(text.length, decision.headChars ?? headChars, tailChars) ? decision : { ...decision, action: 'keep' };
+  const unchanged = truncatedResultText(text, false, decision.headChars ?? headChars, tailChars) === text;
+  return unchanged ? { ...decision, action: 'keep' } : decision;
 }
 
 /** Characters of text, tool input and tool output a message holds. */
