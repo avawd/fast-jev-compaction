@@ -4,6 +4,7 @@
  *   npm run eval:offline -- [--src <worktree>] [--corpus <file>]   (default $VC_EVAL_CORPUS, then eval/corpus.local.json)
  *                           [--only <label,...>] [--json <out.json>]
  *                           [--options '<plugin options json>'] [--min-reduction 0.25]
+ *                           [--categories]   (also print chars by category and what each arm removed)
  *   npm run eval:offline -- --compare <a.json> <b.json>
  *   npm run eval:offline -- --facts <label> [--limit 40]   (prints never-echoed facts; private data, stdout only)
  *   npm run eval:offline -- --facts <label|file> --recall-out eval/recall-x.local.json [--ne 25 --echoed 10 --batch 10 --seed 1]
@@ -16,6 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { categorize, categoryDelta, categoryRows, type Categories } from './categories.ts';
 import { contextBlob, factSets, resultsById, survival, type FactSets, type Survival } from './facts.ts';
 import { compactedContext, loadSegments, type Segment } from './parse.ts';
 import { ARMS, loadPlugin, runArm, type Arm, type PluginApi } from './plugin.ts';
@@ -43,6 +45,8 @@ export interface ArmReport {
   pinnedWholeBytes?: number;
   filled: number;
   unfilled: number;
+  /** Hook-visible chars this arm removed, by category (eval/categories.ts). */
+  categoriesRemoved?: Categories;
 }
 
 export interface SegmentReport {
@@ -56,6 +60,8 @@ export interface SegmentReport {
   calls: number;
   unpinned: number;
   unpinnedResultBytes: number;
+  /** Hook-visible chars by category before compaction (eval/categories.ts). */
+  categories?: Categories;
   arms: Record<Arm, ArmReport>;
   /** What the NEXT segment of the same file actually holds (a live outcome, when one exists). */
   next?: { kind: 'summary' | 'verbatim'; neverEchoed: { survived: number; total: number; pct: number }; laterRef?: { lost: number; total: number } };
@@ -149,6 +155,7 @@ async function evalSegment(
   const unpinnedResultBytes = unpinned.reduce((s, c) => s + c.resultChars, 0);
   const facts = factSets(seg.messages, unpinned);
 
+  const categories = categorize(seg.messages);
   const arms = {} as Record<Arm, ArmReport>;
   for (const arm of ARMS) {
     const run = await runArm(api, seg.messages, arm, options);
@@ -177,6 +184,7 @@ async function evalSegment(
       pinnedWholeBytes,
       filled: run.filled,
       unfilled: run.unfilled,
+      categoriesRemoved: categoryDelta(categories, categorize(run.result.messages)),
     };
     if (run.unfilled > 0) {
       console.warn(`WARN ${entry.label}: arm ${arm} left ${run.unfilled} unpinned calls at 'default' — the Scorer contract may have changed; floor/trunc are not what they claim`);
@@ -192,6 +200,7 @@ async function evalSegment(
     calls: calls.length,
     unpinned: unpinned.length,
     unpinnedResultBytes,
+    categories,
     arms,
   };
   const next = nextReport(segs, seg, facts);
@@ -233,6 +242,21 @@ function printTable(r: OfflineReport): void {
     console.log(`  ${s.label} rules decisions: ${d || '(none)'}${pinned}`);
   }
   for (const k of r.skipped) console.log(`  skipped ${k.label}: ${k.reason}`);
+}
+
+/** `--categories`: per segment, hook-visible chars by category and what each arm removed from each. */
+export function printCategories(r: OfflineReport): void {
+  for (const s of r.segments) {
+    if (!s.categories) continue;
+    const removed = Object.fromEntries(ARMS.map((a) => [a, s.arms[a].categoriesRemoved ?? {}]));
+    console.log(`\n${s.label}${s.live ? '*' : ''} [${s.segment}] by category (chars; est tok = chars x measured tokens/char; removed = chars and % of that category)`);
+    console.log(`| category | chars | share | est tok | ${ARMS.map((a) => `${a} removed`).join(' | ')} |`);
+    console.log(`|---|---|---|---|${ARMS.map(() => '---').join('|')}|`);
+    for (const row of categoryRows(s.categories, removed)) {
+      const cells = ARMS.map((a) => `${kb(row.removed[a] ?? 0)} (${row.removedPct[a]}%)`);
+      console.log(`| ${row.category} | ${kb(row.chars)} | ${row.sharePct}% | ${kb(row.estTokens)} | ${cells.join(' | ')} |`);
+    }
+  }
 }
 
 function compare(aPath: string, bPath: string): void {
@@ -341,6 +365,7 @@ async function main(): Promise<void> {
     console.error(`  ${entry.label}: ${Date.now() - started}ms`);
   }
   printTable(report);
+  if (a.has('categories')) printCategories(report);
   const jsonPath = resolve(a.get('json')?.[0] ?? join(HERE, 'out', `offline-${api.head.replace(/[^\w.@+-]/g, '_')}.json`));
   mkdirSync(dirname(jsonPath), { recursive: true });
   writeFileSync(jsonPath, JSON.stringify(report, null, 2) + '\n');

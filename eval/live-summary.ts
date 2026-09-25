@@ -96,9 +96,22 @@ export interface StreamFacts {
   preTokens?: number;
   postTokens?: number;
   boundaryMs?: number;
+  /**
+   * Real context, from API usage (input + cache read + cache creation): the last request before the
+   * compact_boundary and the first one after it. `postTokens` undercounts by ~120-140k; this does not.
+   */
+  realBefore?: number;
+  realAfter?: number;
   answers: string[];
   recallToolUses: string[];
   results: number;
+}
+
+function requestTokens(message: Record<string, any> | undefined): number {
+  if (!message || message['model'] === '<synthetic>') return 0;
+  const u = (message['usage'] ?? {}) as Record<string, unknown>;
+  const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+  return n('input_tokens') + n('cache_read_input_tokens') + n('cache_creation_input_tokens');
 }
 
 export function parseStream(text: string): StreamFacts {
@@ -121,6 +134,13 @@ export function parseStream(text: string): StreamFacts {
       out.boundaryMs = cm['duration_ms'];
       afterBoundary = true;
       continue;
+    }
+    if (o['type'] === 'assistant') {
+      const tokens = requestTokens(o['message']);
+      if (tokens > 0) {
+        if (!afterBoundary) out.realBefore = tokens;
+        else out.realAfter ??= tokens;
+      }
     }
     if (o['type'] === 'assistant' && afterBoundary && compactResultSeen) {
       for (const b of (o['message']?.['content'] ?? []) as Array<Record<string, unknown>>) {
@@ -239,6 +259,8 @@ async function main(): Promise<void> {
       hookErrors: log.hookErrors,
       preTokens: stream.preTokens,
       postTokens: stream.postTokens,
+      realBefore: stream.realBefore,
+      realAfter: stream.realAfter,
       recall,
       recallToolUses: stream.recallToolUses,
       // Only a verbatim outcome prints the hook's message count ("kept X/Y"); a fallback has nothing to check against.
@@ -253,8 +275,8 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nlive eval ${dir}\nplugin-dir ${meta.noPlugin ? 'NONE (baseline: built-in summary)' : meta.pluginDir}; session ${meta.session}; sets ${sets.map((s) => s.name).join(',')}`);
-  console.log('| run | loaded from | forks (ms) | outcome | fork api-err | fallback | pre→post tok | hook ms (incl. next) | ' + sets.map((s) => `recall ${s.name}`).join(' | ') + ' | ' + sets.map((s) => `ctx ${s.name} before→after`).join(' | ') + ' | parser |');
-  console.log('|' + '---|'.repeat(8 + sets.length * 2 + 1));
+  console.log('| run | loaded from | forks (ms) | outcome | fork api-err | fallback | pre→post tok | real ctx before→after (API usage) | hook ms (incl. next) | ' + sets.map((s) => `recall ${s.name}`).join(' | ') + ' | ' + sets.map((s) => `ctx ${s.name} before→after`).join(' | ') + ' | parser |');
+  console.log('|' + '---|'.repeat(9 + sets.length * 2 + 1));
   for (const r of rows as Array<Record<string, any>>) {
     const loaded = (r.pluginLoaded as string[]).map((d) => (d === meta.pluginDir ? 'plugin-dir' : d)).join(',') || (meta.noPlugin ? 'none (baseline)' : 'NONE');
     const forks = `${r.forks.length}: ${r.forks.map((f: { ms?: number; line: string }) => f.ms ?? f.line.slice(0, 30)).join('/')}`;
@@ -266,7 +288,7 @@ async function main(): Promise<void> {
       return `${b}→${a}/${s.expected.length}`;
     });
     const parser = !r.parserCheck ? '-' : r.parserCheck.ok === null ? `n/a (parsed ${r.parserCheck.parsed})` : `${r.parserCheck.ok ? 'ok' : 'MISMATCH'} ${r.parserCheck.parsed}/${r.parserCheck.hookSaw}`;
-    console.log(`| ${r.run} | ${loaded}${r.wrongCopyLoaded ? ' (WRONG COPY)' : ''} | ${forks} | ${(r.outcome ?? 'NO OUTCOME LINE').slice(0, 110)} | ${r.forkApiErrors} | ${r.fallback ? 'YES' : 'no'} | ${r.preTokens ?? '-'}→${r.postTokens ?? '-'} | ${r.hookSettledMs ?? '-'} | ${recall.join(' | ')} | ${ctx.join(' | ')} | ${parser} |`);
+    console.log(`| ${r.run} | ${loaded}${r.wrongCopyLoaded ? ' (WRONG COPY)' : ''} | ${forks} | ${(r.outcome ?? 'NO OUTCOME LINE').slice(0, 110)} | ${r.forkApiErrors} | ${r.fallback ? 'YES' : 'no'} | ${r.preTokens ?? '-'}→${r.postTokens ?? '-'} | ${realCtx(r.realBefore, r.realAfter)} | ${r.hookSettledMs ?? '-'} | ${recall.join(' | ')} | ${ctx.join(' | ')} | ${parser} |`);
   }
   const all = rows as Array<Record<string, any>>;
   console.log(`\nruns ${all.length}; fork api-errors ${all.reduce((n, r) => n + r.forkApiErrors, 0)}; fallbacks ${all.filter((r) => r.fallback).length}; timeouts ${all.filter((r) => r.timeout).length}; wrong copy ${all.filter((r) => r.wrongCopyLoaded).length}; recall FAILED by tool use ${all.filter((r) => r.recallToolUses.length).length}`);
@@ -282,6 +304,13 @@ async function main(): Promise<void> {
   const summaryPath = join(dir, 'summary.json');
   writeFileSync(summaryPath, JSON.stringify({ meta, rows }, null, 2) + '\n');
   console.log(`\nJSON: ${summaryPath}\nforked transcripts left behind: ${all.map((r) => r.forkedSession).filter(Boolean).join(' ')}`);
+}
+
+/** `266k→231k (-13%)`: real context before and after, from API usage. */
+export function realCtx(before?: number, after?: number): string {
+  if (!before || !after) return `${before ?? '-'}→${after ?? '-'}`;
+  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  return `${k(before)}→${k(after)} (${Math.round((100 * (after - before)) / before)}%)`;
 }
 
 /** Per-fact recall and retention over all runs, by stratum, and every missed never-echoed fact with its cause. */
