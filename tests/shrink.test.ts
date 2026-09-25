@@ -292,6 +292,21 @@ describe('review of cee10e7', () => {
   });
 });
 
+describe('pinned calls (riders.ts)', () => {
+  it('never rebuilds a run holding a pinned call, nor an earlier run of its chain', () => {
+    const messages = [
+      msg('user', 'go'),
+      use('a', 'Bash', { command: heredoc }), res('a', 'one'),
+      use('b', 'Bash', { command: heredoc }), res('b', 'two'),
+      ...filler(30),
+    ];
+    const calls = annotateCalls(collectToolCalls(messages, 6), messages, { staleAfterMessages: 20 }).map((c) => (c.tool_use_id === 'b' ? { ...c, pinned: true } : c));
+    const out = shrinkOld(messages, messages, calls, { shrinkOldInputs: true, staleAfterMessages: 20, preserveRecentMessages: 6 });
+    expect(out.inputs).toBe(0);
+    out.messages.forEach((m, k) => expect(m).toBe(messages[k]));
+  });
+});
+
 describe('compact with shrinking', () => {
   it('counts what shrinking saved and hands the engine a rebuilt row without a handle', async () => {
     const messages = [msg('user', 'go'), use('b1', 'Bash', { command: heredoc }), res('b1', 'ok'), ...filler(30)].map((m, i) => ({ ...m, handle: `h${i}` }));
